@@ -1,13 +1,4 @@
-/*
- * Observer 管理面板逻辑。
- *
- * 设计约束（见 CONTRACT.md「Observer frontend slice」）：
- * - 无构建步骤、无第三方依赖；纯同源 fetch。
- * - 管理密钥只存在于 password 输入框与内存，绝不写入任何浏览器持久化存储、URL 或控制台。
- * - 所有服务端文本一律通过 textContent 渲染，禁止任何 HTML 字符串注入与动态代码求值。
- * - 列表刷新绝不触发请求体读取；请求体按需懒加载并要求二次确认，关闭时清空。
- * - 主题跟随同源父级 documentElement 的 data-theme，跨域或独立打开时回退系统偏好。
- */
+/* Dependency-free dashboard. Credentials stay in memory; bodies are revealed on demand. */
 (function () {
   'use strict';
 
@@ -24,7 +15,8 @@
     '30d': 30 * 24 * 60 * 60 * 1000
   };
   var DEFAULT_RANGE = '24h';
-  var EXACT_ACCOUNTING = 'exact';
+  var EXACT_ACCOUNTING = 'complete';
+  var MAX_REQUEST_ITEMS = 500;
 
   // 主题令牌白名单：仅同步这些视觉变量，绝不读取父级凭据 / DOM 内容。
   var THEME_TOKENS = [
@@ -65,7 +57,7 @@
   function resolveThemeSource(input) {
     var i = input || {};
     if (i.framed && i.sameOrigin) return normalizeTheme(i.parentTheme);
-    return i.prefersDark ? 'dark' : '';
+    return i.prefersDark ? 'dark' : 'white';
   }
 
   function isLoopbackHost(host) {
@@ -84,7 +76,7 @@
   // 从当前资源路径推导管理 API 前缀：保留反向代理前缀与 v0/v8 版本段。
   function deriveApiBase(pathname) {
     var p = toStr(pathname);
-    if (!p) return DEFAULT_API_BASE;
+    if (!p || !safePath(p)) return DEFAULT_API_BASE;
     p = p.replace(ASSET_SUFFIX, '');
     p = p.replace(/\/+$/, '');
     var idx = p.indexOf(SEGMENT_RESOURCE);
@@ -98,10 +90,11 @@
   // 构造同源相对请求地址；拒绝绝对 URL / 协议相对 URL 以防 SSRF 式跳转。
   function buildApiUrl(base, path, params) {
     var b = toStr(base).trim();
-    if (!b || b.charAt(0) !== '/' || b.indexOf('//') === 0) return '';
+    if (!safePath(b)) return '';
     if (/^[a-z][a-z0-9+.-]*:/i.test(b)) return '';
+    if (/^\/\/|\\/.test(toStr(path))) return '';
     var suffix = toStr(path).replace(/^\/+/, '');
-    if (!suffix) return '';
+    if (!/^[a-z]+$/.test(suffix)) return '';
     var url = b.replace(/\/+$/, '') + '/' + suffix;
     var query = [];
     if (params) {
@@ -115,11 +108,16 @@
     return query.length ? url + '?' + query.join('&') : url;
   }
 
-  // RFC3339 的整分钟边界，与服务端分钟对齐聚合一致。
+  function safePath(value) {
+    return /^\/(?!\/)/.test(value) && !/[\\?#\s]/.test(value) &&
+      !/%(?:2f|5c|2e)/i.test(value) && !/(?:^|\/)\.\.?(?:\/|$)/.test(value);
+  }
+
+  // Keep the current minute visible; summary alignment belongs to the server.
   function rangeBounds(kind, nowMs) {
     var ms = Object.prototype.hasOwnProperty.call(RANGE_MS, kind) ? RANGE_MS[kind] : RANGE_MS[DEFAULT_RANGE];
     var now = typeof nowMs === 'number' && isFinite(nowMs) ? nowMs : Date.now();
-    var to = Math.floor(now / 60000) * 60000;
+    var to = now;
     var from = to - ms;
     return { from: new Date(from).toISOString(), to: new Date(to).toISOString() };
   }
@@ -209,6 +207,21 @@
     return isFinite(n) ? n : null;
   }
 
+  function aggregateCost(source) {
+    var requests = counter(source, 'requests');
+    var unknown = counter(source, 'unpriced_requests');
+    if (requests > 0 && unknown >= requests) return '未定价';
+    var value = formatCost(nullCost(source));
+    return unknown > 0 ? value + ' 已定价小计；未知 ' + formatInt(unknown) + ' 条' : value;
+  }
+
+  function validateBodyDetail(detail, requestId) {
+    if (!detail || detail.request_id !== requestId || typeof detail.body !== 'string') {
+      throw new Error('请求体响应不匹配或格式无效');
+    }
+    return detail;
+  }
+
   function buildOverview(source) {
     var requests = counter(source, 'requests');
     var failed = counter(source, 'failed_requests');
@@ -269,10 +282,10 @@
       {
         key: 'cost',
         label: '成本 (USD)',
-        value: hasData ? formatCost(cost) : '—',
+        value: hasData ? (requests > 0 && unpriced >= requests ? '未定价' : formatCost(cost)) : '—',
         sub: hasData
           ? (unpriced > 0
-              ? '未定价 ' + formatInt(unpriced) + ' 条'
+              ? (unpriced < requests ? '已定价小计；' : '') + '未定价 ' + formatInt(unpriced) + ' 条'
               : (cost === null ? '缺少价格配置' : '按已记录价格'))
           : '',
         warn: hasData && (unpriced > 0 || cost === null)
@@ -296,8 +309,8 @@
         output: formatCompact(counter(g, 'output_tokens')),
         cacheRead: formatCompact(counter(g, 'cache_read_tokens')),
         cacheCreation: formatCompact(counter(g, 'cache_creation_tokens')),
-        cost: formatCost(nullCost(g)),
-        costUnpriced: nullCost(g) === null && counter(g, 'requests') > 0,
+        cost: aggregateCost(g),
+        costUnpriced: nullCost(g) === null || counter(g, 'unpriced_requests') > 0,
         failedRaw: counter(g, 'failed_requests')
       });
     }
@@ -605,7 +618,7 @@
       note,
       s.captureBodies
         ? '请求体捕获已开启：最多保存 ' + formatDuration(s.bodyRetentionSeconds) + '，查看时必须二次确认，关闭弹窗即清空。'
-        : '请求体捕获已关闭（capture-bodies: false）：列表仅显示元数据，请求体不会写入磁盘。如需查看，请在 config.yaml 中设置 capture-bodies: true 后重启。'
+        : '请求体捕获已关闭（capture-bodies: false）：列表仅显示元数据，请求体不会写入磁盘。如需查看，请在 config.yaml 中设置 capture-bodies: true，交由 CPA 重载配置；若部署不支持自动重载，请按部署方式重新加载。'
     );
     container.appendChild(note);
   }
@@ -774,7 +787,7 @@
     return option;
   }
 
-  function createThemeController(win, doc) {
+  function createThemeController(win, doc, onChange) {
     var observer = null;
 
     function parentDocument() {
@@ -824,6 +837,7 @@
       if (theme) doc.documentElement.setAttribute('data-theme', theme);
       else doc.documentElement.removeAttribute('data-theme');
       syncTokens(pd);
+      if (onChange) onChange();
     }
 
     return {
@@ -880,7 +894,9 @@
 
     var loc = win.location || {};
     var apiBase = deriveApiBase(loc.pathname);
-    var theme = createThemeController(win, doc);
+    var theme = createThemeController(win, doc, function () {
+      if (state) renderChart(els.chart, state.series);
+    });
     theme.start();
 
     var state = {
@@ -902,6 +918,7 @@
     var moreGate = createGate();
     var bodyGate = createGate();
     var queryAbort = null;
+    var moreAbort = null;
     var bodyAbort = null;
     var bodyState = BODY_IDLE;
 
@@ -939,21 +956,40 @@
       }
     }
 
-    function handleAuthFailure(err) {
+    function abortMore() {
+      moreGate.invalidate();
+      if (moreAbort) moreAbort.abort();
+      moreAbort = null;
+      state.loadingMore = false;
+      els.loadMore.disabled = false;
+    }
+
+    function disconnect() {
       state.connected = false;
+      state.key = '';
+      queryGate.invalidate();
+      abortQuery();
+      abortMore();
+      clearBodyViewer();
+      closeBody();
       els.refresh.disabled = true;
       els.loadMore.hidden = true;
+    }
+
+    function handleAuthFailure(err) {
+      disconnect();
       setStatus((err && err.message) || '管理密钥无效', 'error');
       setBanner('认证失败：请确认管理密钥正确、远程管理已开启，或当前客户端在允许范围内。');
     }
 
     function fetchJson(path, params, signal) {
+      if (!state.connected || !state.key) return Promise.reject(new Error('尚未连接'));
       var url = buildApiUrl(apiBase, path, params);
       if (!url) return Promise.reject(new Error('无效的接口地址'));
       if (typeof win.fetch !== 'function') return Promise.reject(new Error('浏览器不支持 fetch'));
       var headers = {};
       if (state.key) headers.Authorization = 'Bearer ' + state.key;
-      var init = { method: 'GET', headers: headers, credentials: 'same-origin', cache: 'no-store' };
+      var init = { method: 'GET', headers: headers, credentials: 'same-origin', cache: 'no-store', redirect: 'error' };
       if (signal) init.signal = signal;
       return win.fetch(url, init).then(function (res) {
         return res.text().then(function (text) {
@@ -1015,17 +1051,24 @@
     function applyRequestsPage(page, append) {
       var p = page && typeof page === 'object' ? page : {};
       var items = Array.isArray(p.items) ? p.items : [];
-      state.items = append ? state.items.concat(items) : items;
+      state.items = (append ? state.items.concat(items) : items).slice(0, MAX_REQUEST_ITEMS);
       state.cursor = typeof p.next_cursor === 'string' ? p.next_cursor : '';
-      state.hasMore = p.has_more === true && !!state.cursor;
+      state.hasMore = p.has_more === true && !!state.cursor && state.items.length < MAX_REQUEST_ITEMS;
       renderRequestsTable(doc, els.requestsBody, state.items, openBody);
-      setText(els.requestsNote, state.items.length ? '已加载 ' + state.items.length + ' 条' : '');
+      updateRequestsNote();
       els.loadMore.hidden = !state.hasMore;
       els.loadMore.disabled = false;
     }
 
+    function updateRequestsNote() {
+      setText(els.requestsNote, '已加载 ' + state.items.length + ' 条（最多 ' + MAX_REQUEST_ITEMS +
+        ' 条）；请求明细仅保留 ' + formatDuration(state.retention) + '，统计按所选时间范围展示');
+    }
+
     function applySettings(settings) {
       renderSettings(doc, els.settingsBody, settings);
+      state.retention = normalizeSettings(settings).requestRetentionSeconds;
+      updateRequestsNote();
     }
 
     function applyHealth(status) {
@@ -1035,7 +1078,7 @@
     function refreshAll() {
       if (!state.connected) return;
       abortQuery();
-      moreGate.invalidate();
+      abortMore();
       var controller = newController();
       queryAbort = controller;
       var token = queryGate.begin();
@@ -1058,7 +1101,7 @@
 
       Promise.all(tasks)
         .then(function (results) {
-          if (!queryGate.current(token)) return;
+          if (!state.connected || !queryGate.current(token)) return;
           var byKind = {};
           for (var i = 0; i < results.length; i++) byKind[results[i].kind] = results[i].data;
           applySummary(byKind.summary);
@@ -1080,6 +1123,7 @@
       els.loadMore.disabled = true;
       var token = moreGate.begin();
       var controller = newController();
+      moreAbort = controller;
       var params = {
         from: state.bounds.from,
         to: state.bounds.to,
@@ -1090,7 +1134,7 @@
       };
       fetchJson('requests', params, controller ? controller.signal : undefined)
         .then(function (page) {
-          if (!moreGate.current(token)) return;
+          if (!state.connected || !moreGate.current(token)) return;
           applyRequestsPage(page, true);
         })
         .catch(function (err) {
@@ -1147,7 +1191,7 @@
     }
 
     function openBody(requestId, meta) {
-      if (!requestId) return;
+      if (!state.connected || !requestId) return;
       bodyGate.invalidate();
       abortBody();
       bodyState = bodyViewerReduce(bodyState, { type: 'open', requestId: requestId, meta: meta });
@@ -1164,7 +1208,7 @@
     }
 
     function revealBody() {
-      if (bodyState.phase !== 'confirm') return;
+      if (!state.connected || bodyState.phase !== 'confirm') return;
       var requestId = bodyState.requestId;
       bodyState = bodyViewerReduce(bodyState, { type: 'confirm', requestId: requestId });
       var token = bodyGate.begin();
@@ -1173,8 +1217,8 @@
       renderBodyDialog();
       fetchJson('body', { request_id: requestId }, controller ? controller.signal : undefined)
         .then(function (detail) {
-          if (!bodyGate.current(token)) return;
-          var d = detail && typeof detail === 'object' ? detail : {};
+          if (!state.connected || !bodyGate.current(token)) return;
+          var d = validateBodyDetail(detail, requestId);
           bodyState = bodyViewerReduce(bodyState, {
             type: 'loaded',
             requestId: requestId,
@@ -1196,7 +1240,7 @@
           if (err && err.status === 404) message = '请求体不存在或已过期';
           if (err && err.auth) {
             handleAuthFailure(err);
-            message = '管理密钥无效，无法读取请求体';
+            return;
           }
           bodyState = bodyViewerReduce(bodyState, { type: 'error', requestId: requestId, message: message });
           renderBodyDialog();
@@ -1223,6 +1267,7 @@
 
     function connect() {
       var key = els.key && els.key.value ? els.key.value.trim() : '';
+      disconnect();
       if (!isAllowedTransport(loc)) {
         setStatus('仅允许 HTTPS 或本机回环地址发送管理密钥', 'error');
         return;
@@ -1281,8 +1326,7 @@
     });
 
     win.addEventListener('beforeunload', function () {
-      abortQuery();
-      abortBody();
+      disconnect();
     });
 
     if (!isAllowedTransport(loc)) {
@@ -1303,6 +1347,8 @@
     RANGE_MS: RANGE_MS,
     DEFAULT_RANGE: DEFAULT_RANGE,
     REQUEST_PAGE_LIMIT: REQUEST_PAGE_LIMIT,
+    MAX_REQUEST_ITEMS: MAX_REQUEST_ITEMS,
+    validateBodyDetail: validateBodyDetail,
     deriveApiBase: deriveApiBase,
     buildApiUrl: buildApiUrl,
     isAllowedTransport: isAllowedTransport,

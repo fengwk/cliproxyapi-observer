@@ -69,6 +69,170 @@ async function connect(frame, secret) {
   );
 }
 
+// Use controllable responses to exercise cancellation and credential boundaries.
+async function reviewCases(browser, server) {
+  const requests = '**' + mock.MANAGEMENT_BASE + '/requests**';
+  const bodies = '**' + mock.MANAGEMENT_BASE + '/body**';
+  const fresh = async () => {
+    const page = await browser.newPage();
+    await page.goto(server.resourceURL);
+    await connect(page, mock.SECRET);
+    await page.waitForFunction(() => document.getElementById('conn-status').textContent.startsWith('已更新'));
+    return page;
+  };
+  const deferred = () => {
+    let resolve;
+    const promise = new Promise((r) => { resolve = r; });
+    return { promise, resolve };
+  };
+  const ready = (page) => page.waitForFunction(
+    () => document.getElementById('conn-status').textContent.startsWith('已更新'));
+  const bodyOpen = async (page) => {
+    await page.locator('[data-request-id="req-body-xss"]').click();
+    await page.locator('#body-reveal').click();
+  };
+
+  await withStep('Review: cost subtotal and unknown group are explicit', async () => {
+    const page = await fresh();
+    assert.match(await page.locator('[data-metric="cost"] .metric-sub').textContent(), /已定价小计；未定价 3 条/);
+    assert.match(await page.locator('#groups-body tr').filter({ hasText: 'gemini-3-pro' }).textContent(), /未定价/);
+    assert.ok(!(await page.locator('#groups-body tr').filter({ hasText: 'gemini-3-pro' }).textContent()).includes('$0.0000'));
+    await page.screenshot({ path: path.join(OUT, 'review-cost-retention.png'), fullPage: true });
+    await page.close();
+  });
+
+  await withStep('Review: current-minute requests are included without future to', async () => {
+    const page = await browser.newPage();
+    const now = Date.UTC(2026, 9, 8, 12, 0, 45, 123);
+    await page.addInitScript((value) => { Date.now = () => value; }, now);
+    await page.route(requests, (route) => {
+      const url = new URL(route.request().url());
+      assert.equal(Date.parse(url.searchParams.get('to')), now);
+      assert.equal(Date.parse(url.searchParams.get('from')), now - 86400000);
+      return route.fulfill({ json: { items: [{
+        request_id: 'current', model: 'CURRENT-MINUTE', time: new Date(now - 1000).toISOString()
+      }], has_more: false, next_cursor: '' } });
+    });
+    await page.goto(server.resourceURL);
+    await connect(page, mock.SECRET);
+    await page.locator('#requests-body').filter({ hasText: 'CURRENT-MINUTE' }).waitFor();
+    assert.match(await page.locator('#requests-note').textContent(), /请求明细仅保留 1 天.*统计按所选/);
+    await page.close();
+  });
+
+  await withStep('Review: refresh cancels pending cursor, resets busy and rejects old append', async () => {
+    const page = await fresh();
+    const entered = deferred();
+    const release = deferred();
+    const finished = deferred();
+    let first = true;
+    await page.route(requests, async (route) => {
+      if (new URL(route.request().url()).searchParams.has('cursor') && first) {
+        first = false;
+        entered.resolve();
+        await release.promise;
+        try { await route.fulfill({ json: { items: [{ model: 'OLD-CURSOR' }], has_more: false } }); }
+        catch (_) { /* aborted client */ }
+        finished.resolve();
+      } else await route.continue();
+    });
+    await page.locator('#load-more').click();
+    await entered.promise;
+    await page.locator('#refresh').click();
+    await ready(page);
+    release.resolve();
+    await finished.promise;
+    assert.equal(await page.locator('#requests-body tr').count(), 50);
+    assert.equal(await page.locator('#requests-body').getByText('OLD-CURSOR').count(), 0);
+    await page.locator('#load-more').click();
+    await page.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 52);
+    await page.close();
+  });
+
+  await withStep('Review: request accumulation is capped at 500', async () => {
+    const page = await fresh();
+    let cursor = 0;
+    await page.route(requests, (route) => route.fulfill({ json: {
+      items: Array.from({ length: 50 }, (_, i) => ({ request_id: String(cursor) + '-' + i, model: 'bounded' })),
+      next_cursor: String(++cursor), has_more: true
+    } }));
+    for (let count = 100; count <= 500; count += 50) {
+      await page.locator('#load-more').click();
+      await page.waitForFunction((n) => document.querySelectorAll('#requests-body tr').length === n, count);
+    }
+    assert.equal(await page.locator('#load-more').isVisible(), false);
+    assert.match(await page.locator('#requests-note').textContent(), /最多 500/);
+    await page.close();
+  });
+
+  await withStep('Review: mismatched and malformed body responses fail closed', async () => {
+    const page = await fresh();
+    for (const detail of [
+      { request_id: 'other', body: 'WRONG-SECRET' },
+      { request_id: 'req-body-xss', body: { secret: 'WRONG-SECRET' } }
+    ]) {
+      await page.route(bodies, (route) => route.fulfill({ json: detail }));
+      await bodyOpen(page);
+      await page.locator('#body-content').filter({ hasText: '不匹配或格式无效' }).waitFor();
+      assert.ok(!(await page.locator('#body-content').textContent()).includes('WRONG-SECRET'));
+      await page.locator('#body-close').click();
+      await page.unroute(bodies);
+    }
+    await page.close();
+  });
+
+  for (const failure of [false, true]) {
+    await withStep('Review: ' + (failure ? 'auth failure' : 'reconnect') + ' invalidates old body and closes viewer', async () => {
+      const page = await fresh();
+      const entered = deferred();
+      const release = deferred();
+      const finished = deferred();
+      let bodyCalls = 0;
+      await page.route(bodies, async (route) => {
+        bodyCalls++;
+        entered.resolve();
+        await release.promise;
+        try { await route.fulfill({ json: { request_id: 'req-body-xss', body: 'OLD-AUTH-SECRET' } }); }
+        catch (_) { /* aborted client */ }
+        finished.resolve();
+      });
+      await bodyOpen(page);
+      await entered.promise;
+      if (failure) {
+        await page.route('**' + mock.MANAGEMENT_BASE + '/health', (route) => route.fulfill({ status: 403, json: {} }));
+        await page.evaluate(() => document.getElementById('refresh').click());
+        await page.waitForFunction(() => document.getElementById('conn-status').classList.contains('is-error'));
+        // Existing list buttons must not issue requests while disconnected.
+        await page.evaluate(() => {
+          document.querySelector('[data-request-id="req-body-xss"]').click();
+          document.getElementById('body-reveal').click();
+        });
+        assert.equal(bodyCalls, 1);
+        await page.unroute('**' + mock.MANAGEMENT_BASE + '/health');
+      }
+      await page.evaluate(() => document.getElementById('connect').click());
+      await ready(page);
+      release.resolve();
+      await finished.promise;
+      assert.equal(await page.locator('#body-dialog').getAttribute('open'), null);
+      assert.equal(await page.locator('#body-content').textContent(), '');
+      await page.close();
+    });
+  }
+
+  await withStep('Review: redirects are rejected before forwarding credentials', async () => {
+    const page = await fresh();
+    let redirected = 0;
+    await page.route('**/redirect-target', (route) => { redirected++; return route.fulfill({ json: {} }); });
+    await page.route('**' + mock.MANAGEMENT_BASE + '/summary**', (route) =>
+      route.fulfill({ status: 302, headers: { location: '/redirect-target' } }));
+    await page.locator('#refresh').click();
+    await page.waitForFunction(() => document.getElementById('conn-status').textContent.startsWith('加载失败'));
+    assert.equal(redirected, 0);
+    await page.close();
+  });
+}
+
 async function main() {
   fs.mkdirSync(OUT, { recursive: true });
   const server = await mock.startServer({ captureBodies: true });
@@ -282,6 +446,18 @@ async function main() {
         return 'overflow=' + overflow;
       });
 
+      for (const theme of ['', 'white']) {
+        await withStep('390px: ' + (theme || 'light'), async () => {
+          await page.evaluate((value) => window.__setTheme(value), theme);
+          await frame.waitForFunction((value) =>
+            (document.documentElement.getAttribute('data-theme') || '') === value, theme);
+          const overflow = await frame.evaluate(
+            () => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+          assert.ok(overflow <= 1);
+          await shot(page, 'embedded-' + (theme || 'light') + '-390');
+        });
+      }
+
       await context.close();
     }
 
@@ -310,8 +486,8 @@ async function main() {
       await lightPage.goto(server.resourceURL, { waitUntil: 'load' });
       await withStep('独立打开：系统浅色回退', async () => {
         const theme = await lightPage.evaluate(() => document.documentElement.getAttribute('data-theme'));
-        assert.equal(theme, null);
-        return '暖灰浅色';
+        assert.equal(theme, 'white');
+        return 'CPA auto-white';
       });
       await lightContext.close();
     }
@@ -333,6 +509,7 @@ async function main() {
       });
       await context.close();
     }
+    await reviewCases(browser, server);
   } finally {
     await browser.close();
     await server.close();
