@@ -165,3 +165,115 @@ func TestCloseRacesReadersWithMultipleClosers(t *testing.T) {
 		}
 	}
 }
+
+// TestClosePersistsEveryAcceptedObservation verifies the close race fix: no
+// successful Submit may be enqueued after the writer's final drain, so every
+// accepted usage record must survive a concurrent Close.
+func TestClosePersistsEveryAcceptedObservation(t *testing.T) {
+	const writers = 5
+	const perWriter = 200
+	for iter := 0; iter < 5; iter++ {
+		cfg := testConfig(t, func(c *Config) { c.FlushInterval = 5 * time.Millisecond })
+		s, err := Open(cfg)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+
+		var accepted atomic.Int64
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for w := 0; w < writers; w++ {
+			wg.Add(1)
+			go func(w int) {
+				defer wg.Done()
+				<-start
+				for i := 0; i < perWriter; i++ {
+					id := fmt.Sprintf("p-%d-%d-%d", iter, w, i)
+					at := time.Now().Add(-time.Duration(i) * time.Millisecond)
+					if s.SubmitUsage(usageRecord(id, "openai", "gpt-5", at, simpleUsage(1, 1))) {
+						accepted.Add(1)
+					}
+				}
+			}(w)
+		}
+		close(start)
+		time.Sleep(time.Millisecond) // let producers get going
+		if err := s.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		wg.Wait()
+
+		// After Close no further submissions may be accepted.
+		if s.SubmitUsage(usageRecord("after-close", "openai", "gpt-5", time.Now(), simpleUsage(1, 1))) {
+			t.Fatalf("Submit accepted after Close")
+		}
+
+		reopened, err := Open(cfg)
+		if err != nil {
+			t.Fatalf("reopen: %v", err)
+		}
+		total := len(allRequests(t, reopened))
+		if err := reopened.Close(); err != nil {
+			t.Fatalf("reopened Close: %v", err)
+		}
+		if int64(total) != accepted.Load() {
+			t.Fatalf("iter %d: accepted %d but persisted %d", iter, accepted.Load(), total)
+		}
+	}
+}
+
+// TestFlushReturnsWhileProducersActive verifies the bounded drain: Flush must
+// return even while a producer keeps the queue busy (no unbounded collection).
+func TestFlushReturnsWhileProducersActive(t *testing.T) {
+	s := openTestStore(t, func(c *Config) { c.FlushInterval = time.Hour })
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			s.SubmitUsage(usageRecord(fmt.Sprintf("spin-%d", i), "openai", "gpt-5", time.Now(), simpleUsage(1, 1)))
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.Flush(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Flush: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Flush did not return while producers were active")
+	}
+	close(stop)
+	wg.Wait()
+	flushAll(t, s)
+}
+
+// TestCloseReportsWriteFailure verifies Close surfaces a flush/database failure
+// instead of claiming success.
+func TestCloseReportsWriteFailure(t *testing.T) {
+	s := openTestStore(t, nil)
+	at := time.Now().Add(-time.Minute)
+	s.SubmitUsage(usageRecord("cw-1", "openai", "gpt-5", at, simpleUsage(1, 1)))
+	flushAll(t, s)
+
+	if err := s.db.Close(); err != nil {
+		t.Fatalf("force close: %v", err)
+	}
+	s.SubmitUsage(usageRecord("cw-2", "openai", "gpt-5", at, simpleUsage(1, 1)))
+	if err := s.Close(); err == nil {
+		t.Fatalf("Close reported success after a write failure")
+	}
+	if s.Status().WriteErrors == 0 {
+		t.Errorf("WriteErrors = 0, want > 0")
+	}
+}

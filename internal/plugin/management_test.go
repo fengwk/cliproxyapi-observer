@@ -105,7 +105,7 @@ func TestManagementAcceptsBothManagementPrefixes(t *testing.T) {
 	}
 }
 
-func TestSummaryDefaultsAndRejectsBroadRanges(t *testing.T) {
+func TestSummaryMinuteAlignedBoundsAndValidation(t *testing.T) {
 	cfg := observerConfigFixture()
 	cfg.StatsRetentionDays = 1 // keep the retained statistics window at 24h
 	opener := &fakeOpener{cfg: cfg}
@@ -119,13 +119,20 @@ func TestSummaryDefaultsAndRejectsBroadRanges(t *testing.T) {
 	if !ok {
 		t.Fatal("summary was not forwarded to the store")
 	}
-	if !query.To.Equal(managementNow) {
-		t.Errorf("default to = %s, want %s", query.To, managementNow)
+	// The default upper bound is the next minute boundary so the current minute
+	// is included, and every bound is minute-aligned.
+	if want := managementNow.Truncate(time.Minute).Add(time.Minute); !query.To.Equal(want) {
+		t.Errorf("default to = %s, want %s", query.To, want)
 	}
-	if want := managementNow.Add(-defaultQueryWindow); !query.From.Equal(want) {
+	if want := query.To.Add(-defaultQueryWindow); !query.From.Equal(want) {
 		t.Errorf("default from = %s, want %s", query.From, want)
 	}
+	if !query.To.Equal(query.To.Truncate(time.Minute)) || !query.From.Equal(query.From.Truncate(time.Minute)) {
+		t.Errorf("summary bounds are not minute-aligned: %+v", query)
+	}
 
+	// Explicit, already-aligned bounds are forwarded unchanged (no fractional
+	// minute drift), and the filters travel with them.
 	values := url.Values{"from": {managementNow.Add(-time.Hour).Format(time.RFC3339)}, "to": {managementNow.Format(time.RFC3339)}, "provider": {"openai"}, "model": {"gpt"}}
 	resp = callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/summary", values)
 	if resp.StatusCode != http.StatusOK {
@@ -135,11 +142,24 @@ func TestSummaryDefaultsAndRejectsBroadRanges(t *testing.T) {
 	if query.Provider != "openai" || query.Model != "gpt" {
 		t.Errorf("filters not forwarded: %+v", query)
 	}
+	if !query.To.Equal(managementNow) || !query.From.Equal(managementNow.Add(-time.Hour)) {
+		t.Errorf("explicit aligned bounds drifted: %+v", query)
+	}
 
 	// A range wider than the retained statistics window is rejected.
 	broad := url.Values{"from": {managementNow.Add(-48 * time.Hour).Format(time.RFC3339)}, "to": {managementNow.Format(time.RFC3339)}}
 	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/summary", broad); resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("broad summary status = %d, want 400", resp.StatusCode)
+	}
+	// An empty range is rejected rather than silently widening.
+	empty := url.Values{"from": {managementNow.Format(time.RFC3339)}, "to": {managementNow.Format(time.RFC3339)}}
+	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/summary", empty); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("empty summary status = %d, want 400", resp.StatusCode)
+	}
+	// A future upper bound is rejected.
+	future := url.Values{"to": {managementNow.Add(time.Hour).Format(time.RFC3339)}}
+	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/summary", future); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("future summary status = %d, want 400", resp.StatusCode)
 	}
 	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/summary", url.Values{"from": {"not-a-time"}}); resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("malformed summary status = %d, want 400", resp.StatusCode)
@@ -149,14 +169,23 @@ func TestSummaryDefaultsAndRejectsBroadRanges(t *testing.T) {
 func TestSummaryErrorsAreSanitized(t *testing.T) {
 	opener := &fakeOpener{cfg: observerConfigFixture()}
 	m := registeredManager(t, opener)
-	opener.last().summaryErr = errStoreFailure
 
+	opener.last().summaryErr = errStoreFailure
 	resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/summary", nil)
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", resp.StatusCode)
 	}
 	if body := string(resp.Body); len(body) == 0 || strings.Contains(body, "/secret/path") {
 		t.Errorf("error body leaked store internals: %s", body)
+	}
+
+	opener.last().summaryErr = observer.ErrInvalidQuery
+	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/summary", nil); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("invalid query status = %d, want 400", resp.StatusCode)
+	}
+	opener.last().summaryErr = observer.ErrClosed
+	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/summary", nil); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("closed store status = %d, want 503", resp.StatusCode)
 	}
 }
 
@@ -185,9 +214,35 @@ func TestRequestsLimitCursorAndValidation(t *testing.T) {
 			t.Errorf("limit %q status = %d, want 400", bad, resp.StatusCode)
 		}
 	}
-	opener.last().requestsErr = observer.ErrNotFound
+
+	// A 7d/30d dashboard selection stays within the statistics retention and
+	// must not be rejected even though the request retention is only 24h.
+	wide := url.Values{
+		"from": {managementNow.Add(-7 * 24 * time.Hour).Format(time.RFC3339)},
+		"to":   {managementNow.Format(time.RFC3339)},
+	}
+	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/requests", wide); resp.StatusCode != http.StatusOK {
+		t.Errorf("7d requests status = %d, want 200", resp.StatusCode)
+	}
+	// Beyond the statistics retention the range is rejected.
+	tooWide := url.Values{"from": {managementNow.Add(-400 * 24 * time.Hour).Format(time.RFC3339)}}
+	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/requests", tooWide); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("400d requests status = %d, want 400", resp.StatusCode)
+	}
+
+	// Only cursor/query validation failures are 400; storage failures must not
+	// be masked as bad requests.
+	opener.last().requestsErr = observer.ErrInvalidCursor
 	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/requests", url.Values{"cursor": {"bad"}}); resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("bad cursor status = %d, want 400", resp.StatusCode)
+	}
+	opener.last().requestsErr = observer.ErrClosed
+	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/requests", nil); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("closed store status = %d, want 503", resp.StatusCode)
+	}
+	opener.last().requestsErr = errStoreFailure
+	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/requests", nil); resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("store failure status = %d, want 500", resp.StatusCode)
 	}
 }
 
@@ -201,6 +256,14 @@ func TestBodyRoute(t *testing.T) {
 	opener.last().bodyErr = observer.ErrNotFound
 	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/body", url.Values{"request_id": {"gone"}}); resp.StatusCode != http.StatusNotFound {
 		t.Errorf("missing body status = %d, want 404", resp.StatusCode)
+	}
+	opener.last().bodyErr = observer.ErrClosed
+	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/body", url.Values{"request_id": {"req-1"}}); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("closed store status = %d, want 503", resp.StatusCode)
+	}
+	opener.last().bodyErr = errStoreFailure
+	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/body", url.Values{"request_id": {"req-1"}}); resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("store failure status = %d, want 500", resp.StatusCode)
 	}
 	opener.last().bodyErr = nil
 	opener.last().body = observer.BodyDetail{RequestID: "req-1", Content: "hello", Redacted: true}

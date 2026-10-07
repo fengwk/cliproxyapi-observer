@@ -110,3 +110,47 @@ func bucketCount(t *testing.T, s *Store, name []byte) int {
 	}
 	return count
 }
+
+// usageTrace builds a usage record with an explicit execution RequestID and the
+// shared inbound TraceID used to correlate a captured body.
+func usageTrace(id, trace, provider, model string, at time.Time, detail pluginapi.UsageDetail) pluginapi.UsageRecord {
+	return pluginapi.UsageRecord{
+		RequestID:   id,
+		TraceID:     trace,
+		Provider:    provider,
+		Model:       model,
+		RequestedAt: at,
+		Latency:     2 * time.Second,
+		TTFT:        time.Second,
+		Detail:      detail,
+	}
+}
+
+// allRequests pages through every request the store currently retains.
+func allRequests(t *testing.T, s *Store) []Request {
+	t.Helper()
+	var out []Request
+	query := Query{Limit: maxPageLimit}
+	for {
+		page, err := s.Requests(query)
+		if err != nil {
+			t.Fatalf("Requests: %v", err)
+		}
+		out = append(out, page.Items...)
+		if !page.HasMore {
+			break
+		}
+		query.Cursor = page.NextCursor
+	}
+	return out
+}
+
+// captureTrace captures a body with an explicit TraceID, mirroring the host's
+// distinct interception RequestID sharing one inbound TraceID.
+func captureTrace(s *Store, requestID, traceID, body string) bool {
+	return s.Capture(pluginapi.RequestInterceptRequest{
+		RequestID: requestID,
+		TraceID:   traceID,
+		Body:      []byte(body),
+	})
+}

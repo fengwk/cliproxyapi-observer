@@ -21,6 +21,17 @@ const fixtureText = "observer-fixture-response"
 // arrived unmodified.
 const upstreamPrompt = "hello-observer"
 
+// fixtureUsage is a realistic OpenAI usage block: a 10-token prompt of which 4
+// tokens are served from cache, and a 5-token completion. The host normalizes
+// this to subset accounting: input 10, uncached 6, cache read 4, output 5,
+// total 15.
+const (
+	fixturePromptTokens     = 10
+	fixtureCompletionTokens = 5
+	fixtureCachedTokens     = 4
+	fixtureTotalTokens      = 15
+)
+
 type mockCall struct {
 	Method string
 	Path   string
@@ -37,11 +48,12 @@ type mockUpstream struct {
 	mu         sync.Mutex
 	calls      []mockCall
 	violations []string
+	wantPrompt string
 }
 
 func newMockUpstream(t *testing.T) *mockUpstream {
 	t.Helper()
-	m := &mockUpstream{}
+	m := &mockUpstream{wantPrompt: upstreamPrompt}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", m.handleChat)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -49,6 +61,14 @@ func newMockUpstream(t *testing.T) *mockUpstream {
 	})
 	m.server = httptest.NewServer(mux)
 	return m
+}
+
+// allowAnyPrompt relaxes the exact-prompt contract for tests that drive
+// multiple distinct prompts and assert their own mapping.
+func (m *mockUpstream) allowAnyPrompt() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.wantPrompt = ""
 }
 
 func (m *mockUpstream) baseURL() string { return m.server.URL }
@@ -89,7 +109,16 @@ func (m *mockUpstream) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(fmt.Sprintf(`{"id":"chatcmpl-observer","object":"chat.completion","created":1,"model":%q,"choices":[{"index":0,"message":{"role":"assistant","content":%q},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`, upstreamModel, fixtureText)))
+	_, _ = w.Write([]byte(fmt.Sprintf(`{"id":"chatcmpl-observer","object":"chat.completion","created":1,"model":%q,"choices":[{"index":0,"message":{"role":"assistant","content":%q},"finish_reason":"stop"}],"usage":%s}`, upstreamModel, fixtureText, usageFixtureJSON())))
+}
+
+// usageFixtureJSON renders the realistic OpenAI usage block used by both the
+// sync and streaming responses.
+func usageFixtureJSON() string {
+	return fmt.Sprintf(
+		`{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d,"prompt_tokens_details":{"cached_tokens":%d}}`,
+		fixturePromptTokens, fixtureCompletionTokens, fixtureTotalTokens, fixtureCachedTokens,
+	)
 }
 
 // validateChat asserts the upstream saw exactly what the client sent: the
@@ -119,8 +148,15 @@ func (m *mockUpstream) validateChat(r *http.Request, body []byte) {
 	if payload.Model != upstreamModel {
 		m.violationf("model = %q, want %q", payload.Model, upstreamModel)
 	}
-	if len(payload.Messages) == 0 || payload.Messages[0].Content != upstreamPrompt {
+	m.mu.Lock()
+	wantPrompt := m.wantPrompt
+	m.mu.Unlock()
+	if len(payload.Messages) == 0 {
+		m.violationf("no messages in chat body: %s", truncate(body, 200))
+	} else if wantPrompt != "" && payload.Messages[0].Content != wantPrompt {
 		m.violationf("prompt was altered: %s", truncate(body, 200))
+	} else if wantPrompt == "" && strings.TrimSpace(payload.Messages[0].Content) == "" {
+		m.violationf("empty prompt in chat body: %s", truncate(body, 200))
 	}
 	for _, secret := range []string{clientKey, mgmtKey} {
 		if strings.Contains(string(body), secret) {
@@ -142,7 +178,7 @@ func (m *mockUpstream) writeSSE(w http.ResponseWriter) {
 	write(fmt.Sprintf(`{"id":"chatcmpl-observer","object":"chat.completion.chunk","created":1,"model":%q,"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`, upstreamModel))
 	write(fmt.Sprintf(`{"id":"chatcmpl-observer","object":"chat.completion.chunk","created":1,"model":%q,"choices":[{"index":0,"delta":{"content":%q},"finish_reason":null}]}`, upstreamModel, fixtureText))
 	write(fmt.Sprintf(`{"id":"chatcmpl-observer","object":"chat.completion.chunk","created":1,"model":%q,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`, upstreamModel))
-	write(`{"id":"chatcmpl-observer","object":"chat.completion.chunk","created":1,"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`)
+	write(fmt.Sprintf(`{"id":"chatcmpl-observer","object":"chat.completion.chunk","created":1,"choices":[],"usage":%s}`, usageFixtureJSON()))
 	_, _ = io.WriteString(w, "data: [DONE]\n\n")
 	if flusher != nil {
 		flusher.Flush()
@@ -151,7 +187,13 @@ func (m *mockUpstream) writeSSE(w http.ResponseWriter) {
 
 // chatBody builds a minimal OpenAI chat request.
 func chatBody(stream bool) []byte {
-	return []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":%t}`, modelName, upstreamPrompt, stream))
+	return chatBodyWithPrompt(stream, upstreamPrompt)
+}
+
+// chatBodyWithPrompt builds a minimal OpenAI chat request with a custom user
+// prompt, used to prove concurrent requests never cross their captured bodies.
+func chatBodyWithPrompt(stream bool, prompt string) []byte {
+	return []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":%t}`, modelName, prompt, stream))
 }
 
 // sseContent extracts the concatenated assistant content from an SSE body.

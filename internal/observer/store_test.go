@@ -137,7 +137,7 @@ func TestCaptureDisabledDoesNotStoreBodies(t *testing.T) {
 	}
 }
 
-func TestWriterFailureCountsWriteErrors(t *testing.T) {
+func TestWriterFailureCountsWriteErrorsAndReports(t *testing.T) {
 	s := openTestStore(t, nil)
 	at := time.Now().Add(-time.Minute)
 	if !s.SubmitUsage(usageRecord("wf-1", "openai", "gpt-5", at, simpleUsage(1, 1))) {
@@ -145,14 +145,24 @@ func TestWriterFailureCountsWriteErrors(t *testing.T) {
 	}
 	flushAll(t, s)
 
-	// Force the underlying database closed so the next write fails.
+	// Force the underlying database closed so the next write fails. Flush must
+	// surface the failure and count the lost observation instead of reporting
+	// success.
 	if err := s.db.Close(); err != nil {
 		t.Fatalf("force close: %v", err)
 	}
 	s.SubmitUsage(usageRecord("wf-2", "openai", "gpt-5", at, simpleUsage(1, 1)))
-	flushAll(t, s)
-	if got := s.Status().WriteErrors; got == 0 {
-		t.Fatalf("WriteErrors = 0, want > 0 after database failure")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.Flush(ctx); err == nil {
+		t.Fatalf("Flush reported success after a write failure")
+	}
+	status := s.Status()
+	if status.WriteErrors == 0 {
+		t.Errorf("WriteErrors = 0, want > 0 after database failure")
+	}
+	if status.DroppedUsage == 0 {
+		t.Errorf("DroppedUsage = 0, want > 0 for lost usage")
 	}
 }
 
