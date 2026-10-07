@@ -31,6 +31,10 @@ const (
 	defaultRequestLimit = 50
 	maxRequestLimit     = 100
 
+	// maxStatsRetentionDays hard-caps the accepted query range regardless of the
+	// configured statistics retention.
+	maxStatsRetentionDays = 3650
+
 	// cspPolicy keeps the embedded page same-origin frameable without widening
 	// any directive. The UI slice must not rely on inline scripts or styles.
 	cspPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'self'"
@@ -129,69 +133,68 @@ func (m *Manager) serveManagement(route string, query url.Values) pluginapi.Mana
 }
 
 func (m *Manager) serveSummary(values url.Values) pluginapi.ManagementResponse {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if m.store == nil {
+	store, cfg, _ := m.snapshot()
+	if store == nil {
 		return managementError(http.StatusServiceUnavailable, "observer unavailable")
 	}
-	retention := time.Duration(m.cfg.StatsRetentionDays) * 24 * time.Hour
-	query, herr := m.parseQuery(values, retention, false)
+	query, herr := m.parseQuery(values, statsRange(cfg), true, false)
 	if herr != nil {
 		return managementError(herr.status, herr.message)
 	}
-	summary, err := m.store.Summary(query)
+	summary, err := store.Summary(query)
 	if err != nil {
-		return managementError(http.StatusInternalServerError, "internal error")
+		return managementStoreError(err)
 	}
 	return managementJSON(http.StatusOK, summary)
 }
 
 func (m *Manager) serveRequests(values url.Values) pluginapi.ManagementResponse {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if m.store == nil {
+	store, cfg, _ := m.snapshot()
+	if store == nil {
 		return managementError(http.StatusServiceUnavailable, "observer unavailable")
 	}
-	query, herr := m.parseQuery(values, m.cfg.RequestRetention, true)
+	// The accepted range is bounded only by the statistics retention; the store
+	// clamps the actual reads to the retained request window, so a 7d/30d
+	// dashboard selection returns the retained subset instead of a 400.
+	query, herr := m.parseQuery(values, statsRange(cfg), false, true)
 	if herr != nil {
 		return managementError(herr.status, herr.message)
 	}
-	page, err := m.store.Requests(query)
+	page, err := store.Requests(query)
 	if err != nil {
-		// The only client-controlled failure here is a malformed cursor or
-		// range; the store validates the opaque cursor and returns an error.
-		return managementError(http.StatusBadRequest, "invalid request query")
+		return managementStoreError(err)
 	}
 	return managementJSON(http.StatusOK, page)
 }
 
 func (m *Manager) serveBody(values url.Values) pluginapi.ManagementResponse {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if m.store == nil {
+	store, _, _ := m.snapshot()
+	if store == nil {
 		return managementError(http.StatusServiceUnavailable, "observer unavailable")
 	}
 	requestID := strings.TrimSpace(values.Get("request_id"))
 	if requestID == "" {
 		return managementError(http.StatusBadRequest, "request_id is required")
 	}
-	detail, err := m.store.Body(requestID)
+	detail, err := store.Body(requestID)
 	if err != nil {
-		if errors.Is(err, observer.ErrNotFound) {
+		switch {
+		case errors.Is(err, observer.ErrNotFound):
 			return managementError(http.StatusNotFound, "body not available")
+		case errors.Is(err, observer.ErrClosed):
+			return managementError(http.StatusServiceUnavailable, "observer unavailable")
+		default:
+			return managementError(http.StatusInternalServerError, "internal error")
 		}
-		return managementError(http.StatusInternalServerError, "internal error")
 	}
 	return managementJSON(http.StatusOK, detail)
 }
 
 func (m *Manager) serveSettings() pluginapi.ManagementResponse {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if !m.hasConfig {
+	_, cfg, hasConfig := m.snapshot()
+	if !hasConfig {
 		return managementError(http.StatusServiceUnavailable, "observer unavailable")
 	}
-	cfg := m.cfg
 	return managementJSON(http.StatusOK, settingsResponse{
 		CaptureBodies:           cfg.CaptureBodies,
 		BodyRetentionSeconds:    int64(cfg.BodyRetention / time.Second),
@@ -203,12 +206,11 @@ func (m *Manager) serveSettings() pluginapi.ManagementResponse {
 }
 
 func (m *Manager) serveHealth() pluginapi.ManagementResponse {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if m.store == nil {
+	store, _, _ := m.snapshot()
+	if store == nil {
 		return managementError(http.StatusServiceUnavailable, "observer unavailable")
 	}
-	return managementJSON(http.StatusOK, m.store.Status())
+	return managementJSON(http.StatusOK, store.Status())
 }
 
 // settingsResponse is the effective capture and retention contract exposed to
@@ -252,18 +254,41 @@ type httpError struct {
 	message string
 }
 
-// parseQuery builds an observation query from management query parameters. The
-// range defaults to the last 24h and is rejected when malformed or broader than
-// the retained window for the endpoint.
-func (m *Manager) parseQuery(values url.Values, retention time.Duration, withLimit bool) (observer.Query, *httpError) {
+// statsRange returns the maximum accepted query width: the configured
+// statistics retention, hard-capped and defaulted.
+func statsRange(cfg observer.Config) time.Duration {
+	days := cfg.StatsRetentionDays
+	if days <= 0 || days > maxStatsRetentionDays {
+		days = maxStatsRetentionDays
+	}
+	return time.Duration(days) * 24 * time.Hour
+}
+
+// parseQuery builds an observation query from management query parameters.
+//
+// The range defaults to the last 24h. When align is set (summary) the bounds are
+// snapped to whole minutes so the returned Summary.From/To are minute-aligned,
+// and the default upper bound is the next minute boundary so the current minute
+// is included. Explicit future ranges, empty/inverted ranges and ranges wider
+// than the accepted maximum are rejected with 400.
+func (m *Manager) parseQuery(values url.Values, maxRange time.Duration, align, withLimit bool) (observer.Query, *httpError) {
 	now := m.now()
+	upper := nextMinute(now)
+
 	to, err := parseTimeParam(values.Get("to"))
 	if err != nil {
 		return observer.Query{}, &httpError{status: http.StatusBadRequest, message: "invalid 'to' timestamp"}
 	}
 	if to.IsZero() {
-		to = now
+		to = upper
 	}
+	if align {
+		to = alignUp(to)
+	}
+	if to.After(upper) {
+		return observer.Query{}, &httpError{status: http.StatusBadRequest, message: "'to' must not be in the future"}
+	}
+
 	from, err := parseTimeParam(values.Get("from"))
 	if err != nil {
 		return observer.Query{}, &httpError{status: http.StatusBadRequest, message: "invalid 'from' timestamp"}
@@ -271,12 +296,16 @@ func (m *Manager) parseQuery(values url.Values, retention time.Duration, withLim
 	if from.IsZero() {
 		from = to.Add(-defaultQueryWindow)
 	}
-	if from.After(to) {
-		return observer.Query{}, &httpError{status: http.StatusBadRequest, message: "'from' must not be after 'to'"}
+	if align {
+		from = from.Truncate(time.Minute)
 	}
-	if retention > 0 && to.Sub(from) > retention {
+	if !from.Before(to) {
+		return observer.Query{}, &httpError{status: http.StatusBadRequest, message: "'from' must be before 'to'"}
+	}
+	if maxRange > 0 && to.Sub(from) > maxRange {
 		return observer.Query{}, &httpError{status: http.StatusBadRequest, message: "range exceeds the retained window"}
 	}
+
 	query := observer.Query{
 		From:     from,
 		To:       to,
@@ -296,6 +325,35 @@ func (m *Manager) parseQuery(values url.Values, retention time.Duration, withLim
 		query.Cursor = strings.TrimSpace(values.Get("cursor"))
 	}
 	return query, nil
+}
+
+// nextMinute returns the whole-minute boundary strictly after t, so a half-open
+// [from, to) query includes the minute that contains t.
+func nextMinute(t time.Time) time.Time {
+	return t.Truncate(time.Minute).Add(time.Minute)
+}
+
+// alignUp rounds t up to a whole minute, leaving an already aligned value
+// unchanged.
+func alignUp(t time.Time) time.Time {
+	if t.Truncate(time.Minute).Equal(t) {
+		return t
+	}
+	return t.Truncate(time.Minute).Add(time.Minute)
+}
+
+// managementStoreError maps a store error to a sanitized HTTP status. Only
+// client-driven validation failures are 400; storage failures are surfaced as
+// 503/500 instead of being masked as bad requests.
+func managementStoreError(err error) pluginapi.ManagementResponse {
+	switch {
+	case errors.Is(err, observer.ErrInvalidCursor), errors.Is(err, observer.ErrInvalidQuery):
+		return managementError(http.StatusBadRequest, "invalid request query")
+	case errors.Is(err, observer.ErrClosed):
+		return managementError(http.StatusServiceUnavailable, "observer unavailable")
+	default:
+		return managementError(http.StatusInternalServerError, "internal error")
+	}
 }
 
 func parseTimeParam(raw string) (time.Time, error) {

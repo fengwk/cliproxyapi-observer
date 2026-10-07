@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -151,5 +152,101 @@ func TestMalformedLifecycleRequest(t *testing.T) {
 	}
 	if code := mustError(t, resp); code != "invalid_request" {
 		t.Fatalf("code = %q, want invalid_request", code)
+	}
+}
+
+// A failed candidate must also roll back to a store that was configured with an
+// empty (default) YAML payload, not only to a non-empty one.
+func TestRollbackRestoresEmptyDefaultConfig(t *testing.T) {
+	m, opener := newTestManager()
+	register(t, m, "") // empty raw still counts as a configured store
+	live := opener.last()
+	if live == nil {
+		t.Fatal("empty configuration did not open a store")
+	}
+
+	opener.openErrFor = func(cfg observer.Config) error {
+		if cfg.DataPath == "candidate" {
+			return errStoreFailure
+		}
+		return nil
+	}
+	resp, err := m.HandleCall(pluginabi.MethodPluginReconfigure, mustJSON(t, lifecycleRequest{ConfigYAML: []byte("candidate")}))
+	if err != nil {
+		t.Fatalf("reconfigure: %v", err)
+	}
+	if code := mustError(t, resp); code != "storage_unavailable" {
+		t.Fatalf("code = %q, want storage_unavailable", code)
+	}
+	restored := opener.last()
+	if restored == live || restored.isClosed() {
+		t.Fatal("rollback did not reopen the empty default configuration")
+	}
+	sendUsage(t, m, "after-empty-rollback")
+	if restored.usageCount() != 1 {
+		t.Fatal("rolled-back default store did not receive usage")
+	}
+}
+
+// request.complete is acknowledged with no body so an opportunistic host call
+// can not fail the inference path, and reports no request mutation.
+func TestRequestCompleteIsAcknowledgedWithoutMutation(t *testing.T) {
+	m, _ := newTestManager()
+	resp, err := m.HandleCall(pluginabi.MethodRequestComplete, mustJSON(t, pluginapi.RequestInterceptRequest{RequestID: "req-1"}))
+	if err != nil {
+		t.Fatalf("request.complete: %v", err)
+	}
+	env := decodeEnvelope(t, resp)
+	if !env.OK {
+		t.Fatalf("request.complete not acknowledged: %s", resp)
+	}
+	if len(env.Result) != 0 && string(env.Result) != "{}" && string(env.Result) != "null" {
+		t.Fatalf("request.complete returned an unexpected payload: %s", env.Result)
+	}
+}
+
+// An in-flight observation must not block a lifecycle transition: the manager
+// releases its lock before calling the store, so a slow SubmitUsage can not
+// stall quiesce/close.
+func TestObservationDoesNotBlockLifecycle(t *testing.T) {
+	m, opener := newTestManager()
+	register(t, m, "live")
+	live := opener.last()
+
+	live.submitEntered = make(chan struct{})
+	live.submitGate = make(chan struct{})
+	payload := mustJSON(t, pluginapi.UsageRecord{RequestID: "slow", Provider: "openai", Model: "gpt"})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = m.HandleCall(pluginabi.MethodUsageHandle, payload)
+	}()
+
+	select {
+	case <-live.submitEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("usage was never dispatched to the store")
+	}
+
+	quiesced := make(chan struct{})
+	go func() {
+		defer close(quiesced)
+		_, _ = m.HandleCall(pluginabi.MethodPluginQuiesce, nil)
+	}()
+	select {
+	case <-quiesced:
+	case <-time.After(2 * time.Second):
+		t.Fatal("quiesce blocked on an in-flight observation")
+	}
+	if !live.isClosed() {
+		t.Fatal("quiesce must release the store while an observation is in flight")
+	}
+
+	close(live.submitGate)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("observation did not finish after being released")
 	}
 }

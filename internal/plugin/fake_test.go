@@ -24,6 +24,12 @@ type fakeStore struct {
 	submitOK  bool
 	captureOK bool
 
+	// submitEntered/submitGate let a test hold SubmitUsage open to prove the
+	// manager never blocks a lifecycle transition on an in-flight observation.
+	submitEntered chan struct{}
+	submitGate    chan struct{}
+	submitOnce    sync.Once
+
 	summary     observer.Summary
 	summaryErr  error
 	page        observer.RequestPage
@@ -38,6 +44,12 @@ func newFakeStore() *fakeStore {
 }
 
 func (s *fakeStore) SubmitUsage(record pluginapi.UsageRecord) bool {
+	if s.submitEntered != nil {
+		s.submitOnce.Do(func() { close(s.submitEntered) })
+	}
+	if s.submitGate != nil {
+		<-s.submitGate
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.usage = append(s.usage, record)
@@ -64,6 +76,9 @@ func (s *fakeStore) Requests(query observer.Query) (observer.RequestPage, error)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.queries = append(s.queries, query)
+	if s.closed {
+		return observer.RequestPage{}, observer.ErrClosed
+	}
 	return s.page, s.requestsErr
 }
 
@@ -71,12 +86,18 @@ func (s *fakeStore) Summary(query observer.Query) (observer.Summary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.queries = append(s.queries, query)
+	if s.closed {
+		return observer.Summary{}, observer.ErrClosed
+	}
 	return s.summary, s.summaryErr
 }
 
 func (s *fakeStore) Body(string) (observer.BodyDetail, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return observer.BodyDetail{}, observer.ErrClosed
+	}
 	return s.body, s.bodyErr
 }
 

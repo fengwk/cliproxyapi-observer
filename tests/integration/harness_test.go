@@ -37,6 +37,10 @@ const (
 	modelName     = "observer-mock-model"
 	upstreamModel = "observer-upstream-model"
 
+	// compatProviderName is the OpenAI-compatibility provider identifier. It
+	// contains "openai" so the host applies OpenAI subset token semantics.
+	compatProviderName = "observer-openai"
+
 	pluginLibName = "cliproxyapi-observer.so"
 )
 
@@ -171,6 +175,7 @@ type harness struct {
 	dbPath  string
 	port    int
 	baseURL string
+	opts    hostOptions
 	mock    *mockUpstream
 	cmd     *exec.Cmd
 	stdout  *lockedBuffer
@@ -182,12 +187,32 @@ type harness struct {
 	done    chan struct{}
 }
 
+// hostOptions selects the observer plugin settings a test host runs with.
+type hostOptions struct {
+	// CaptureBodies toggles request-body capture for the observer plugin.
+	CaptureBodies bool
+	// StatsRetentionDays overrides the statistics retention; zero keeps the
+	// host/plugin default.
+	StatsRetentionDays int
+	// DatabasePath overrides the observer database file; empty derives one
+	// inside the harness directory.
+	DatabasePath string
+}
+
+func defaultHostOptions() hostOptions { return hostOptions{CaptureBodies: true} }
+
 // newHarness starts one mock upstream and one CPA host against it and registers
 // teardown. The host is stopped before the mock is closed.
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	return newHarnessWith(t, defaultHostOptions())
+}
+
+// newHarnessWith is newHarness with explicit observer plugin options.
+func newHarnessWith(t *testing.T, opts hostOptions) *harness {
+	t.Helper()
 	mock := newMockUpstream(t)
-	h, err := startHost(t, mock, t.TempDir())
+	h, err := startHostWith(t, mock, t.TempDir(), opts)
 	if err != nil {
 		mock.Close()
 		t.Fatalf("start host: %v", err)
@@ -197,9 +222,15 @@ func newHarness(t *testing.T) *harness {
 	return h
 }
 
-// startHost writes an isolated config, copies the prebuilt plugin into a host
-// plugin store and launches the real binary with the minimal environment.
+// startHost launches a host with the default observer plugin options.
 func startHost(t *testing.T, mock *mockUpstream, dir string) (*harness, error) {
+	t.Helper()
+	return startHostWith(t, mock, dir, defaultHostOptions())
+}
+
+// startHostWith writes an isolated config, copies the prebuilt plugin into a
+// host plugin store and launches the real binary with the minimal environment.
+func startHostWith(t *testing.T, mock *mockUpstream, dir string, opts hostOptions) (*harness, error) {
 	t.Helper()
 	cpaBin, err := requireCPABinary()
 	if err != nil {
@@ -217,7 +248,10 @@ func startHost(t *testing.T, mock *mockUpstream, dir string) (*harness, error) {
 	if err := os.MkdirAll(authDir, 0o755); err != nil {
 		return nil, err
 	}
-	dbPath := filepath.Join(dir, "observer.db")
+	dbPath := opts.DatabasePath
+	if dbPath == "" {
+		dbPath = filepath.Join(dir, "observer.db")
+	}
 
 	port, err := freePort()
 	if err != nil {
@@ -226,7 +260,7 @@ func startHost(t *testing.T, mock *mockUpstream, dir string) (*harness, error) {
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 
 	configPath := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(configPath, hostConfig(port, authDir, pluginsDir, dbPath, mock.baseURL()), 0o600); err != nil {
+	if err := os.WriteFile(configPath, hostConfig(port, authDir, pluginsDir, dbPath, mock.baseURL(), opts), 0o600); err != nil {
 		return nil, err
 	}
 
@@ -238,6 +272,7 @@ func startHost(t *testing.T, mock *mockUpstream, dir string) (*harness, error) {
 		dbPath:  dbPath,
 		port:    port,
 		baseURL: baseURL,
+		opts:    opts,
 		mock:    mock,
 		stdout:  &lockedBuffer{},
 		stderr:  &lockedBuffer{},
@@ -287,7 +322,15 @@ func installPlugin(pluginsDir string) error {
 
 // hostConfig renders an isolated v8 config that routes one model to the mock
 // upstream through OpenAI compatibility and enables the observer plugin.
-func hostConfig(port int, authDir, pluginsDir, dbPath, mockURL string) []byte {
+//
+// The compatibility provider name contains "openai" so the host classifies it
+// with OpenAI subset token semantics (cached tokens are a subset of the prompt),
+// matching the accounting the mock fixture exercises.
+func hostConfig(port int, authDir, pluginsDir, dbPath, mockURL string, opts hostOptions) []byte {
+	var retention string
+	if opts.StatsRetentionDays > 0 {
+		retention = fmt.Sprintf("\n      stats-retention-days: %d", opts.StatsRetentionDays)
+	}
 	return []byte(fmt.Sprintf(`config-version: 8
 server:
   host: "127.0.0.1"
@@ -317,8 +360,21 @@ plugins:
     %s:
       enabled: true
       db: %q
-      capture-bodies: true
-`, port, mgmtKey, clientKey, authDir, upstreamModel, mockURL+"/v1", upstreamKey, upstreamModel, modelName, pluginsDir, pluginID, dbPath))
+      capture-bodies: %t%s
+`, port, mgmtKey, clientKey, authDir, compatProviderName, mockURL+"/v1", upstreamKey, upstreamModel, modelName, pluginsDir, pluginID, dbPath, opts.CaptureBodies, retention))
+}
+
+// rewriteConfig rewrites the host config with new observer plugin options and
+// the same port/auth/plugin paths, letting the host's config watcher apply a
+// plugin reconfigure. An empty DatabasePath keeps the current database.
+func (h *harness) rewriteConfig(t *testing.T, opts hostOptions) error {
+	t.Helper()
+	dbPath := opts.DatabasePath
+	if dbPath == "" {
+		dbPath = h.dbPath
+	}
+	content := hostConfig(h.port, h.authDir, filepath.Join(h.dir, "plugins"), dbPath, h.mock.baseURL(), opts)
+	return os.WriteFile(filepath.Join(h.dir, "config.yaml"), content, 0o600)
 }
 
 // hostEnv builds a minimal environment that cannot inherit production CPA
