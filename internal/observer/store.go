@@ -87,7 +87,7 @@ type Store struct {
 	// access and never blocks on I/O, so capture stays off the inference path.
 	enqueueMu sync.RWMutex
 
-	// finalErr records the last flush/cleanup failure observed during shutdown.
+	// finalErr records the first writer failure, which Close must report.
 	finalErr error
 
 	droppedUsage  atomic.Uint64
@@ -351,7 +351,7 @@ func (s *Store) Flush(ctx context.Context) error {
 
 // Close quiesces the writer, runs a final cleanup and releases the database.
 // It is idempotent, protects concurrent readers from the closed database, and
-// reports the last flush/cleanup/database failure instead of claiming success.
+// reports the first writer/database failure instead of claiming success.
 func (s *Store) Close() error {
 	s.closeOnce.Do(func() {
 		// Flip the closing flag under the enqueue lock so no in-flight
@@ -507,7 +507,7 @@ func (s *Store) attachBodyAvailability(tx *bolt.Tx, items []Request, now time.Ti
 		return
 	}
 	for i := range items {
-		if _, _, ok := resolveBody(tx, items[i].RequestID, now); ok {
+		if _, _, ok := resolveBody(tx, items[i].RequestID, now, s.cfg.BodyRetention); ok {
 			items[i].BodyAvailable = true
 		}
 	}
@@ -672,7 +672,7 @@ func (s *Store) Body(requestID string) (BodyDetail, error) {
 			return ErrNotFound
 		}
 		now := s.now()
-		bodyID, meta, ok := resolveBody(tx, requestID, now)
+		bodyID, meta, ok := resolveBody(tx, requestID, now, s.cfg.BodyRetention)
 		if !ok {
 			return ErrNotFound
 		}
@@ -703,9 +703,21 @@ func (s *Store) Body(requestID string) (BodyDetail, error) {
 // body request ID lookup, then resolves an execution request ID through the
 // usage_trace and trace_body indexes. Expired or ambiguous associations are
 // treated as absent.
-func resolveBody(tx *bolt.Tx, requestID string, now time.Time) (string, bodyMeta, bool) {
+func resolveBody(tx *bolt.Tx, requestID string, now time.Time, retention time.Duration) (string, bodyMeta, bool) {
 	mb := tx.Bucket(bucketBodyMeta)
-	if meta, ok := decodeBodyMeta(mb.Get([]byte(requestID))); ok && now.Before(meta.expiresAt) {
+	readMeta := func(id string) (bodyMeta, bool) {
+		meta, ok := decodeBodyMeta(mb.Get([]byte(id)))
+		if !ok {
+			return bodyMeta{}, false
+		}
+		// Reconfiguration can shorten the read deadline, but must never
+		// extend an earlier persisted expiry.
+		if deadline := meta.createdAt.Add(retention); deadline.Before(meta.expiresAt) {
+			meta.expiresAt = deadline
+		}
+		return meta, now.Before(meta.expiresAt)
+	}
+	if meta, ok := readMeta(requestID); ok {
 		return requestID, meta, true
 	}
 	traceID, ok := lookupUsageTrace(tx, requestID)
@@ -716,8 +728,8 @@ func resolveBody(tx *bolt.Tx, requestID string, now time.Time) (string, bodyMeta
 	if !ok {
 		return "", bodyMeta{}, false
 	}
-	meta, ok := decodeBodyMeta(mb.Get([]byte(bodyID)))
-	if !ok || !now.Before(meta.expiresAt) {
+	meta, ok := readMeta(bodyID)
+	if !ok {
 		return "", bodyMeta{}, false
 	}
 	return bodyID, meta, true
@@ -833,8 +845,9 @@ func (s *Store) cleanupTx(now time.Time) error {
 				}
 			}
 		}
-		removedBytes = s.cleanupBodiesTx(tx, now)
-		return nil
+		var err error
+		removedBytes, err = s.cleanupBodiesTx(tx, now)
+		return err
 	})
 	if err != nil {
 		return err
@@ -843,15 +856,15 @@ func (s *Store) cleanupTx(now time.Time) error {
 	return nil
 }
 
-// cleanupBodiesTx deletes expired bodies and returns the bytes removed. The
+// cleanupBodiesTx deletes expired/over-cap bodies and returns the bytes removed. The
 // caller applies the total to s.bodyBytes only after the transaction commits.
-func (s *Store) cleanupBodiesTx(tx *bolt.Tx, now time.Time) int64 {
+func (s *Store) cleanupBodiesTx(tx *bolt.Tx, now time.Time) (int64, error) {
 	ib := tx.Bucket(bucketBodyIndex)
 	bb := tx.Bucket(bucketBodies)
 	mb := tx.Bucket(bucketBodyMeta)
 	tbb := tx.Bucket(bucketTraceBody)
 	if ib == nil || bb == nil || mb == nil {
-		return 0
+		return 0, nil
 	}
 	nowNanos := now.UnixNano()
 	retentionNS := int64(s.cfg.BodyRetention)
@@ -861,7 +874,7 @@ func (s *Store) cleanupBodiesTx(tx *bolt.Tx, now time.Time) int64 {
 		createdAt, ok := decodeBodyIndexCreated(key)
 		if !ok {
 			if err := c.Delete(); err != nil {
-				return removed
+				return removed, err
 			}
 			continue
 		}
@@ -871,16 +884,21 @@ func (s *Store) cleanupBodiesTx(tx *bolt.Tx, now time.Time) int64 {
 		requestID := string(key[8:])
 		size, _ := decodeBodyIndexSize(value)
 		if err := deleteBodyTx(bb, mb, tbb, requestID); err != nil {
-			return removed
+			return removed, err
 		}
 		if err := c.Delete(); err != nil {
-			return removed
+			return removed, err
 		}
 		if size > 0 {
 			removed += size
 		}
 	}
-	return removed
+	bodyBytes := s.bodyBytes
+	s.removeBodyBytesFrom(&bodyBytes, removed)
+	if err := s.evictBodiesTx(bb, mb, ib, tbb, &bodyBytes); err != nil {
+		return removed, err
+	}
+	return s.bodyBytes - bodyBytes, nil
 }
 
 func (s *Store) removeBodyBytes(size int64) {
@@ -930,27 +948,7 @@ func (s *Store) writerLoop() {
 	// busy producer cannot make Flush/Close spin forever or grow memory without
 	// bound. The budget equals the total channel capacity, which is also the
 	// most that can be pending after producers are quiesced by Close.
-	drain := func() {
-		budget := cap(s.usageCh) + cap(s.bodyCh)
-		for budget > 0 {
-			select {
-			case u := <-s.usageCh:
-				usage = append(usage, u)
-				s.pendingCount.Add(1)
-			case b := <-s.bodyCh:
-				bodies = append(bodies, b)
-				s.pendingCount.Add(1)
-			default:
-				return
-			}
-			budget--
-			if len(usage)+len(bodies) >= writeBatchSize {
-				if err := flush(); err != nil && s.finalErr == nil {
-					s.finalErr = err
-				}
-			}
-		}
-	}
+	drain := func() error { return s.drainQueues(&usage, &bodies, flush) }
 	record := func(err error) {
 		if err != nil && s.finalErr == nil {
 			s.finalErr = err
@@ -983,10 +981,10 @@ func (s *Store) writerLoop() {
 			if err != nil {
 				s.writeErrors.Add(1)
 			}
+			record(err)
 			reply <- err
 		case reply := <-s.flushCh:
-			drain()
-			err := flush()
+			err := drain()
 			if cerr := s.cleanupTx(s.now()); cerr != nil {
 				s.writeErrors.Add(1)
 				if err == nil {
@@ -996,19 +994,47 @@ func (s *Store) writerLoop() {
 			record(err)
 			reply <- err
 		case <-s.stopCh:
-			drain()
-			record(flush())
+			record(drain())
 			if err := s.cleanupTx(s.now()); err != nil {
 				s.writeErrors.Add(1)
 				record(err)
 			}
 			// Producers are quiesced (closedFlag set before stopCh), so one
 			// more bounded drain flushes anything enqueued before shutdown.
-			drain()
-			record(flush())
+			record(drain())
 			return
 		}
 	}
+}
+
+// drainQueues is the flush barrier's bounded write pass. It flushes full
+// batches and the remaining tail, returning the first error from this pass.
+func (s *Store) drainQueues(usage *[]Request, bodies *[]pendingBody, flush func() error) error {
+	var firstErr error
+	budget := cap(s.usageCh) + cap(s.bodyCh)
+drainLoop:
+	for budget > 0 {
+		select {
+		case u := <-s.usageCh:
+			*usage = append(*usage, u)
+			s.pendingCount.Add(1)
+		case b := <-s.bodyCh:
+			*bodies = append(*bodies, b)
+			s.pendingCount.Add(1)
+		default:
+			break drainLoop
+		}
+		budget--
+		if len(*usage)+len(*bodies) >= writeBatchSize {
+			if err := flush(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	if err := flush(); firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
 }
 
 // writeBatch persists a batch of usage records and bodies in one transaction.
@@ -1117,19 +1143,34 @@ func (s *Store) putBodyTx(bb, mb, ib, tbb *bolt.Bucket, item pendingBody, bodyBy
 	}
 	*bodyBytes += size
 
+	if err := s.evictBodiesTx(bb, mb, ib, tbb, bodyBytes); err != nil {
+		return *bodyBytes, err
+	}
+	return *bodyBytes, nil
+}
+
+// evictBodiesTx enforces the current cap in oldest-first order. Accounting is
+// local to the transaction; the caller publishes it only after commit.
+func (s *Store) evictBodiesTx(bb, mb, ib, tbb *bolt.Bucket, bodyBytes *int64) error {
 	c := ib.Cursor()
 	for key, value := c.First(); key != nil && *bodyBytes > s.cfg.MaxBodyStorageBytes; key, value = c.Next() {
+		if _, ok := decodeBodyIndexCreated(key); !ok {
+			if err := c.Delete(); err != nil {
+				return err
+			}
+			continue
+		}
 		id := key[8:]
 		evicted, _ := decodeBodyIndexSize(value)
 		if err := deleteBodyTx(bb, mb, tbb, string(id)); err != nil {
-			return *bodyBytes, err
+			return err
 		}
 		if err := c.Delete(); err != nil {
-			return *bodyBytes, err
+			return err
 		}
 		s.removeBodyBytesFrom(bodyBytes, evicted)
 	}
-	return *bodyBytes, nil
+	return nil
 }
 
 // recordTraceBody maintains the TraceID -> body request ID index. A trace that
