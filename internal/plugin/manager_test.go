@@ -53,6 +53,36 @@ func TestLifecycleValidationKeepsLiveStore(t *testing.T) {
 	}
 }
 
+// Host-wide config synchronization can resend unchanged plugin YAML. It must
+// not close storage, lose queued health counters or create an availability gap.
+func TestUnchangedReconfigureKeepsLiveStore(t *testing.T) {
+	for _, raw := range []string{"", "live"} {
+		t.Run(raw, func(t *testing.T) {
+			m, opener := newTestManager()
+			register(t, m, raw)
+			live := opener.last()
+			resp, err := m.HandleCall(pluginabi.MethodPluginReconfigure, mustJSON(t, lifecycleRequest{
+				ConfigYAML: []byte(raw), SchemaVersion: 3,
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var reg registration
+			mustResult(t, resp, &reg)
+			if reg.SchemaVersion != 3 {
+				t.Errorf("schema = %d, want 3", reg.SchemaVersion)
+			}
+			if live.isClosed() || opener.last() != live || len(opener.opened()) != 1 {
+				t.Fatal("unchanged configuration closed or replaced the live store")
+			}
+			sendUsage(t, m, "after-noop")
+			if live.usageCount() != 1 {
+				t.Fatal("unchanged live store did not receive usage")
+			}
+		})
+	}
+}
+
 func TestReconfigureRollsBackAfterFailedOpen(t *testing.T) {
 	m, opener := newTestManager()
 	register(t, m, "live")

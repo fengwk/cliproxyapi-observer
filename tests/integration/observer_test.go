@@ -168,7 +168,7 @@ func (h *harness) fetchRequests(t *testing.T) requestPage {
 	t.Helper()
 	status, _, body := h.managementRequest(t, http.MethodGet, "/v0/management/plugins/"+pluginID+"/requests?limit=50")
 	if status != http.StatusOK {
-		t.Fatalf("requests status %d body %s", status, truncate(body, 300))
+		t.Fatalf("requests status %d body %s\n--- host log tail ---\n%s", status, truncate(body, 300), logTail(h.stdout.String(), h.stderr.String()))
 	}
 	var page requestPage
 	if err := json.Unmarshal(body, &page); err != nil {

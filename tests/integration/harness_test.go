@@ -400,8 +400,8 @@ func freePort() (int, error) {
 	return listener.Addr().(*net.TCPAddr).Port, nil
 }
 
-// awaitReady polls the unauthenticated health endpoint and then the client
-// model catalog. No sleeps are used for TTL logic, only bounded readiness.
+// awaitReady checks the server, client catalog and authenticated observer.
+// Startup synchronization may temporarily leave the observer unavailable.
 func (h *harness) awaitReady(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
@@ -432,7 +432,26 @@ func (h *harness) awaitReady(timeout time.Duration) error {
 	if status != http.StatusOK {
 		return fmt.Errorf("readiness /v1/models status %d body %s", status, truncate(body, 400))
 	}
-	return nil
+	for time.Now().Before(deadline) {
+		select {
+		case <-h.done:
+			return fmt.Errorf("host exited during observer readiness: %v", h.waitError())
+		default:
+		}
+		status, body, err = h.rawRequest(http.MethodGet, "/v0/management/plugins/"+pluginID+"/health", nil, map[string]string{"Authorization": "Bearer " + mgmtKey})
+		if err == nil && status == http.StatusOK {
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		} else if status == http.StatusServiceUnavailable || status == http.StatusNotFound {
+			lastErr = fmt.Errorf("observer health status %d", status)
+		} else {
+			return fmt.Errorf("observer health status %d body %s", status, truncate(body, 400))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("observer did not become ready: %v", lastErr)
 }
 
 func (h *harness) waitError() error {

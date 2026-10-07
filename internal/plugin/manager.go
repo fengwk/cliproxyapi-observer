@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"sync"
@@ -118,6 +119,14 @@ func (m *Manager) applyLocked(raw []byte, schema uint32) ([]byte, error) {
 	cfg, err := m.opener.Parse(raw)
 	if err != nil {
 		return errorEnvelope(&PluginError{Code: "invalid_config", Message: "invalid observer configuration", HTTPStatus: http.StatusBadRequest})
+	}
+	m.mu.RLock()
+	unchanged := m.store != nil && m.hasConfig && bytes.Equal(m.raw, raw)
+	m.mu.RUnlock()
+	if unchanged {
+		// Host-wide synchronization can resend identical plugin config.
+		// A quiesced store is nil and must still reopen for replacement rollback.
+		return okEnvelope(registrationResponse(schema))
 	}
 
 	m.mu.Lock()
