@@ -79,7 +79,7 @@ function buildSummary() {
       { provider: 'openai', model: 'gpt-5.1-codex', requests: 640, failed_requests: 4, input_tokens: 2400000, output_tokens: 800000, cache_read_tokens: 1200000, cache_creation_tokens: 120000, total_tokens: 3320000, cost_usd: 0.8123 },
       { provider: 'anthropic', model: 'claude-opus-4-1', requests: 322, failed_requests: 6, input_tokens: 1400000, output_tokens: 300000, cache_read_tokens: 900000, cache_creation_tokens: 90000, total_tokens: 1790000, cost_usd: 0.4021 },
       { provider: 'unknown-vendor', model: XSS_MODEL, requests: 120, failed_requests: 2, input_tokens: 120000, output_tokens: 30000, cache_read_tokens: 0, cache_creation_tokens: 0, total_tokens: 150000, cost_usd: 0.0201 },
-      { provider: 'gemini', model: 'gemini-3-pro', requests: 152, failed_requests: 0, input_tokens: 648000, output_tokens: 104567, cache_read_tokens: 245678, cache_creation_tokens: 24567, total_tokens: 723451, cost_usd: null }
+      { provider: 'gemini', model: 'gemini-3-pro', requests: 152, failed_requests: 0, input_tokens: 648000, output_tokens: 104567, cache_read_tokens: 245678, cache_creation_tokens: 24567, total_tokens: 723451, cost_usd: 0, unpriced_requests: 152 }
     ],
     series
   };
@@ -106,7 +106,7 @@ function buildRequestBody(index, captureBodies) {
     cache_read_tokens: index * 7,
     cache_creation_tokens: index * 2,
     total_tokens: 410 + index * 2,
-    accounting_quality: index % 5 === 0 ? 'unclassified' : 'exact',
+    accounting_quality: index % 5 === 0 ? 'unclassified' : 'complete',
     latency_ns: (400 + index * 12) * 1000000,
     ttft_ns: (120 + index * 3) * 1000000,
     tps: index % 5 === 0 ? null : 42.5 + index,

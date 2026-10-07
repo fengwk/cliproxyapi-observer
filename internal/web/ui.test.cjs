@@ -169,6 +169,12 @@ test('buildApiUrl 拒绝非相对 / 跨源基址', () => {
   assert.equal(ui.buildApiUrl('https://evil.example.com/x', 'summary', null), '');
   assert.equal(ui.buildApiUrl('javascript:alert(1)', 'summary', null), '');
   assert.equal(ui.buildApiUrl('/base', '', null), '');
+  for (const base of ['/\\evil.test', '//evil.test', '/%5cevil.test', '/%2f%2fevil.test', '/base/../evil']) {
+    assert.equal(ui.buildApiUrl(base, 'body'), '');
+    assert.equal(ui.deriveApiBase(base + '/resource/plugins/x/ui'), ui.DEFAULT_API_BASE);
+  }
+  assert.equal(ui.buildApiUrl('/base', '\\evil'), '');
+  assert.equal(ui.buildApiUrl('/base', '//evil'), '');
 });
 
 test('isAllowedTransport 只放行 HTTPS 与本机回环', () => {
@@ -181,15 +187,16 @@ test('isAllowedTransport 只放行 HTTPS 与本机回环', () => {
   assert.equal(ui.isAllowedTransport({}), false);
 });
 
-test('rangeBounds 生成整分钟对齐的 RFC3339 边界', () => {
+test('rangeBounds includes the current minute without a future upper bound', () => {
   const now = Date.UTC(2026, 0, 2, 3, 4, 5, 678);
   const bounds = ui.rangeBounds('24h', now);
-  assert.equal(bounds.to, '2026-01-02T03:04:00.000Z');
-  assert.equal(bounds.from, '2026-01-01T03:04:00.000Z');
+  assert.equal(bounds.to, '2026-01-02T03:04:05.678Z');
+  assert.equal(bounds.from, '2026-01-01T03:04:05.678Z');
   const week = ui.rangeBounds('7d', now);
-  assert.equal(week.from, '2025-12-26T03:04:00.000Z');
+  assert.equal(week.from, '2025-12-26T03:04:05.678Z');
   const month = ui.rangeBounds('30d', now);
-  assert.equal(month.from, '2025-12-03T03:04:00.000Z');
+  assert.equal(month.from, '2025-12-03T03:04:05.678Z');
+  assert.equal(Date.parse(bounds.to), now);
   // 未知范围回退 24h。
   assert.deepEqual(ui.rangeBounds('bogus', now), bounds);
 });
@@ -229,6 +236,31 @@ test('formatCost 明确标注未定价与极小金额', () => {
   assert.equal(ui.formatCost(0), '$0.0000');
   assert.equal(ui.formatCost(0.00001), '<$0.0001');
   assert.equal(ui.formatCost(2.5), '$2.5000');
+});
+
+// Zero is an authoritative subtotal, not a price for unknown requests.
+test('aggregate costs distinguish all-unknown, partial and priced-zero', () => {
+  for (const source of [
+    { requests: 5, unpriced_requests: 5, cost_usd: 0 },
+    { requests: 5, unpriced_requests: 6, cost_usd: 0 }
+  ]) {
+    assert.equal(ui.buildOverview(source).find((c) => c.key === 'cost').value, '未定价');
+    assert.equal(ui.buildGroupRows([source])[0].cost, '未定价');
+  }
+  const partial = { requests: 5, unpriced_requests: 2, cost_usd: 0 };
+  assert.match(ui.buildOverview(partial).find((c) => c.key === 'cost').sub, /已定价小计；未定价 2 条/);
+  assert.match(ui.buildGroupRows([partial])[0].cost, /已定价小计；未知 2 条/);
+  assert.equal(ui.buildGroupRows([{ requests: 5, unpriced_requests: 0, cost_usd: 0 }])[0].cost, '$0.0000');
+});
+
+test('body responses require exact server identity and string content', () => {
+  const valid = { request_id: 'r1', body: '' };
+  assert.equal(ui.validateBodyDetail(valid, 'r1'), valid);
+  for (const value of [null, {}, { request_id: 'r2', body: 'secret' },
+    { request_id: 'r1', body: null }, { request_id: 'r1', body: {} },
+    { request_id: 1, body: 'secret' }]) {
+    assert.throws(() => ui.validateBodyDetail(value, 'r1'), /不匹配或格式无效/);
+  }
 });
 
 test('buildOverview 对 null / 缺失计数安全降级', () => {
@@ -280,7 +312,7 @@ test('buildRequestRows 标注 null TPS / 未定价 / 未知核算', () => {
       accounting_quality: 'unclassified',
       body_available: true
     },
-    { request_id: 'r2', model: 'claude', failed: true, failure_status: 500, tps: 12.5, cost_usd: 0.02, accounting_quality: 'exact' }
+    { request_id: 'r2', model: 'claude', failed: true, failure_status: 500, tps: null, cost_usd: null, accounting_quality: 'complete' }
   ]);
   assert.equal(rows[0].tps, '—');
   assert.equal(rows[0].cost, '未定价');
@@ -380,10 +412,10 @@ test('resolveThemeSource 同源嵌入跟随父级，否则回退系统偏好', (
   assert.equal(ui.resolveThemeSource({ framed: true, sameOrigin: true, parentTheme: 'junk' }), '');
   // 跨域嵌入不能读取父级，回退系统偏好。
   assert.equal(ui.resolveThemeSource({ framed: true, sameOrigin: false, parentTheme: 'dark', prefersDark: true }), 'dark');
-  assert.equal(ui.resolveThemeSource({ framed: true, sameOrigin: false, prefersDark: false }), '');
+  assert.equal(ui.resolveThemeSource({ framed: true, sameOrigin: false, prefersDark: false }), 'white');
   // 独立打开。
   assert.equal(ui.resolveThemeSource({ framed: false, prefersDark: true }), 'dark');
-  assert.equal(ui.resolveThemeSource({ framed: false, prefersDark: false }), '');
+  assert.equal(ui.resolveThemeSource({ framed: false, prefersDark: false }), 'white');
 });
 
 // ---------------------------------------------------------------------------
