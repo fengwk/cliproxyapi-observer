@@ -1,0 +1,25 @@
+version: 2
+updates:
+  # Daily dependency updates, one pull request at a time. The CLIProxyAPI SDK
+  # stays pinned in go.mod/go.sum; a v9 migration is a different module path and
+  # is always a manual change.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: daily
+      time: "03:17"
+      timezone: "UTC"
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "deps"
+
+  # Official GitHub Actions updates, weekly.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      time: "03:37"
+      timezone: "UTC"
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "ci"

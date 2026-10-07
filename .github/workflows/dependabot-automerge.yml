@@ -1,0 +1,47 @@
+name: dependabot-automerge
+
+# Runs only after the "ci" workflow completes, from the trusted default branch.
+# It never checks out or executes pull-request code: the guard script reads PR
+# metadata through the GitHub API and merges only when the change is a pure
+# Dependabot dependency or official GitHub Actions version bump that passed the
+# full CI (including the minimum and latest real-host integration jobs) for the
+# exact head commit. Exact-head merging needs no repository auto-merge setting. A
+# GITHUB_TOKEN merge does not emit a push event, so
+# the main-branch ci run is dispatched explicitly afterwards.
+on:
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  automerge:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      # Required to dispatch the main-branch ci run after the merge.
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Guard, merge and re-run CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          # May be empty when the workflow_run payload omits pull_requests; the
+          # script then resolves the unique matching open PR or skips safely.
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+          # Immutable head commit of the successful CI run; the script refuses to
+          # merge if the pull request head has advanced past it.
+          EXPECTED_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: bash scripts/dependabot-automerge.sh

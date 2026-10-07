@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "cliproxyapi-observer",
+      "name": "Observer",
+      "description": "Local request observation, token accounting and 24h body inspection for CLIProxyAPI.",
+      "author": "fengwk",
+      "repository": "https://github.com/fengwk/cliproxyapi-observer",
+      "license": "MIT",
+      "tags": ["observer", "statistics", "tokens", "logging"],
+      "install": {
+        "type": "github-release"
+      }
+    }
+  ]
+}

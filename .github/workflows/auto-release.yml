@@ -1,0 +1,93 @@
+name: auto-release
+
+# Turns a successful full "ci" run on the default branch into a dependency-only
+# patch release. It never checks out or executes pull-request code: the
+# controller reads provenance through the GitHub API and validates per-commit
+# content against the immutable local history.
+#
+# workflow_run handles the common path (push / workflow_dispatch ci success);
+# the 6-hour schedule reconciles a release whose tag was created but whose
+# release workflow was never dispatched or failed, and workflow_dispatch allows
+# a manual reconciliation. All triggers share one non-cancelling concurrency
+# group so reconciliations never overlap.
+on:
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       (github.event.workflow_run.event == 'push' ||
+        github.event.workflow_run.event == 'workflow_dispatch') &&
+       github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Reconcile release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          # Set only for workflow_run events; empty for schedule/dispatch.
+          CI_RUN_ID: ${{ github.event.workflow_run.id }}
+          EXPECTED_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: python3 scripts/auto_release.py
+
+      # A single deduplicated issue records that unattended reconciliation is
+      # broken. Only the run URL is ever published; logs, tokens and payloads
+      # are never copied into the issue.
+      - name: Report failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="auto-release reconciliation failed"
+          existing="$(gh issue list --repo "$GH_REPO" --state open \
+            --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
+          if [ -z "$existing" ]; then
+            gh issue create --repo "$GH_REPO" --title "$title" --body "$RUN_URL"
+          else
+            gh issue comment "$existing" --repo "$GH_REPO" --body "$RUN_URL"
+          fi
+
+      # A healthy reconciliation closes the issue this automation opened.
+      - name: Close recovered issue
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          title="auto-release reconciliation failed"
+          number="$(gh issue list --repo "$GH_REPO" --state open \
+            --author "github-actions[bot]" \
+            --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh issue close "$number" --repo "$GH_REPO" \
+              --comment "auto-release reconciliation recovered."
+          fi
