@@ -189,6 +189,44 @@ func TestSummaryErrorsAreSanitized(t *testing.T) {
 	}
 }
 
+// Validate the requested interval before rounding it to minute buckets.
+// Otherwise legal 24h windows fail, and empty/reversed intervals become valid.
+func TestSummaryFractionalMinuteQueryBounds(t *testing.T) {
+	cfg := observerConfigFixture()
+	cfg.StatsRetentionDays = 1
+	opener := &fakeOpener{cfg: cfg}
+	m := registeredManager(t, opener)
+	now := managementNow.Add(37*time.Second + 123*time.Millisecond)
+	m.now = func() time.Time { return now }
+	format := func(value time.Time) string { return value.Format(time.RFC3339Nano) }
+
+	for _, tc := range []struct {
+		name   string
+		from   time.Time
+		to     time.Time
+		status int
+	}{
+		{"exact-24h", now.Add(-24 * time.Hour), now, http.StatusOK},
+		{"over-24h", now.Add(-24*time.Hour - time.Nanosecond), now, http.StatusBadRequest},
+		{"empty", now, now, http.StatusBadRequest},
+		{"reversed-same-minute", now.Add(time.Second), now, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			query := url.Values{"from": {format(tc.from)}, "to": {format(tc.to)}}
+			resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/summary", query)
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status = %d, want %d: %s", resp.StatusCode, tc.status, resp.Body)
+			}
+			if tc.status == http.StatusOK {
+				got, _ := opener.last().lastQuery()
+				if !got.From.Equal(tc.from.Truncate(time.Minute)) || !got.To.Equal(nextMinute(tc.to)) {
+					t.Errorf("aligned bounds = %+v", got)
+				}
+			}
+		})
+	}
+}
+
 func TestRequestsLimitCursorAndValidation(t *testing.T) {
 	opener := &fakeOpener{cfg: observerConfigFixture()}
 	m := registeredManager(t, opener)

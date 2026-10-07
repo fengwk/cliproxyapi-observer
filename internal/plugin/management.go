@@ -269,8 +269,8 @@ func statsRange(cfg observer.Config) time.Duration {
 // The range defaults to the last 24h. When align is set (summary) the bounds are
 // snapped to whole minutes so the returned Summary.From/To are minute-aligned,
 // and the default upper bound is the next minute boundary so the current minute
-// is included. Explicit future ranges, empty/inverted ranges and ranges wider
-// than the accepted maximum are rejected with 400.
+// is included. Validate the requested interval before bucket alignment so
+// rounding neither rejects a valid maximum-width range nor repairs invalid bounds.
 func (m *Manager) parseQuery(values url.Values, maxRange time.Duration, align, withLimit bool) (observer.Query, *httpError) {
 	now := m.now()
 	upper := nextMinute(now)
@@ -281,9 +281,6 @@ func (m *Manager) parseQuery(values url.Values, maxRange time.Duration, align, w
 	}
 	if to.IsZero() {
 		to = upper
-	}
-	if align {
-		to = alignUp(to)
 	}
 	if to.After(upper) {
 		return observer.Query{}, &httpError{status: http.StatusBadRequest, message: "'to' must not be in the future"}
@@ -296,14 +293,15 @@ func (m *Manager) parseQuery(values url.Values, maxRange time.Duration, align, w
 	if from.IsZero() {
 		from = to.Add(-defaultQueryWindow)
 	}
-	if align {
-		from = from.Truncate(time.Minute)
-	}
 	if !from.Before(to) {
 		return observer.Query{}, &httpError{status: http.StatusBadRequest, message: "'from' must be before 'to'"}
 	}
 	if maxRange > 0 && to.Sub(from) > maxRange {
 		return observer.Query{}, &httpError{status: http.StatusBadRequest, message: "range exceeds the retained window"}
+	}
+	if align {
+		from = from.Truncate(time.Minute)
+		to = alignUp(to)
 	}
 
 	query := observer.Query{
