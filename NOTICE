@@ -1,0 +1,5 @@
+CLIProxyAPI Observer
+Copyright (c) 2026 fengwk
+
+Uses the public CLIProxyAPI plugin SDK (MIT) and bbolt (MIT).
+Independent implementation; not a fork of cpa-plugin-tokens-statistic.
