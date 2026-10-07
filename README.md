@@ -135,7 +135,8 @@ http://127.0.0.1:8317/v0/resource/plugins/cliproxyapi-observer/ui
 
 ### 4. 使用管理 API
 
-均需 CPA 管理密钥，且 `/v0/management` 与 `/v8/management` 两个前缀都可用：
+均需 CPA 管理密钥。以下是实际宿主验证覆盖的插件自定义管理地址；CPA v8 宿主仍使用
+`/v0/management` 挂载这些路由，不能因配置版本为 v8 就直接替换 URL 前缀：
 
 ```text
 GET /v0/management/plugins/cliproxyapi-observer/summary
