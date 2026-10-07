@@ -69,15 +69,54 @@ func TestSummarySeriesDownsamplesToMaxPoints(t *testing.T) {
 	}
 	flushAll(t, s)
 
-	summary, err := s.Summary(Query{From: from, To: from.Add(minutes * time.Minute)})
+	to := from.Add(minutes * time.Minute)
+	summary, err := s.Summary(Query{From: from, To: to})
 	if err != nil {
 		t.Fatalf("Summary: %v", err)
 	}
-	if len(summary.Series) != maxSeriesPoints {
-		t.Fatalf("series points = %d, want %d", len(summary.Series), maxSeriesPoints)
+	if len(summary.Series) == 0 || len(summary.Series) > maxSeriesPoints {
+		t.Fatalf("series points = %d, want 1..%d", len(summary.Series), maxSeriesPoints)
 	}
 	var summed uint64
 	for _, p := range summary.Series {
+		if p.Time.Before(from) || !p.Time.Before(to) {
+			t.Errorf("series point %v outside [%v, %v)", p.Time, from, to)
+		}
+		summed += p.Requests
+	}
+	if summed != minutes {
+		t.Errorf("downsampled request sum = %d, want %d", summed, minutes)
+	}
+}
+
+// TestSummarySeriesStaysWithinRangeFor301Minutes guards the ceil(width) edge:
+// 301 minutes must not emit a trailing point past the query range.
+func TestSummarySeriesStaysWithinRangeFor301Minutes(t *testing.T) {
+	clk := &clock{t: time.Now().UTC().Truncate(time.Minute)}
+	s := openTestStore(t, nil)
+	s.setNow(clk.now)
+
+	from := clk.now()
+	const minutes = 301
+	for m := 0; m < minutes; m++ {
+		at := from.Add(time.Duration(m) * time.Minute)
+		s.SubmitUsage(usageRecord("e-"+time.Duration(m).String(), "openai", "gpt-5", at, simpleUsage(1, 1)))
+	}
+	flushAll(t, s)
+
+	to := from.Add(minutes * time.Minute)
+	summary, err := s.Summary(Query{From: from, To: to})
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if len(summary.Series) > maxSeriesPoints {
+		t.Fatalf("series points = %d, want <= %d", len(summary.Series), maxSeriesPoints)
+	}
+	var summed uint64
+	for _, p := range summary.Series {
+		if p.Time.Before(from) || !p.Time.Before(to) {
+			t.Fatalf("series point %v outside [%v, %v)", p.Time, from, to)
+		}
 		summed += p.Requests
 	}
 	if summed != minutes {

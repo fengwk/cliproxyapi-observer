@@ -1,6 +1,7 @@
 package observer
 
 import (
+	"math"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
@@ -30,31 +31,46 @@ func NormalizeUsage(record pluginapi.UsageRecord, prices map[string]Price) Reque
 	breakdown := ensured.TokenBreakdown
 
 	req := Request{
-		RequestID:           record.RequestID,
-		TraceID:             record.TraceID,
-		Time:                record.RequestedAt,
-		Provider:            record.Provider,
-		Model:               record.Model,
-		Alias:               record.Alias,
-		Executor:            record.ExecutorType,
-		AuthType:            record.AuthType,
-		ServiceTier:         firstNonEmpty(record.ResponseServiceTier, record.ServiceTier),
-		ReasoningEffort:     record.ReasoningEffort,
-		Stream:              record.Stream,
-		Failed:              record.Failed,
-		FailureStatus:       record.Failure.StatusCode,
-		InputTokens:         breakdown.Input.TotalTokens,
-		UncachedInputTokens: breakdown.Input.UncachedTokens,
-		OutputTokens:        breakdown.Output.TotalTokens,
-		ReasoningTokens:     breakdown.Output.ReasoningTokens,
-		CacheReadTokens:     breakdown.Input.CacheReadTokens,
-		CacheCreationTokens: breakdown.Input.CacheWriteTokens,
-		TotalTokens:         breakdown.TotalTokens,
-		AccountingQuality:   string(breakdown.Quality),
-		RawUsage:            record.Detail,
-		LatencyNS:           int64(record.Latency),
-		TTFTNS:              int64(record.TTFT),
-		CacheHit:            breakdown.Input.CacheReadTokens > 0,
+		RequestID:         record.RequestID,
+		TraceID:           record.TraceID,
+		Time:              record.RequestedAt,
+		Provider:          record.Provider,
+		Model:             record.Model,
+		Alias:             record.Alias,
+		Executor:          record.ExecutorType,
+		AuthType:          record.AuthType,
+		ServiceTier:       firstNonEmpty(record.ResponseServiceTier, record.ServiceTier),
+		ReasoningEffort:   record.ReasoningEffort,
+		Stream:            record.Stream,
+		Failed:            record.Failed,
+		FailureStatus:     record.Failure.StatusCode,
+		AccountingQuality: string(breakdown.Quality),
+		RawUsage:          record.Detail,
+		LatencyNS:         int64(record.Latency),
+		TTFTNS:            int64(record.TTFT),
+		CacheHit:          record.Detail.CacheReadTokens > 0,
+	}
+	if breakdown.Quality == usage.TokenAccountingQualityComplete {
+		// Canonical, mutually exclusive buckets.
+		req.InputTokens = breakdown.Input.TotalTokens
+		req.UncachedInputTokens = breakdown.Input.UncachedTokens
+		req.OutputTokens = breakdown.Output.TotalTokens
+		req.ReasoningTokens = breakdown.Output.ReasoningTokens
+		req.CacheReadTokens = breakdown.Input.CacheReadTokens
+		req.CacheCreationTokens = breakdown.Input.CacheWriteTokens
+		req.TotalTokens = breakdown.TotalTokens
+	} else {
+		// Unknown/ambiguous semantics: keep the authoritative total but do not
+		// guess how reasoning overlaps output. Expose the raw positive counters
+		// for display and leave the uncertain uncached bucket at zero.
+		d := record.Detail
+		req.InputTokens = positive(d.InputTokens)
+		req.OutputTokens = positive(d.OutputTokens)
+		req.ReasoningTokens = positive(d.ReasoningTokens)
+		req.CacheReadTokens = positive(d.CacheReadTokens)
+		req.CacheCreationTokens = positive(d.CacheCreationTokens)
+		req.UncachedInputTokens = 0
+		req.TotalTokens = breakdown.TotalTokens
 	}
 	if req.Time.IsZero() {
 		req.Time = time.Now()
@@ -63,6 +79,15 @@ func NormalizeUsage(record pluginapi.UsageRecord, prices map[string]Price) Reque
 	req.TPS = tpsFor(breakdown, req.GenerationNS)
 	req.CostUSD = costFor(breakdown, req.Model, prices)
 	return req
+}
+
+// positive exposes a raw counter for display without inventing values for
+// unknown semantics; negative counters become zero.
+func positive(v int64) int64 {
+	if v < 0 {
+		return 0
+	}
+	return v
 }
 
 // generationNS is the post-first-token generation window. It is only known for
@@ -99,6 +124,10 @@ func costFor(breakdown usage.TokenBreakdown, model string, prices map[string]Pri
 		float64(breakdown.Input.CacheReadTokens)*price.CacheRead +
 		float64(breakdown.Input.CacheWriteTokens)*price.CacheCreation +
 		float64(breakdown.Output.TotalTokens)*price.Output) / millionTokens
+	if math.IsNaN(cost) || math.IsInf(cost, 0) {
+		// A pathological price/token product must not poison summaries.
+		return nil
+	}
 	return &cost
 }
 

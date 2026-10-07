@@ -128,13 +128,13 @@ func decodeCounters(b []byte) (Counters, bool) {
 }
 
 func addRequestCounters(c *Counters, r Request) {
-	c.Requests++
+	c.Requests = addSat(c.Requests, 1)
 	if r.Failed {
-		c.FailedRequests++
+		c.FailedRequests = addSat(c.FailedRequests, 1)
 	}
 	addNonNegative := func(dst *uint64, v int64) {
 		if v > 0 {
-			*dst += uint64(v)
+			*dst = addSat(*dst, uint64(v))
 		}
 	}
 	addNonNegative(&c.InputTokens, r.InputTokens)
@@ -144,39 +144,68 @@ func addRequestCounters(c *Counters, r Request) {
 	addNonNegative(&c.CacheCreationTokens, r.CacheCreationTokens)
 	addNonNegative(&c.TotalTokens, r.TotalTokens)
 	if r.CacheHit {
-		c.CacheHits++
+		c.CacheHits = addSat(c.CacheHits, 1)
 	}
 	if r.LatencyNS > 0 {
-		c.LatencyNS += uint64(r.LatencyNS)
-		c.LatencySamples++
+		c.LatencyNS = addSat(c.LatencyNS, uint64(r.LatencyNS))
+		c.LatencySamples = addSat(c.LatencySamples, 1)
 	}
 	if r.TTFTNS > 0 {
-		c.TTFTNS += uint64(r.TTFTNS)
-		c.TTFTSamples++
+		c.TTFTNS = addSat(c.TTFTNS, uint64(r.TTFTNS))
+		c.TTFTSamples = addSat(c.TTFTSamples, 1)
 	}
 	if r.CostUSD != nil {
-		c.CostUSD += *r.CostUSD
+		c.CostUSD = addCostSat(c.CostUSD, *r.CostUSD)
 	} else {
-		c.UnpricedRequests++
+		c.UnpricedRequests = addSat(c.UnpricedRequests, 1)
 	}
 }
 
 func addCounters(dst *Counters, src Counters) {
-	dst.Requests += src.Requests
-	dst.FailedRequests += src.FailedRequests
-	dst.InputTokens += src.InputTokens
-	dst.OutputTokens += src.OutputTokens
-	dst.ReasoningTokens += src.ReasoningTokens
-	dst.CacheReadTokens += src.CacheReadTokens
-	dst.CacheCreationTokens += src.CacheCreationTokens
-	dst.TotalTokens += src.TotalTokens
-	dst.CacheHits += src.CacheHits
-	dst.LatencyNS += src.LatencyNS
-	dst.LatencySamples += src.LatencySamples
-	dst.TTFTNS += src.TTFTNS
-	dst.TTFTSamples += src.TTFTSamples
-	dst.CostUSD += src.CostUSD
-	dst.UnpricedRequests += src.UnpricedRequests
+	dst.Requests = addSat(dst.Requests, src.Requests)
+	dst.FailedRequests = addSat(dst.FailedRequests, src.FailedRequests)
+	dst.InputTokens = addSat(dst.InputTokens, src.InputTokens)
+	dst.OutputTokens = addSat(dst.OutputTokens, src.OutputTokens)
+	dst.ReasoningTokens = addSat(dst.ReasoningTokens, src.ReasoningTokens)
+	dst.CacheReadTokens = addSat(dst.CacheReadTokens, src.CacheReadTokens)
+	dst.CacheCreationTokens = addSat(dst.CacheCreationTokens, src.CacheCreationTokens)
+	dst.TotalTokens = addSat(dst.TotalTokens, src.TotalTokens)
+	dst.CacheHits = addSat(dst.CacheHits, src.CacheHits)
+	dst.LatencyNS = addSat(dst.LatencyNS, src.LatencyNS)
+	dst.LatencySamples = addSat(dst.LatencySamples, src.LatencySamples)
+	dst.TTFTNS = addSat(dst.TTFTNS, src.TTFTNS)
+	dst.TTFTSamples = addSat(dst.TTFTSamples, src.TTFTSamples)
+	dst.CostUSD = addCostSat(dst.CostUSD, src.CostUSD)
+	dst.UnpricedRequests = addSat(dst.UnpricedRequests, src.UnpricedRequests)
+}
+
+// addSat adds two uint64 counters, saturating at MaxUint64 instead of wrapping.
+func addSat(a, b uint64) uint64 {
+	if a > math.MaxUint64-b {
+		return math.MaxUint64
+	}
+	return a + b
+}
+
+// addCostSat adds costs, ensuring a non-finite operand cannot poison
+// aggregates: the finite operand wins, and two non-finite operands clamp.
+func addCostSat(a, b float64) float64 {
+	aFinite := !math.IsNaN(a) && !math.IsInf(a, 0)
+	bFinite := !math.IsNaN(b) && !math.IsInf(b, 0)
+	if !aFinite && !bFinite {
+		return math.MaxFloat64
+	}
+	if !aFinite {
+		return b
+	}
+	if !bFinite {
+		return a
+	}
+	sum := a + b
+	if math.IsInf(sum, 0) {
+		return math.MaxFloat64
+	}
+	return sum
 }
 
 // Body metadata is kept separate from the content bucket so BodyAvailable can
