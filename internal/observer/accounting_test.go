@@ -106,22 +106,35 @@ func TestNormalizeUsageGeminiSeparateReasoning(t *testing.T) {
 	}
 }
 
-func TestNormalizeUsageUnknownSemanticsUnclassified(t *testing.T) {
+func TestNormalizeUsageUnknownSemanticsExposesRawPositiveCounters(t *testing.T) {
 	record := pluginapi.UsageRecord{
 		RequestID: "u1", Provider: "mystery-provider", Model: "unknown-model",
 		RequestedAt: time.Unix(4000, 0).UTC(), Latency: time.Second, TTFT: 500 * time.Millisecond,
-		Detail: pluginapi.UsageDetail{InputTokens: 100, OutputTokens: 50},
+		Detail: pluginapi.UsageDetail{
+			InputTokens: 100, OutputTokens: 50, ReasoningTokens: 12,
+			CacheReadTokens: 7, CacheCreationTokens: 3,
+		},
 	}
 	r := NormalizeUsage(record, map[string]Price{"unknown-model": {Input: 1, Output: 1}})
 	if r.AccountingQuality != string(usage.TokenAccountingQualityUnclassified) {
 		t.Fatalf("quality = %q, want unclassified", r.AccountingQuality)
 	}
-	// Authoritative total preserved; ambiguous buckets left unclassified.
+	// Authoritative total preserved; raw positive counters exposed for display;
+	// reasoning overlap not guessed and the uncertain uncached bucket stays 0.
 	if r.TotalTokens != 150 {
 		t.Errorf("total = %d, want 150", r.TotalTokens)
 	}
-	if r.InputTokens != 0 || r.OutputTokens != 0 {
-		t.Errorf("ambiguous buckets should be zero: %+v", r)
+	if r.InputTokens != 100 || r.OutputTokens != 50 || r.ReasoningTokens != 12 {
+		t.Errorf("raw display counters not exposed: %+v", r)
+	}
+	if r.CacheReadTokens != 7 || r.CacheCreationTokens != 3 {
+		t.Errorf("raw cache counters not exposed: %+v", r)
+	}
+	if r.UncachedInputTokens != 0 {
+		t.Errorf("uncertain uncached bucket = %d, want 0", r.UncachedInputTokens)
+	}
+	if !r.CacheHit {
+		t.Errorf("explicit read field should mark a cache hit")
 	}
 	if r.RawUsage.InputTokens != 100 || r.RawUsage.OutputTokens != 50 {
 		t.Errorf("raw counters not preserved: %+v", r.RawUsage)
@@ -131,6 +144,21 @@ func TestNormalizeUsageUnknownSemanticsUnclassified(t *testing.T) {
 	}
 	if r.TPS != nil {
 		t.Errorf("unclassified tps must be nil, got %v", *r.TPS)
+	}
+}
+
+func TestNormalizeUsageCacheHitUsesExplicitReadOnly(t *testing.T) {
+	// CachedTokens (legacy) plus creation must not be treated as a cache read.
+	record := pluginapi.UsageRecord{
+		RequestID: "c2", Provider: "mystery-provider", Model: "m",
+		RequestedAt: time.Unix(4100, 0).UTC(),
+		Detail: pluginapi.UsageDetail{
+			InputTokens: 10, OutputTokens: 5, CachedTokens: 40, CacheCreationTokens: 4,
+		},
+	}
+	r := NormalizeUsage(record, nil)
+	if r.CacheHit {
+		t.Errorf("legacy CachedTokens/creation must not set CacheHit: %+v", r)
 	}
 }
 
