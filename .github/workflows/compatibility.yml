@@ -1,0 +1,50 @@
+name: compatibility
+
+# Daily real-host compatibility check against the newest stable CLIProxyAPI v8
+# release. The plugin source, including its pinned SDK, is unchanged; only the
+# host binary is built fresh.
+#
+# The reusable real-host job stays the source of truth: its failure keeps the
+# whole run red and is never masked by reporting. A separate always() job reads
+# the reusable job result, records one deduplicated issue (only the run URL is
+# ever published) on failure, and closes that issue once a later run recovers.
+# This runs for both the daily schedule and manual dispatch.
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-host-latest:
+    uses: ./.github/workflows/real-host.yml
+    with:
+      cpa-tag: latest
+
+  report:
+    # Runs even when the reusable check failed so unattended breakage is always
+    # visible; the failed reusable job still fails the overall run.
+    needs: real-host-latest
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # The reporting helper is read from the trusted default branch and only
+      # manages the automation-owned issue.
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Record compatibility outcome
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          # success | failure | cancelled, straight from the reusable check.
+          REPORT_RESULT: ${{ needs.real-host-latest.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/compatibility-report.sh

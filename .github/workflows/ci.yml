@@ -1,0 +1,105 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Go tests
+        run: go test ./...
+
+      - name: Go race tests
+        run: go test -race ./...
+
+      - name: UI tests
+        run: node --test internal/web/ui.test.cjs
+
+      - name: Automation script tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          for script in scripts/*.sh; do bash -n "$script"; done
+          bash scripts/test-automerge.sh
+          bash scripts/test-compatibility-report.sh
+          bash scripts/test-package-plugin.sh
+          python3 scripts/test_dependency_policy.py
+          python3 scripts/test_auto_release.py
+          python3 scripts/test_publish_release.py
+
+      - name: Makefile smoke test
+        run: make help
+
+  native:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners only; no cross-compilation toolchain is required.
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-24.04
+          - goos: linux
+            goarch: arm64
+            runner: ubuntu-24.04-arm
+          - goos: darwin
+            goarch: arm64
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build native plugin
+        run: make build
+
+      - name: Store native artifact from main
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/${{ matrix.goos }}/${{ matrix.goarch }}/
+          if-no-files-found: error
+          retention-days: 14
+
+  real-host:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        cpa-tag: ["v8.0.15", "latest"]
+    uses: ./.github/workflows/real-host.yml
+    with:
+      cpa-tag: ${{ matrix.cpa-tag }}
