@@ -134,6 +134,56 @@ func TestStartupCompaction(t *testing.T) {
 	}
 }
 
+// A database file symlink must keep pointing at a reclaimed target, rather
+// than being replaced with a new file that leaves the large original behind.
+func TestCompactionPreservesDatabaseSymlink(t *testing.T) {
+	cfg := compactConfig(t)
+	target := filepath.Join(t.TempDir(), "target.db")
+	if err := os.Symlink(target, cfg.DataPath); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	canonicalTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clk := &clock{t: time.Now()}
+	inflateStore(t, s, clk)
+	before := fileSize(t, target)
+	clk.advance(2 * time.Minute)
+	if !captureBody(s, "keep-linked", `{"text":"retained"}`) ||
+		!s.SubmitUsage(usageRecord("keep-linked", "p", "m", clk.now(), simpleUsage(3, 4))) {
+		t.Fatal("retained observation rejected")
+	}
+	clk.advance(time.Second)
+	flushAll(t, s)
+	if after := fileSize(t, target); after >= before {
+		t.Fatalf("symlink target not reclaimed: %d >= %d", after, before)
+	}
+	if link, err := os.Lstat(cfg.DataPath); err != nil || link.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("database symlink replaced: %v %v", link, err)
+	}
+	if s.primaryPath != canonicalTarget || s.Status().DatabaseBytes != fileSize(t, target) {
+		t.Fatalf("wrong canonical path or physical size: %s %+v", s.primaryPath, s.Status())
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.setNow(clk.now)
+	if body, err := s.Body("keep-linked"); err != nil || body.Content != `{"text":"retained"}` {
+		t.Fatalf("reopened body through symlink: %+v %v", body, err)
+	}
+}
+
 // Partial copy, sync and rename failures leave the primary inode bytes intact.
 // Retrying maintenance does not poison Flush or subsequent writes.
 func TestCompactionFailuresAreIsolated(t *testing.T) {

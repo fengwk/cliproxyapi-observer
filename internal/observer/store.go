@@ -140,6 +140,12 @@ func openStore(config Config, cleanupPeriod time.Duration) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open observer database: %w", err)
 	}
+	// Replace the opened database target, never its configured symlink.
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("resolve observer database target: %w", err)
+	}
 
 	s := &Store{
 		cfg:           cfg,
