@@ -1,0 +1,48 @@
+name: real-host
+
+# Reusable real-host compatibility suite. Callers pass a concrete CLIProxyAPI
+# release tag or "latest" for the newest stable v8 release. The plugin keeps its
+# pinned SDK version; only the host binary under test is built from source.
+on:
+  workflow_call:
+    inputs:
+      cpa-tag:
+        description: "CLIProxyAPI release tag, or 'latest' for the newest stable v8 release"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  real-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve host tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.cpa-tag }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$INPUT_TAG" = "latest" ]; then
+            tag="$(bash scripts/latest-cpa-release.sh)"
+          else
+            tag="$INPUT_TAG"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Build CLIProxyAPI host from source
+        run: bash scripts/build-cpa-host.sh "${{ steps.tag.outputs.tag }}" "$RUNNER_TEMP/cpa/cli-proxy-api"
+
+      - name: Run real-host integration suite
+        env:
+          CPA_BINARY: ${{ runner.temp }}/cpa/cli-proxy-api
+        run: make integration

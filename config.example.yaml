@@ -1,0 +1,60 @@
+# Minimal CLIProxyAPI configuration for the cliproxyapi-observer plugin.
+# Merge these fragments into an existing CPA v8 config; do not overwrite it.
+# Replace every placeholder and never commit real client or management secrets.
+config-version: 8
+server:
+  host: "127.0.0.1"
+  port: 8317
+# The management API protects the observation routes and is required to open the
+# plugin UI. Keep remote management off unless you also terminate HTTPS.
+management:
+  allow-remote: false
+  secret-key: "replace-with-management-password"
+  disable-control-panel: true
+plugins:
+  enabled: true
+  dir: "./plugins"
+  # Add this source, then install Observer from the CPA plugin store.
+  store-sources:
+    - "https://raw.githubusercontent.com/fengwk/cliproxyapi-observer/main/registry.json"
+  configs:
+    cliproxyapi-observer:
+      enabled: true
+      # Relative paths resolve against the CPA working directory.
+      db: "data/cliproxyapi-observer.db"
+      # Aggregated statistics are retained longer than raw request metadata.
+      stats-retention-days: 365
+      # Request metadata and captured bodies expire independently (max 24h).
+      request-retention: "24h"
+      body-retention: "24h"
+      # Bodies are opt-in: capture stays off unless an operator enables it.
+      capture-bodies: false
+      max-body-bytes: 1048576
+      max-body-storage-bytes: 268435456
+      flush: "1s"
+      # Static USD-per-million prices for exact, full model IDs. Requests whose
+      # accounting is incomplete (unknown counters) stay unpriced rather than
+      # being guessed from the model name.
+      prices:
+        "claude-3-5-sonnet-20241022":
+          input: 3.0
+          output: 15.0
+          cache-read: 0.3
+          cache-creation: 3.75
+
+# Native library location (see `make build` and the release archives):
+#   <plugins.dir>/<goos>/<goarch>/cliproxyapi-observer.so
+# Install the library as cliproxyapi-observer.so / .dylib / .dll.
+#
+# Embedded plugin UI resource (served by CPA, no build step):
+#   GET /v0/resource/plugins/cliproxyapi-observer/ui
+#
+# Read-only observation API. Every route requires the CPA management key and is
+# available under both /v0/management and /v8/management:
+#   GET /v0/management/plugins/cliproxyapi-observer/summary
+#   GET /v0/management/plugins/cliproxyapi-observer/requests
+#   GET /v0/management/plugins/cliproxyapi-observer/body?request_id=<id>
+#   GET /v0/management/plugins/cliproxyapi-observer/settings
+#   GET /v0/management/plugins/cliproxyapi-observer/health
+# Query parameters `from`/`to` are RFC3339 and default to the last 24 hours.
+# Captured bodies are only available while `capture-bodies: true` and unexpired.

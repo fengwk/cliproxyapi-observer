@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="referrer" content="no-referrer" />
+    <title>Observer 观测台</title>
+    <link rel="stylesheet" href="ui.css" />
+  </head>
+  <body>
+    <noscript>该面板需要启用 JavaScript。</noscript>
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-dot" aria-hidden="true"></span>
+        <span class="brand-title">Observer 观测台</span>
+        <span class="brand-sub">CLIProxyAPI 插件</span>
+      </div>
+      <div class="conn">
+        <label class="sr-only" for="mgmt-key">管理密钥</label>
+        <input
+          id="mgmt-key"
+          type="password"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="管理密钥"
+          data-testid="mgmt-key"
+        />
+        <button id="connect" class="btn btn-primary" type="button" data-testid="connect">连接</button>
+        <button id="refresh" class="btn btn-secondary" type="button" data-testid="refresh" disabled>
+          刷新
+        </button>
+        <span
+          id="conn-status"
+          class="conn-status"
+          role="status"
+          aria-live="polite"
+          data-testid="conn-status"
+        ></span>
+      </div>
+    </header>
+
+    <main>
+      <section class="toolbar card" aria-label="筛选条件">
+        <div class="seg" role="group" aria-label="时间范围">
+          <button class="seg-btn is-active" type="button" data-range="24h">24 小时</button>
+          <button class="seg-btn" type="button" data-range="7d">7 天</button>
+          <button class="seg-btn" type="button" data-range="30d">30 天</button>
+        </div>
+        <div class="filter">
+          <label for="filter-provider">Provider</label>
+          <select id="filter-provider" data-testid="filter-provider">
+            <option value="">全部</option>
+          </select>
+        </div>
+        <div class="filter">
+          <label for="filter-model">模型</label>
+          <select id="filter-model" data-testid="filter-model">
+            <option value="">全部</option>
+          </select>
+        </div>
+        <div class="toolbar-spacer"></div>
+        <span id="range-label" class="range-label" data-testid="range-label"></span>
+      </section>
+
+      <div id="banner" class="banner" role="alert" hidden data-testid="banner"></div>
+
+      <section class="cards" id="cards" aria-label="概览" data-testid="cards"></section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>请求趋势</h2>
+          <span id="trend-note" class="muted"></span>
+        </div>
+        <div class="legend">
+          <span><i class="legend-requests"></i>请求</span>
+          <span><i class="legend-failed"></i>失败</span>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="chart" role="img" aria-label="请求趋势图" data-testid="chart"></canvas>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>模型分组</h2>
+          <span id="groups-note" class="muted"></span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Provider</th>
+                <th>模型</th>
+                <th class="num">请求</th>
+                <th class="num col-secondary">失败</th>
+                <th class="num col-secondary">输入</th>
+                <th class="num col-secondary">输出</th>
+                <th class="num col-secondary">缓存读</th>
+                <th class="num col-secondary">缓存写</th>
+                <th class="num">成本</th>
+              </tr>
+            </thead>
+            <tbody id="groups-body" data-testid="groups-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>请求记录</h2>
+          <span id="requests-note" class="muted"></span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>模型</th>
+                <th class="col-secondary">Provider</th>
+                <th class="num col-secondary">Token</th>
+                <th class="num">延迟</th>
+                <th class="num col-secondary">TTFT</th>
+                <th class="num col-secondary">TPS</th>
+                <th class="num">成本</th>
+                <th>状态</th>
+                <th>请求体</th>
+              </tr>
+            </thead>
+            <tbody id="requests-body" data-testid="requests-body"></tbody>
+          </table>
+        </div>
+        <div class="table-footer">
+          <button id="load-more" class="btn btn-secondary" type="button" hidden data-testid="load-more">
+            加载更多
+          </button>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>采集设置</h2>
+        </div>
+        <div id="settings-body" class="settings" data-testid="settings-body">
+          <p class="muted">连接后显示。</p>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="body-dialog" class="dialog" aria-labelledby="body-dialog-title" data-testid="body-dialog">
+      <div class="dialog-head">
+        <h3 id="body-dialog-title">请求体</h3>
+        <button id="body-close" class="btn btn-ghost" type="button" data-testid="body-close">关闭</button>
+      </div>
+      <div id="body-meta" class="dialog-meta" data-testid="body-meta"></div>
+      <div id="body-confirm" class="dialog-confirm">
+        <p>请求体可能包含提示词、代码等敏感内容，仅在确有必要时查看。</p>
+        <button id="body-reveal" class="btn btn-primary" type="button" data-testid="body-reveal">
+          确认查看
+        </button>
+      </div>
+      <div id="body-view" class="dialog-body" hidden>
+        <pre id="body-content" class="body-content" data-testid="body-content"></pre>
+      </div>
+    </dialog>
+
+    <script src="ui.js"></script>
+  </body>
+</html>
