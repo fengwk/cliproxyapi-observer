@@ -332,8 +332,6 @@ func hostConfig(port int, authDir, pluginsDir, dbPath, mockURL string, opts host
 		retention = fmt.Sprintf("\n      stats-retention-days: %d", opts.StatsRetentionDays)
 	}
 	return []byte(fmt.Sprintf(`config-version: 8
-host: "127.0.0.1"
-port: %d
 server:
   host: "127.0.0.1"
   port: %d
@@ -345,7 +343,6 @@ management:
 access:
   api-keys:
     - %q
-auth-dir: %q
 oauth:
   auth-dir: %q
 openai-compatibility:
@@ -365,7 +362,7 @@ plugins:
       db: %q
       flush: "1s"
       capture-bodies: %t%s
-`, port, port, mgmtKey, clientKey, authDir, authDir, compatProviderName, mockURL+"/v1", upstreamKey, upstreamModel, modelName, pluginsDir, pluginID, dbPath, opts.CaptureBodies, retention))
+`, port, mgmtKey, clientKey, authDir, compatProviderName, mockURL+"/v1", upstreamKey, upstreamModel, modelName, pluginsDir, pluginID, dbPath, opts.CaptureBodies, retention))
 }
 
 // rewriteConfig rewrites the host config with new observer plugin options and

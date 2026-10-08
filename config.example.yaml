@@ -53,8 +53,8 @@ plugins:
 # Embedded plugin UI resource (served by CPA, no build step):
 #   GET /v0/resource/plugins/cliproxyapi-observer/ui
 #
-# Authenticated observation & management API. Every route requires the CPA management key and is
-# available under both /v0/management and /v8/management:
+# Authenticated observation & management API. Every route requires the CPA management key.
+# CPA v8 hosts mount these plugin-owned routes under /v0/management, not /v8/management:
 #   GET /v0/management/plugins/cliproxyapi-observer/summary
 #   GET /v0/management/plugins/cliproxyapi-observer/requests
 #   GET /v0/management/plugins/cliproxyapi-observer/body?request_id=<id>
