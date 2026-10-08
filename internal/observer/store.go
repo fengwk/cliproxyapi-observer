@@ -19,16 +19,17 @@ import (
 )
 
 var (
-	bucketRequests   = []byte("requests")
-	bucketStats      = []byte("stats")
-	bucketBodies     = []byte("bodies")
-	bucketBodyMeta   = []byte("body_meta")
-	bucketBodyIndex  = []byte("body_index")
-	bucketUsageTrace = []byte("usage_trace")
-	bucketTraceBody  = []byte("trace_body")
-	allBuckets       = [][]byte{
+	bucketRequests      = []byte("requests")
+	bucketStats         = []byte("stats")
+	bucketBodies        = []byte("bodies")
+	bucketBodyMeta      = []byte("body_meta")
+	bucketBodyIndex     = []byte("body_index")
+	bucketUsageTrace    = []byte("usage_trace")
+	bucketTraceBody     = []byte("trace_body")
+	bucketTraceBodyRefs = []byte("trace_body_refs")
+	allBuckets          = [][]byte{
 		bucketRequests, bucketStats, bucketBodies, bucketBodyMeta,
-		bucketBodyIndex, bucketUsageTrace, bucketTraceBody,
+		bucketBodyIndex, bucketUsageTrace, bucketTraceBody, bucketTraceBodyRefs,
 	}
 )
 
@@ -174,6 +175,10 @@ func openStore(config Config, cleanupPeriod time.Duration) (*Store, error) {
 		return nil, err
 	}
 	if err := s.loadBodyBytes(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := s.rebuildTraceBodyRefs(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -899,6 +904,7 @@ func (s *Store) cleanupBodiesTx(tx *bolt.Tx, now time.Time) (int64, error) {
 	bb := tx.Bucket(bucketBodies)
 	mb := tx.Bucket(bucketBodyMeta)
 	tbb := tx.Bucket(bucketTraceBody)
+	refs := tx.Bucket(bucketTraceBodyRefs)
 	if ib == nil || bb == nil || mb == nil {
 		return 0, nil
 	}
@@ -919,7 +925,7 @@ func (s *Store) cleanupBodiesTx(tx *bolt.Tx, now time.Time) (int64, error) {
 		}
 		requestID := string(key[8:])
 		size, _ := decodeBodyIndexSize(value)
-		if err := deleteBodyTx(bb, mb, tbb, requestID); err != nil {
+		if err := deleteBodyTx(bb, mb, tbb, refs, requestID); err != nil {
 			return removed, err
 		}
 		if err := c.Delete(); err != nil {
@@ -931,7 +937,7 @@ func (s *Store) cleanupBodiesTx(tx *bolt.Tx, now time.Time) (int64, error) {
 	}
 	bodyBytes := s.bodyBytes
 	s.removeBodyBytesFrom(&bodyBytes, removed)
-	if err := s.evictBodiesTx(bb, mb, ib, tbb, &bodyBytes); err != nil {
+	if err := s.evictBodiesTx(bb, mb, ib, tbb, refs, &bodyBytes); err != nil {
 		return removed, err
 	}
 	return s.bodyBytes - bodyBytes, nil
@@ -1092,6 +1098,7 @@ func (s *Store) writeBatch(usage []Request, bodies []pendingBody) error {
 		ib := tx.Bucket(bucketBodyIndex)
 		utb := tx.Bucket(bucketUsageTrace)
 		tbb := tx.Bucket(bucketTraceBody)
+		refs := tx.Bucket(bucketTraceBodyRefs)
 
 		for i := range usage {
 			r := usage[i]
@@ -1121,7 +1128,7 @@ func (s *Store) writeBatch(usage []Request, bodies []pendingBody) error {
 			}
 		}
 		for _, item := range bodies {
-			bytes, err := s.putBodyTx(bb, mb, ib, tbb, item, &bodyBytes)
+			bytes, err := s.putBodyTx(bb, mb, ib, tbb, refs, item, &bodyBytes)
 			if err != nil {
 				return err
 			}
@@ -1138,7 +1145,7 @@ func (s *Store) writeBatch(usage []Request, bodies []pendingBody) error {
 
 // putBodyTx stores a redacted body, maintaining the metadata, eviction index
 // and trace association, and evicts the oldest bodies when the cap is exceeded.
-func (s *Store) putBodyTx(bb, mb, ib, tbb *bolt.Bucket, item pendingBody, bodyBytes *int64) (int64, error) {
+func (s *Store) putBodyTx(bb, mb, ib, tbb, refs *bolt.Bucket, item pendingBody, bodyBytes *int64) (int64, error) {
 	if !json.Valid(item.body) {
 		s.droppedBodies.Add(1)
 		return *bodyBytes, nil
@@ -1181,12 +1188,12 @@ func (s *Store) putBodyTx(bb, mb, ib, tbb *bolt.Bucket, item pendingBody, bodyBy
 	if err := ib.Put(bodyIndexKey(createdAt, item.requestID), encodeBodyIndexValue(size)); err != nil {
 		return *bodyBytes, err
 	}
-	if err := recordTraceBody(tbb, item.traceID, item.requestID); err != nil {
+	if err := recordTraceBody(tbb, refs, item.traceID, item.requestID); err != nil {
 		return *bodyBytes, err
 	}
 	*bodyBytes += size
 
-	if err := s.evictBodiesTx(bb, mb, ib, tbb, bodyBytes); err != nil {
+	if err := s.evictBodiesTx(bb, mb, ib, tbb, refs, bodyBytes); err != nil {
 		return *bodyBytes, err
 	}
 	return *bodyBytes, nil
@@ -1194,7 +1201,7 @@ func (s *Store) putBodyTx(bb, mb, ib, tbb *bolt.Bucket, item pendingBody, bodyBy
 
 // evictBodiesTx enforces the current cap in oldest-first order. Accounting is
 // local to the transaction; the caller publishes it only after commit.
-func (s *Store) evictBodiesTx(bb, mb, ib, tbb *bolt.Bucket, bodyBytes *int64) error {
+func (s *Store) evictBodiesTx(bb, mb, ib, tbb, refs *bolt.Bucket, bodyBytes *int64) error {
 	c := ib.Cursor()
 	for key, value := c.First(); key != nil && *bodyBytes > s.cfg.MaxBodyStorageBytes; key, value = c.Next() {
 		if _, ok := decodeBodyIndexCreated(key); !ok {
@@ -1205,7 +1212,7 @@ func (s *Store) evictBodiesTx(bb, mb, ib, tbb *bolt.Bucket, bodyBytes *int64) er
 		}
 		id := key[8:]
 		evicted, _ := decodeBodyIndexSize(value)
-		if err := deleteBodyTx(bb, mb, tbb, string(id)); err != nil {
+		if err := deleteBodyTx(bb, mb, tbb, refs, string(id)); err != nil {
 			return err
 		}
 		if err := c.Delete(); err != nil {
@@ -1219,14 +1226,19 @@ func (s *Store) evictBodiesTx(bb, mb, ib, tbb *bolt.Bucket, bodyBytes *int64) er
 // recordTraceBody maintains the TraceID -> body request ID index. A trace that
 // observes more than one distinct capture becomes ambiguous and resolves to no
 // body, so trace-level lookup never arbitrarily selects one execution.
-func recordTraceBody(tbb *bolt.Bucket, traceID, requestID string) error {
+func recordTraceBody(tbb, refs *bolt.Bucket, traceID, requestID string) error {
 	if traceID == "" {
 		return nil
 	}
-	existing := tbb.Get([]byte(traceID))
+	key := []byte(traceID)
+	existing := tbb.Get(key)
+	count, err := incrementTraceBodyRef(refs, key, existing == nil)
+	if err != nil {
+		return err
+	}
 	switch {
-	case existing == nil:
-		return tbb.Put([]byte(traceID), []byte(requestID))
+	case existing == nil && count == 1:
+		return tbb.Put(key, []byte(requestID))
 	case string(existing) == requestID:
 		return nil
 	default:
@@ -1235,16 +1247,30 @@ func recordTraceBody(tbb *bolt.Bucket, traceID, requestID string) error {
 }
 
 // deleteBodyTx removes a body's content, metadata and trace association.
-func deleteBodyTx(bb, mb, tbb *bolt.Bucket, requestID string) error {
-	if err := bb.Delete([]byte(requestID)); err != nil {
-		return err
+func deleteBodyTx(bb, mb, tbb, refs *bolt.Bucket, requestID string) error {
+	meta, ok := decodeBodyMeta(mb.Get([]byte(requestID)))
+	if !ok {
+		return fmt.Errorf("corrupt body metadata")
 	}
-	if meta, ok := decodeBodyMeta(mb.Get([]byte(requestID))); ok && meta.traceID != "" {
-		if existing := tbb.Get([]byte(meta.traceID)); string(existing) == requestID {
-			if err := tbb.Delete([]byte(meta.traceID)); err != nil {
+	if meta.traceID != "" {
+		key := []byte(meta.traceID)
+		count, err := traceBodyRefCount(refs, key, false)
+		if err != nil {
+			return err
+		}
+		if count == 1 {
+			if err := tbb.Delete(key); err != nil {
 				return err
 			}
+			if err := refs.Delete(key); err != nil {
+				return err
+			}
+		} else if err := refs.Put(key, encodeTraceBodyRefs(count-1)); err != nil {
+			return err
 		}
+	}
+	if err := bb.Delete([]byte(requestID)); err != nil {
+		return err
 	}
 	return mb.Delete([]byte(requestID))
 }
