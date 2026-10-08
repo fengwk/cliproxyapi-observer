@@ -1,8 +1,10 @@
 package plugin
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"gopkg.in/yaml.v3"
 
 	"github.com/fengwk/cliproxyapi-observer/internal/observer"
 )
@@ -23,6 +26,7 @@ const (
 	bodyRoute     = routesPrefix + "/body"
 	settingsRoute = routesPrefix + "/settings"
 	healthRoute   = routesPrefix + "/health"
+	validateRoute = routesPrefix + "/validate"
 
 	// resourcePrefix is the public, secret-free browser resource prefix.
 	resourcePrefix = "/resource/plugins/" + PluginID
@@ -35,9 +39,12 @@ const (
 	// configured statistics retention.
 	maxStatsRetentionDays = 3650
 
+	// maxValidateBodyBytes bounds the raw JSON patch accepted by /validate.
+	maxValidateBodyBytes = 256 * 1024
+
 	// cspPolicy keeps the embedded page same-origin frameable without widening
 	// any directive. The UI slice must not rely on inline scripts or styles.
-	cspPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'self'"
+	cspPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'"
 )
 
 // managementRegistrationResponse mirrors the host's expected registration shape.
@@ -46,8 +53,8 @@ type managementRegistrationResponse struct {
 	Resources []pluginapi.ResourceRoute   `json:"resources"`
 }
 
-// managementRegistration declares the read-only data routes and the public
-// resource menu. Every route is a GET; the observer never mutates host state.
+// managementRegistration declares the read-only data routes, the validate route,
+// and the public resource menu.
 func managementRegistration() managementRegistrationResponse {
 	return managementRegistrationResponse{
 		Routes: []pluginapi.ManagementRoute{
@@ -56,6 +63,7 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodGet, Path: bodyRoute, Description: "One captured request body by request_id."},
 			{Method: http.MethodGet, Path: settingsRoute, Description: "Effective capture and retention settings."},
 			{Method: http.MethodGet, Path: healthRoute, Description: "Writer and drop counters."},
+			{Method: http.MethodPost, Path: validateRoute, Description: "Validate candidate configuration patch."},
 		},
 		Resources: []pluginapi.ResourceRoute{
 			{Path: "/ui", Menu: PluginName, Description: PluginName + " observation dashboard."},
@@ -78,13 +86,22 @@ func (m *Manager) handleManagement(request []byte) ([]byte, error) {
 			return errorEnvelope(&PluginError{Code: "invalid_request", Message: "malformed management request", HTTPStatus: http.StatusBadRequest})
 		}
 	}
-	if req.Method != http.MethodGet {
-		return okEnvelope(managementJSON(http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"}))
-	}
 	if route, ok := managementRoute(req.Path); ok {
+		if route == validateRoute {
+			if req.Method != http.MethodPost {
+				return okEnvelope(managementJSON(http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"}))
+			}
+			return okEnvelope(m.serveValidate(req.Body))
+		}
+		if req.Method != http.MethodGet {
+			return okEnvelope(managementJSON(http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"}))
+		}
 		return okEnvelope(m.serveManagement(route, req.Query))
 	}
 	if route, ok := resourceRoute(req.Path); ok {
+		if req.Method != http.MethodGet {
+			return okEnvelope(managementJSON(http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"}))
+		}
 		return okEnvelope(m.serveResource(route))
 	}
 	return okEnvelope(managementJSON(http.StatusNotFound, map[string]string{"error": "not found"}))
@@ -195,6 +212,10 @@ func (m *Manager) serveSettings() pluginapi.ManagementResponse {
 	if !hasConfig {
 		return managementError(http.StatusServiceUnavailable, "observer unavailable")
 	}
+	prices := cfg.Prices
+	if prices == nil {
+		prices = map[string]observer.Price{}
+	}
 	return managementJSON(http.StatusOK, settingsResponse{
 		CaptureBodies:           cfg.CaptureBodies,
 		BodyRetentionSeconds:    int64(cfg.BodyRetention / time.Second),
@@ -202,6 +223,9 @@ func (m *Manager) serveSettings() pluginapi.ManagementResponse {
 		StatsRetentionDays:      cfg.StatsRetentionDays,
 		MaxBodyBytes:            cfg.MaxBodyBytes,
 		MaxBodyStorageBytes:     cfg.MaxBodyStorageBytes,
+		CompactIntervalSeconds:  int64(cfg.CompactInterval / time.Second),
+		CompactMinBytes:         cfg.CompactMinBytes,
+		Prices:                  prices,
 	})
 }
 
@@ -213,15 +237,288 @@ func (m *Manager) serveHealth() pluginapi.ManagementResponse {
 	return managementJSON(http.StatusOK, store.Status())
 }
 
+var (
+	errInvalidSettingsPatch = errors.New("invalid settings patch")
+	errObserverUnavailable  = errors.New("observer unavailable")
+)
+
+const (
+	validateErrorMessage       = "invalid settings patch"
+	observerUnavailableMessage = "observer unavailable"
+	payloadTooLargeMessage     = "request body exceeds 256KiB limit"
+)
+
+var allowedValidateKeys = map[string]bool{
+	"capture-bodies":         true,
+	"request-retention":      true,
+	"body-retention":         true,
+	"stats-retention-days":   true,
+	"max-body-bytes":         true,
+	"max-body-storage-bytes": true,
+	"compact-interval":       true,
+	"compact-min-bytes":      true,
+	"prices":                 true,
+}
+
+func parseJSONInteger(raw []byte, min, max int64) (int64, error) {
+	if len(raw) == 0 || raw[0] == '"' || bytes.Contains(raw, []byte(".")) {
+		return 0, errInvalidSettingsPatch
+	}
+	var num json.Number
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if err := dec.Decode(&num); err != nil {
+		return 0, errInvalidSettingsPatch
+	}
+	val, err := num.Int64()
+	if err != nil || val < min || val > max {
+		return 0, errInvalidSettingsPatch
+	}
+	return val, nil
+}
+
+func parseJSONDuration(raw []byte, min, max time.Duration) (string, error) {
+	if len(raw) == 0 || raw[0] != '"' {
+		return "", errInvalidSettingsPatch
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", errInvalidSettingsPatch
+	}
+	s = strings.TrimSpace(s)
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 || d < min || d > max {
+		return "", errInvalidSettingsPatch
+	}
+	return s, nil
+}
+
+func validatePatch(rawCopy []byte, body []byte) error {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return errInvalidSettingsPatch
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	tok, err := dec.Token()
+	if err != nil {
+		return errInvalidSettingsPatch
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return errInvalidSettingsPatch
+	}
+
+	patchMap := make(map[string]any)
+	seenKeys := make(map[string]bool)
+
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return errInvalidSettingsPatch
+		}
+		key, ok := keyTok.(string)
+		if !ok || !allowedValidateKeys[key] || seenKeys[key] {
+			return errInvalidSettingsPatch
+		}
+		seenKeys[key] = true
+
+		var rawVal json.RawMessage
+		if err := dec.Decode(&rawVal); err != nil {
+			return errInvalidSettingsPatch
+		}
+		rawTrimmed := bytes.TrimSpace(rawVal)
+		if len(rawTrimmed) == 0 || bytes.Equal(rawTrimmed, []byte("null")) || bytes.HasPrefix(rawTrimmed, []byte("[")) {
+			return errInvalidSettingsPatch
+		}
+
+		switch key {
+		case "capture-bodies":
+			if !bytes.Equal(rawTrimmed, []byte("true")) && !bytes.Equal(rawTrimmed, []byte("false")) {
+				return errInvalidSettingsPatch
+			}
+			patchMap[key] = bytes.Equal(rawTrimmed, []byte("true"))
+
+		case "request-retention":
+			s, err := parseJSONDuration(rawTrimmed, observer.MinRequestRetention, observer.MaxRequestRetention)
+			if err != nil {
+				return errInvalidSettingsPatch
+			}
+			patchMap[key] = s
+
+		case "body-retention":
+			s, err := parseJSONDuration(rawTrimmed, observer.MinBodyRetention, observer.MaxBodyRetention)
+			if err != nil {
+				return errInvalidSettingsPatch
+			}
+			patchMap[key] = s
+
+		case "compact-interval":
+			s, err := parseJSONDuration(rawTrimmed, observer.MinCompactInterval, observer.MaxCompactInterval)
+			if err != nil {
+				return errInvalidSettingsPatch
+			}
+			patchMap[key] = s
+
+		case "stats-retention-days":
+			val, err := parseJSONInteger(rawTrimmed, 1, int64(observer.MaxStatsRetentionDays))
+			if err != nil {
+				return errInvalidSettingsPatch
+			}
+			patchMap[key] = int(val)
+
+		case "max-body-bytes":
+			val, err := parseJSONInteger(rawTrimmed, 1, int64(observer.MaxBodyBytesLimit))
+			if err != nil {
+				return errInvalidSettingsPatch
+			}
+			patchMap[key] = int(val)
+
+		case "max-body-storage-bytes":
+			val, err := parseJSONInteger(rawTrimmed, 1, observer.MaxBodyStorageLimit)
+			if err != nil {
+				return errInvalidSettingsPatch
+			}
+			patchMap[key] = val
+
+		case "compact-min-bytes":
+			val, err := parseJSONInteger(rawTrimmed, observer.MinCompactMinBytes, observer.MaxCompactMinBytes)
+			if err != nil {
+				return errInvalidSettingsPatch
+			}
+			patchMap[key] = val
+
+		case "prices":
+			pricesDec := json.NewDecoder(bytes.NewReader(rawTrimmed))
+			pTok, err := pricesDec.Token()
+			if err != nil {
+				return errInvalidSettingsPatch
+			}
+			pDelim, ok := pTok.(json.Delim)
+			if !ok || pDelim != '{' {
+				return errInvalidSettingsPatch
+			}
+
+			pricesMap := make(map[string]observer.Price)
+			seenModels := make(map[string]bool)
+
+			for pricesDec.More() {
+				mTok, err := pricesDec.Token()
+				if err != nil {
+					return errInvalidSettingsPatch
+				}
+				modelStr, ok := mTok.(string)
+				if !ok {
+					return errInvalidSettingsPatch
+				}
+				trimmedModel := strings.TrimSpace(modelStr)
+				if trimmedModel == "" || seenModels[trimmedModel] {
+					return errInvalidSettingsPatch
+				}
+				seenModels[trimmedModel] = true
+
+				var pRaw json.RawMessage
+				if err := pricesDec.Decode(&pRaw); err != nil {
+					return errInvalidSettingsPatch
+				}
+				pRawTrimmed := bytes.TrimSpace(pRaw)
+				if len(pRawTrimmed) == 0 || bytes.Equal(pRawTrimmed, []byte("null")) || bytes.HasPrefix(pRawTrimmed, []byte("[")) {
+					return errInvalidSettingsPatch
+				}
+
+				var price observer.Price
+				if err := json.Unmarshal(pRawTrimmed, &price); err != nil {
+					return errInvalidSettingsPatch
+				}
+				pricesMap[trimmedModel] = price
+			}
+
+			pTok, err = pricesDec.Token()
+			if err != nil || pTok != json.Delim('}') || pricesDec.More() {
+				return errInvalidSettingsPatch
+			}
+			var pExtra json.RawMessage
+			if err := pricesDec.Decode(&pExtra); err != io.EOF {
+				return errInvalidSettingsPatch
+			}
+
+			patchMap["prices"] = pricesMap
+		}
+	}
+
+	endTok, err := dec.Token()
+	if err != nil || endTok != json.Delim('}') || dec.More() {
+		return errInvalidSettingsPatch
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		return errInvalidSettingsPatch
+	}
+
+	var baseMap map[string]any
+	if len(bytes.TrimSpace(rawCopy)) > 0 {
+		if err := yaml.Unmarshal(rawCopy, &baseMap); err != nil {
+			return errObserverUnavailable
+		}
+	}
+	if baseMap == nil {
+		baseMap = make(map[string]any)
+	}
+
+	for k, v := range patchMap {
+		baseMap[k] = v
+	}
+
+	mergedYAML, err := yaml.Marshal(baseMap)
+	if err != nil {
+		return errObserverUnavailable
+	}
+
+	if _, err := observer.ParseConfig(mergedYAML); err != nil {
+		return errInvalidSettingsPatch
+	}
+
+	return nil
+}
+
+func (m *Manager) serveValidate(body []byte) pluginapi.ManagementResponse {
+	if len(body) > maxValidateBodyBytes {
+		return managementError(http.StatusRequestEntityTooLarge, payloadTooLargeMessage)
+	}
+
+	m.mu.RLock()
+	hasConfig := m.hasConfig
+	var rawCopy []byte
+	if hasConfig && len(m.raw) > 0 {
+		rawCopy = append([]byte(nil), m.raw...)
+	}
+	m.mu.RUnlock()
+
+	if !hasConfig {
+		return managementError(http.StatusServiceUnavailable, observerUnavailableMessage)
+	}
+
+	if err := validatePatch(rawCopy, body); err != nil {
+		if errors.Is(err, errObserverUnavailable) {
+			return managementError(http.StatusServiceUnavailable, observerUnavailableMessage)
+		}
+		return managementError(http.StatusBadRequest, validateErrorMessage)
+	}
+
+	return managementJSON(http.StatusOK, map[string]bool{"valid": true})
+}
+
 // settingsResponse is the effective capture and retention contract exposed to
 // the dashboard. It mirrors the configured observer.Config, not the raw YAML.
 type settingsResponse struct {
-	CaptureBodies           bool  `json:"capture_bodies"`
-	BodyRetentionSeconds    int64 `json:"body_retention_seconds"`
-	RequestRetentionSeconds int64 `json:"request_retention_seconds"`
-	StatsRetentionDays      int   `json:"stats_retention_days"`
-	MaxBodyBytes            int   `json:"max_body_bytes"`
-	MaxBodyStorageBytes     int64 `json:"max_body_storage_bytes"`
+	CaptureBodies           bool                      `json:"capture_bodies"`
+	BodyRetentionSeconds    int64                     `json:"body_retention_seconds"`
+	RequestRetentionSeconds int64                     `json:"request_retention_seconds"`
+	StatsRetentionDays      int                       `json:"stats_retention_days"`
+	MaxBodyBytes            int                       `json:"max_body_bytes"`
+	MaxBodyStorageBytes     int64                     `json:"max_body_storage_bytes"`
+	CompactIntervalSeconds  int64                     `json:"compact_interval_seconds"`
+	CompactMinBytes         int64                     `json:"compact_min_bytes"`
+	Prices                  map[string]observer.Price `json:"prices"`
 }
 
 func (m *Manager) serveResource(route string) pluginapi.ManagementResponse {

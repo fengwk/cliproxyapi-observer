@@ -20,19 +20,37 @@ const (
 	defaultMaxBodyBytes        = 1 << 20   // 1 MiB
 	defaultMaxBodyStorageBytes = 256 << 20 // 256 MiB
 	defaultFlushInterval       = time.Second
+	defaultCompactInterval     = 15 * time.Minute
+	defaultCompactMinBytes     = 8 << 20 // 8 MiB
 
-	maxStatsRetentionDays = 3650
-	maxRequestRetention   = 30 * 24 * time.Hour
-	minRequestRetention   = time.Minute
-	// Body content is the sensitive surface; retention can be shortened but
-	// never extended past 24h.
-	minBodyRetention     = time.Minute
-	maxBodyRetention     = 24 * time.Hour
-	maxBodyBytesLimit    = 64 << 20
-	maxBodyStorageLimit  = 8 << 30
-	minFlushInterval     = time.Millisecond
-	maxFlushInterval     = time.Hour
-	defaultCleanupPeriod = time.Minute
+	MaxStatsRetentionDays = 3650
+	MaxRequestRetention   = 30 * 24 * time.Hour
+	MinRequestRetention   = time.Minute
+	MinBodyRetention      = time.Minute
+	MaxBodyRetention      = 24 * time.Hour
+	MaxBodyBytesLimit     = 64 << 20
+	MaxBodyStorageLimit   = 8 << 30
+	MinFlushInterval      = time.Millisecond
+	MaxFlushInterval      = time.Hour
+	MinCompactInterval    = time.Minute
+	MaxCompactInterval    = 24 * time.Hour
+	MinCompactMinBytes    = 64 << 10       // 64 KiB
+	MaxCompactMinBytes    = int64(8) << 30 // 8 GiB
+	defaultCleanupPeriod  = time.Minute
+
+	maxStatsRetentionDays = MaxStatsRetentionDays
+	maxRequestRetention   = MaxRequestRetention
+	minRequestRetention   = MinRequestRetention
+	minBodyRetention      = MinBodyRetention
+	maxBodyRetention      = MaxBodyRetention
+	maxBodyBytesLimit     = MaxBodyBytesLimit
+	maxBodyStorageLimit   = MaxBodyStorageLimit
+	minFlushInterval      = MinFlushInterval
+	maxFlushInterval      = MaxFlushInterval
+	minCompactInterval    = MinCompactInterval
+	maxCompactInterval    = MaxCompactInterval
+	minCompactMinBytes    = MinCompactMinBytes
+	maxCompactMinBytes    = MaxCompactMinBytes
 )
 
 // configYAML mirrors the plugin-owned YAML subtree. Pointer fields distinguish
@@ -51,6 +69,8 @@ type configYAML struct {
 	MaxBodyBytes        *int             `yaml:"max-body-bytes"`
 	MaxBodyStorageBytes *int64           `yaml:"max-body-storage-bytes"`
 	Flush               string           `yaml:"flush"`
+	CompactInterval     string           `yaml:"compact-interval"`
+	CompactMinBytes     *int64           `yaml:"compact-min-bytes"`
 	Prices              map[string]Price `yaml:"prices"`
 }
 
@@ -64,6 +84,8 @@ func defaultConfig() Config {
 		MaxBodyBytes:        defaultMaxBodyBytes,
 		MaxBodyStorageBytes: defaultMaxBodyStorageBytes,
 		FlushInterval:       defaultFlushInterval,
+		CompactInterval:     defaultCompactInterval,
+		CompactMinBytes:     defaultCompactMinBytes,
 		Prices:              map[string]Price{},
 	}
 }
@@ -124,6 +146,22 @@ func ParseConfig(raw []byte) (Config, error) {
 				return Config{}, fmt.Errorf("flush must be positive, got %s", d)
 			}
 			cfg.FlushInterval = d
+		}
+		if strings.TrimSpace(in.CompactInterval) != "" {
+			d, err := time.ParseDuration(strings.TrimSpace(in.CompactInterval))
+			if err != nil {
+				return Config{}, fmt.Errorf("parse compact-interval: %w", err)
+			}
+			if d <= 0 {
+				return Config{}, fmt.Errorf("compact-interval must be positive, got %s", d)
+			}
+			cfg.CompactInterval = d
+		}
+		if in.CompactMinBytes != nil {
+			if *in.CompactMinBytes < minCompactMinBytes {
+				return Config{}, fmt.Errorf("compact-min-bytes must be at least %d", minCompactMinBytes)
+			}
+			cfg.CompactMinBytes = *in.CompactMinBytes
 		}
 		if in.Prices != nil {
 			cfg.Prices = in.Prices
@@ -189,11 +227,28 @@ func normalizeConfig(cfg Config) (Config, error) {
 		return Config{}, fmt.Errorf("flush must be between %s and %s, got %s", minFlushInterval, maxFlushInterval, cfg.FlushInterval)
 	}
 
+	if cfg.CompactInterval == 0 {
+		cfg.CompactInterval = defaultCompactInterval
+	}
+	if cfg.CompactInterval < minCompactInterval || cfg.CompactInterval > maxCompactInterval {
+		return Config{}, fmt.Errorf("compact-interval must be between %s and %s, got %s", minCompactInterval, maxCompactInterval, cfg.CompactInterval)
+	}
+
+	if cfg.CompactMinBytes == 0 {
+		cfg.CompactMinBytes = defaultCompactMinBytes
+	}
+	if cfg.CompactMinBytes < minCompactMinBytes || cfg.CompactMinBytes > maxCompactMinBytes {
+		return Config{}, fmt.Errorf("compact-min-bytes must be between %d and %d, got %d", minCompactMinBytes, maxCompactMinBytes, cfg.CompactMinBytes)
+	}
+
 	prices := make(map[string]Price, len(cfg.Prices))
 	for key, price := range cfg.Prices {
 		model := strings.TrimSpace(key)
 		if model == "" {
 			return Config{}, fmt.Errorf("prices contains an empty model id")
+		}
+		if _, exists := prices[model]; exists {
+			return Config{}, fmt.Errorf("prices contains duplicate model id %q after trimming", model)
 		}
 		if err := validatePrice(model, price); err != nil {
 			return Config{}, err

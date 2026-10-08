@@ -2,10 +2,16 @@
 package observer
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"math"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"gopkg.in/yaml.v3"
 )
 
 var ErrNotFound = errors.New("observation not found")
@@ -19,6 +25,8 @@ type Config struct {
 	MaxBodyBytes        int
 	MaxBodyStorageBytes int64
 	FlushInterval       time.Duration
+	CompactInterval     time.Duration
+	CompactMinBytes     int64
 	Prices              map[string]Price
 }
 
@@ -28,6 +36,113 @@ type Price struct {
 	Output        float64 `json:"output" yaml:"output"`
 	CacheRead     float64 `json:"cache_read" yaml:"cache-read"`
 	CacheCreation float64 `json:"cache_creation" yaml:"cache-creation"`
+}
+
+// UnmarshalJSON strictly decodes and validates a JSON Price object, accepting
+// both underscore and hyphen keys while rejecting unknown, null, negative or
+// non-finite values.
+func (p *Price) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return errors.New("price object must not be null or empty")
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	tok, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("malformed price JSON: %w", err)
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return errors.New("price must be a JSON object")
+	}
+
+	var parsed Price
+	seen := make(map[string]bool)
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return fmt.Errorf("malformed price key: %w", err)
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return errors.New("price key must be a string")
+		}
+		canonicalKey := ""
+		switch key {
+		case "input":
+			canonicalKey = "input"
+		case "output":
+			canonicalKey = "output"
+		case "cache_read", "cache-read":
+			canonicalKey = "cache-read"
+		case "cache_creation", "cache-creation":
+			canonicalKey = "cache-creation"
+		default:
+			return fmt.Errorf("unknown price field %q", key)
+		}
+		if seen[canonicalKey] {
+			return fmt.Errorf("duplicate price field %q", key)
+		}
+		seen[canonicalKey] = true
+
+		var rawVal json.RawMessage
+		if err := dec.Decode(&rawVal); err != nil {
+			return fmt.Errorf("decode price field %q: %w", key, err)
+		}
+		if string(bytes.TrimSpace(rawVal)) == "null" {
+			return fmt.Errorf("price field %q must not be null", key)
+		}
+		var val float64
+		if err := json.Unmarshal(rawVal, &val); err != nil {
+			return fmt.Errorf("price field %q must be a number: %w", key, err)
+		}
+		if math.IsNaN(val) || math.IsInf(val, 0) {
+			return fmt.Errorf("price field %q must be a finite number", key)
+		}
+		if val < 0 {
+			return fmt.Errorf("price field %q must not be negative", key)
+		}
+
+		switch canonicalKey {
+		case "input":
+			parsed.Input = val
+		case "output":
+			parsed.Output = val
+		case "cache-read":
+			parsed.CacheRead = val
+		case "cache-creation":
+			parsed.CacheCreation = val
+		}
+	}
+
+	tok, err = dec.Token()
+	if err != nil || tok != json.Delim('}') {
+		return errors.New("malformed price JSON ending")
+	}
+	if dec.More() {
+		return errors.New("trailing data in price JSON")
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		return errors.New("trailing data in price JSON")
+	}
+
+	*p = parsed
+	return nil
+}
+
+// Core persists raw JSON patches as YAML, including underscore price keys.
+// Reuse the strict price decoder for both UI JSON and existing hyphen YAML.
+func (p *Price) UnmarshalYAML(node *yaml.Node) error {
+	var values map[string]any
+	if err := node.Decode(&values); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(values)
+	if err != nil {
+		return err
+	}
+	return p.UnmarshalJSON(raw)
 }
 
 type Query struct {
@@ -126,8 +241,14 @@ type BodyDetail struct {
 }
 
 type Status struct {
-	DroppedUsage  uint64 `json:"dropped_usage"`
-	DroppedBodies uint64 `json:"dropped_bodies"`
-	WriteErrors   uint64 `json:"write_errors"`
-	Queued        int    `json:"queued"`
+	DatabaseBytes                int64  `json:"database_bytes"`
+	ReclaimableBytes             int64  `json:"reclaimable_bytes"`
+	Compactions                  uint64 `json:"compactions"`
+	CompactionErrors             uint64 `json:"compaction_errors"`
+	LastCompactionUnix           int64  `json:"last_compaction_unix"`
+	LastCompactionReclaimedBytes int64  `json:"last_compaction_reclaimed_bytes"`
+	DroppedUsage                 uint64 `json:"dropped_usage"`
+	DroppedBodies                uint64 `json:"dropped_bodies"`
+	WriteErrors                  uint64 `json:"write_errors"`
+	Queued                       int    `json:"queued"`
 }

@@ -62,8 +62,19 @@ type Store struct {
 	cfg    Config
 	prices map[string]Price
 
-	db   *bolt.DB
-	nowV atomic.Value // stores func() time.Time
+	db                           *bolt.DB
+	primaryPath                  string
+	lastCompactAttempt           time.Time
+	databaseBytes                atomic.Int64
+	reclaimableBytes             atomic.Int64
+	compactions                  atomic.Uint64
+	compactionErrors             atomic.Uint64
+	lastCompactionUnix           atomic.Int64
+	lastCompactionReclaimedBytes atomic.Int64
+	compactCopy                  func(*bolt.DB, *bolt.DB, int64) error
+	compactSync                  func(*bolt.DB) error
+	compactRename                func(string, string) error
+	nowV                         atomic.Value // stores func() time.Time
 
 	usageCh    chan Request
 	bodyCh     chan pendingBody
@@ -106,6 +117,11 @@ type Store struct {
 // Open validates the configuration, opens (creating if needed) the bbolt
 // database, performs a startup cleanup and starts the bounded async writer.
 func Open(config Config) (*Store, error) {
+	return openStore(config, defaultCleanupPeriod)
+}
+
+// openStore permits deterministic short cleanup scheduling in storage tests.
+func openStore(config Config, cleanupPeriod time.Duration) (*Store, error) {
 	cfg, err := normalizeConfig(config)
 	if err != nil {
 		return nil, err
@@ -128,17 +144,22 @@ func Open(config Config) (*Store, error) {
 		cfg:           cfg,
 		prices:        clonePrices(cfg.Prices),
 		db:            db,
+		primaryPath:   path,
+		compactCopy:   bolt.Compact,
+		compactSync:   (*bolt.DB).Sync,
+		compactRename: os.Rename,
 		usageCh:       make(chan Request, usageQueueCapacity),
 		bodyCh:        make(chan pendingBody, bodyQueueCapacity),
 		flushCh:       make(chan chan error, 1),
 		cleanupCh:     make(chan chan error, 1),
 		stopCh:        make(chan struct{}),
 		writerDone:    make(chan struct{}),
-		cleanupPeriod: defaultCleanupPeriod,
+		cleanupPeriod: cleanupPeriod,
 		bodyBudget:    bodyQueueBudget(cfg),
 		pendingBodies: make(map[string]struct{}),
 	}
 	s.nowV.Store(func() time.Time { return time.Now() })
+	s.removeOrphanCompactions()
 
 	if err := s.initBuckets(); err != nil {
 		_ = db.Close()
@@ -152,6 +173,7 @@ func Open(config Config) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	s.maybeCompact(s.now())
 	go s.writerLoop()
 	return s, nil
 }
@@ -375,10 +397,16 @@ func (s *Store) Close() error {
 // Status reports bounded-ingestion health.
 func (s *Store) Status() Status {
 	return Status{
-		DroppedUsage:  s.droppedUsage.Load(),
-		DroppedBodies: s.droppedBodies.Load(),
-		WriteErrors:   s.writeErrors.Load(),
-		Queued:        len(s.usageCh) + len(s.bodyCh) + int(s.pendingCount.Load()),
+		DroppedUsage:                 s.droppedUsage.Load(),
+		DroppedBodies:                s.droppedBodies.Load(),
+		WriteErrors:                  s.writeErrors.Load(),
+		Queued:                       len(s.usageCh) + len(s.bodyCh) + int(s.pendingCount.Load()),
+		DatabaseBytes:                s.databaseBytes.Load(),
+		ReclaimableBytes:             s.reclaimableBytes.Load(),
+		Compactions:                  s.compactions.Load(),
+		CompactionErrors:             s.compactionErrors.Load(),
+		LastCompactionUnix:           s.lastCompactionUnix.Load(),
+		LastCompactionReclaimedBytes: s.lastCompactionReclaimedBytes.Load(),
 	}
 }
 
@@ -954,6 +982,19 @@ func (s *Store) writerLoop() {
 			s.finalErr = err
 		}
 	}
+	cleanup := func() error {
+		// Persist pending batches before the compaction snapshot.
+		if err := flush(); err != nil {
+			return err
+		}
+		now := s.now()
+		if err := s.cleanupTx(now); err != nil {
+			s.writeErrors.Add(1)
+			return err
+		}
+		s.maybeCompact(now) // maintenance failures never poison finalErr
+		return nil
+	}
 
 	for {
 		select {
@@ -972,21 +1013,16 @@ func (s *Store) writerLoop() {
 		case <-ticker.C:
 			record(flush())
 		case <-cleanupTicker.C:
-			if err := s.cleanupTx(s.now()); err != nil {
-				s.writeErrors.Add(1)
+			if err := cleanup(); err != nil {
 				record(err)
 			}
 		case reply := <-s.cleanupCh:
-			err := s.cleanupTx(s.now())
-			if err != nil {
-				s.writeErrors.Add(1)
-			}
+			err := cleanup()
 			record(err)
 			reply <- err
 		case reply := <-s.flushCh:
 			err := drain()
-			if cerr := s.cleanupTx(s.now()); cerr != nil {
-				s.writeErrors.Add(1)
+			if cerr := cleanup(); cerr != nil {
 				if err == nil {
 					err = cerr
 				}
@@ -995,8 +1031,7 @@ func (s *Store) writerLoop() {
 			reply <- err
 		case <-s.stopCh:
 			record(drain())
-			if err := s.cleanupTx(s.now()); err != nil {
-				s.writeErrors.Add(1)
+			if err := cleanup(); err != nil {
 				record(err)
 			}
 			// Producers are quiesced (closedFlag set before stopCh), so one

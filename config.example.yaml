@@ -32,6 +32,9 @@ plugins:
       max-body-bytes: 1048576
       max-body-storage-bytes: 268435456
       flush: "1s"
+      # Automatic storage compaction interval and threshold (always active).
+      compact-interval: "15m"
+      compact-min-bytes: 8388608
       # Static USD-per-million prices for exact, full model IDs. Requests whose
       # accounting is incomplete (unknown counters) stay unpriced rather than
       # being guessed from the model name.
@@ -49,12 +52,13 @@ plugins:
 # Embedded plugin UI resource (served by CPA, no build step):
 #   GET /v0/resource/plugins/cliproxyapi-observer/ui
 #
-# Read-only observation API. Every route requires the CPA management key and is
+# Authenticated observation & management API. Every route requires the CPA management key and is
 # available under both /v0/management and /v8/management:
 #   GET /v0/management/plugins/cliproxyapi-observer/summary
 #   GET /v0/management/plugins/cliproxyapi-observer/requests
 #   GET /v0/management/plugins/cliproxyapi-observer/body?request_id=<id>
 #   GET /v0/management/plugins/cliproxyapi-observer/settings
 #   GET /v0/management/plugins/cliproxyapi-observer/health
+#   POST /v0/management/plugins/cliproxyapi-observer/validate
 # Query parameters `from`/`to` are RFC3339 and default to the last 24 hours.
 # Captured bodies are only available while `capture-bodies: true` and unexpired.
