@@ -7,7 +7,7 @@
 - Never store API keys, authorization headers, failure response bodies or browser credentials.
 - Use bounded, nonblocking ingestion. Report dropped observations instead of blocking inference.
 - Preserve complete model identities and persist normalized token accounting.
-- Use preaggregated statistics and cursor pagination; never decode all requests for a page count.
+- Use token-only preaggregated statistics, query-time prices and offset pagination; never scan for a page count.
 - Quiesce releases storage; reconfigure must reopen after a failed native replacement.
 - Keep UI dependency-free, same-origin-frameable and aligned with CPA themes.
 - Use fake credentials and local mock upstreams only; never touch production configuration.

@@ -347,6 +347,11 @@ test('动态定价：当前有效价格映射计算历史请求与 summary 成�
     assert.ok(pricedGpt.length > 0);
     assert.ok(pricedGpt[0].cost_usd > 0);
     const initialGptCost = pricedGpt[0].cost_usd;
+    // Complete fixtures must use the same exclusive token buckets as the API.
+    for (const item of data1.items.filter((it) => it.accounting_quality === 'complete')) {
+      assert.equal(item.input_tokens, item.uncached_input_tokens + item.cache_read_tokens + item.cache_creation_tokens);
+      assert.equal(item.total_tokens, item.input_tokens + item.output_tokens);
+    }
 
     // claude-opus-4-1 未定价，成本为 null
     assert.ok(claudeItems.length > 0);
@@ -365,6 +370,8 @@ test('动态定价：当前有效价格映射计算历史请求与 summary 成�
     const gptGroup = summary1.groups.find((g) => g.model === 'gpt-5.1-codex');
     const claudeGroup = summary1.groups.find((g) => g.model === 'claude-opus-4-1');
     assert.ok(gptGroup.cost_usd > 0);
+    assert.equal(gptGroup.total_tokens, gptGroup.input_tokens + gptGroup.output_tokens);
+    assert.equal(claudeGroup.total_tokens, claudeGroup.input_tokens + claudeGroup.output_tokens);
     assert.equal(claudeGroup.cost_usd, null);
     assert.equal(claudeGroup.unpriced_requests, claudeGroup.requests);
 

@@ -15,10 +15,10 @@ bbolt 数据库，并通过 CPA 管理 API 与内置中文页面提供查询。�
   也**不修改请求**、不阻塞推理。
 - **用量统计**：只归一化一次并持久化记账质量（accounting quality）与 TPS。按分钟/提供商/模型
   事务性预聚合，汇总直接读取预聚合区间并降采样到 ≤300 个点，不解码全量请求。
-- **游标分页**：请求列表使用时间戳+序列号的游标分页，不扫描精确总数；提供商/模型过滤
-  只扫描选定区间。
-- **静态定价**：按**精确、完整**的模型 ID 配置 USD/百万 token 单价（输入/输出/读缓存/
-  写缓存）。
+- **按页查询**：请求列表按时间戳+序列号倒序，以 `offset`/`limit` 翻页，不查询精确
+  总数或总页数；提供商/模型过滤只扫描选定区间。
+- **查询时定价**：按**精确、完整**的模型 ID 配置 USD/百万 token 单价（输入/输出/
+  读缓存/写缓存）。新记录只保存 token 与执行数据，查询时按当前生效价格计算历史成本。
 - **未分类 token**：无法确定语义的用量保留原始计数与权威总量，标记为 `unclassified`
   质量，并把有歧义的 TPS/成本置空，而不是按模型名猜测协议或价格。
 - **本地库**：单文件 bbolt，相对路径按 CPA 工作目录解析（默认
@@ -137,11 +137,12 @@ http://127.0.0.1:8317/v0/resource/plugins/cliproxyapi-observer/ui
 
 页面仅允许同源管理面板 iframe 嵌入，并跟随父级主题；请勿移除 CSP 或允许任意站点嵌入。
 连接时输入 CPA **管理密钥**（仅存内存、只作请求头）。页面提供周期 24h/7d/30d、
-模型/提供商过滤，概览、趋势、分组表、游标请求表，以及需二次确认才展开的正文详情。
+模型/提供商过滤，概览、趋势、分组表、上一页/下一页请求表，以及需二次确认才展开的正文详情。
 连接控件位于内容区的独立卡片，不再占用宿主右上角工具区。
 「采集设置」可编辑正文采集、保留期、容量、压缩参数与模型价格；修改只形成草稿，
 显式保存且通过校验后才写入 CPA 配置。保存会回读配置并确认已生效；
 仪表盘刷新不会覆盖未保存草稿，重新连接会清除旧连接的草稿。
+保存与放弃草稿使用跟随主题的异步确认弹窗；可按 Escape 或点击遮罩取消，不产生写入。
 
 ### 4. 使用管理 API
 
@@ -157,9 +158,11 @@ GET /v0/management/plugins/cliproxyapi-observer/health
 POST /v0/management/plugins/cliproxyapi-observer/validate
 ```
 
-`from`/`to` 为 RFC3339，默认最近 24 小时；`requests` 的 `limit` 取值 1..100（默认 50）
-并使用 `cursor`。正文缺失、过期或采集关闭时返回 404；畸形参数、越界保留期或非法游标
-返回 400。`settings` 返回 `capture_bodies`、`body_retention_seconds`、
+`from`/`to` 为 RFC3339，默认最近 24 小时；`requests` 的 `offset` 取值
+0..2147483647（默认 0），`limit` 取值 1..100（默认 50），返回
+`{"items": [...], "offset": 0, "limit": 50, "has_more": true}`。
+非空旧 `cursor`、畸形参数或越界参数返回 400。正文缺失、过期或采集关闭时返回 404。
+`settings` 返回 `capture_bodies`、`body_retention_seconds`、
 `request_retention_seconds`、`stats_retention_days`、`max_body_bytes`、
 `max_body_storage_bytes`、`compact_interval_seconds`、`compact_min_bytes`、`prices`；
 `validate` 用于验证候选配置 JSON patch（支持白名单 keys），成功返回 `{"valid": true}`，
@@ -171,6 +174,11 @@ POST /v0/management/plugins/cliproxyapi-observer/validate
 保存时将同一 patch 发送到 CPA 核心的
 `PATCH /v0/management/plugins/cliproxyapi-observer/config`，由核心浅合并、持久化并热重载，
 保留未编辑的 `enabled`、`db`、`flush` 等配置。
+
+翻页示例：`requests?offset=50&limit=50&from=<RFC3339>&to=<RFC3339>`。
+页面在翻页期间固定时间窗口，刷新、筛选或重连回到第 1 页。过期清理或迟到写入仍可能
+导致偏移漂移、重复或遗漏；固定窗口不是数据库快照。深页需跳过前面的匹配记录，
+无过滤时开销随 `offset + limit` 增长，有过滤时可能扫描更多区间记录；不会额外全库计数。
 
 ## 配置项
 
@@ -190,10 +198,48 @@ POST /v0/management/plugins/cliproxyapi-observer/validate
 | `prices` | 空 | 精确完整模型 ID 到 USD/百万 token 单价的映射 |
 
 `prices` 每项包含 `input`、`output`、`cache-read`、`cache-creation`。单价必须为有限非负数，
-trim 后的模型 ID 不得重复。定价为**静态配置**，不再向上游查询；历史成本在记录时快照，
-不会因之后改配置而回算。
+trim 后的模型 ID 不得重复。价格来自**当前生效配置**，不向上游查询；修改、增加或删除
+价格后，历史请求与聚合统计在下次查询时重新计算。配置为零的价格是有效零成本，
+缺少价格或记账质量不完整的请求仍为未定价；旧请求中的金额快照即使存在也不再读取。
 JSON settings 使用 `cache_read`、`cache_creation`；patch 与 YAML 同时兼容下划线和连字符，
 页面保存使用 `cache-read`、`cache-creation`。
+
+```text
+cost_usd = (uncached_input * input_price + cache_read * cache_read_price
+          + cache_creation * cache_creation_price + output * output_price) / 1,000,000
+```
+
+输出使用包含 reasoning 的归一化总数，不重复计费 reasoning。聚合只持久化 token、请求数、
+延迟等与价格无关的数据，以及完整记账请求的四个互斥计费桶；明细过期后仍可重算聚合成本。
+
+### 旧统计库升级
+
+首次打开旧库时，在单个事务中升级原有 120 字节统计记录，保留全部流量、token 与延迟总数。
+能证明全部请求已完整记账的桶可直接恢复计费分量；其他桶仅从仍保留的完整请求明细恢复。
+已过期且无法恢复的部分保持未定价，不猜测成本，也不从短保留期明细重建长期流量总数。
+升级有持久标记，后续重开或查询不再扫描全量请求。
+
+升级会改变统计存储格式。**升级前应停宿主并备份数据库；旧插件不支持新统计格式，
+不可直接用旧版打开升级后的库。** 回滚需恢复升级前的数据库备份。
+
+## API key 维度与 OpenCode Provider
+
+当前只按分钟/提供商/模型聚合，**不支持按 API key 或上游凭据分组**。插件不保存
+CPA usage 回调中的 `APIKey`、`AuthID`、`AuthIndex` 或 `Source`，`auth_type` 也不是 key 标识。
+下游客户端 key 与上游凭据是不同维度；SDK 的 `Source` 可能包含明文 key 或账号信息，
+不能直接作为安全分组标签。
+
+OpenCode Provider 的凭据绑定执行路径在本地 CPA v8.0.15/v8.0.20 双插件联调中，
+流式与非流式请求均进入 Observer，提供商为 `opencode-go`，模型保留
+`opencode-go/<model>` 全名；按插件 ID `cliproxyapi-opencode-provider` 过滤会匹配不到这些记录。
+当前锁定 SDK 不识别 `opencode-go` 的 token 重叠语义，因此非零用量会标为
+`unclassified`：请求数、原始输入/输出/缓存计数仍统计，但不确定的未缓存分量、TPS 与成本
+不会猜测，配置价格也不能将未知记账质量变为完整。
+
+如果连请求明细和请求数都没有，应先清空提供商/模型筛选、刷新时间范围，检查两个插件均已
+启用，以及 Observer `/health` 的 `dropped_usage`、`write_errors` 和宿主插件加载日志。
+上述联调不证明生产环境的缺失原因；解决准确计费需要明确的协议记账语义，不能把整个
+多协议 Provider 强行当作 OpenAI。
 
 ### 自动物理回收
 

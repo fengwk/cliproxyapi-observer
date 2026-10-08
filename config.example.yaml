@@ -36,9 +36,9 @@ plugins:
       compact-interval: "15m"
       # Minimum reclaimable free+pending page bytes, also requiring >=25% of file size.
       compact-min-bytes: 8388608
-      # Static USD-per-million prices for exact, full model IDs. Requests whose
-      # accounting is incomplete (unknown counters) stay unpriced rather than
-      # being guessed from the model name.
+      # Current USD-per-million prices for exact, full model IDs. Historical
+      # request and aggregate costs are recalculated at query time.
+      # Incomplete accounting stays unpriced; model names do not imply semantics.
       prices:
         "claude-3-5-sonnet-20241022":
           input: 3.0
@@ -62,4 +62,6 @@ plugins:
 #   GET /v0/management/plugins/cliproxyapi-observer/health
 #   POST /v0/management/plugins/cliproxyapi-observer/validate
 # Query parameters `from`/`to` are RFC3339 and default to the last 24 hours.
+# Requests use offset=0..2147483647 (default 0) and limit=1..100 (default 50);
+# the response contains items, offset, limit and has_more, not a total count.
 # Captured bodies are only available while `capture-bodies: true` and unexpired.

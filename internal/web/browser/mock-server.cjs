@@ -177,7 +177,7 @@ function buildSummary(prices) {
       model: 'gpt-5.1-codex',
       requests: 640,
       failed_requests: 4,
-      input_tokens: 2400000,
+      input_tokens: 2520000,
       uncached_input_tokens: 1200000,
       output_tokens: 800000,
       cache_read_tokens: 1200000,
@@ -191,7 +191,7 @@ function buildSummary(prices) {
       model: 'claude-opus-4-1',
       requests: 322,
       failed_requests: 6,
-      input_tokens: 1400000,
+      input_tokens: 1490000,
       uncached_input_tokens: 500000,
       output_tokens: 300000,
       cache_read_tokens: 900000,
@@ -277,7 +277,7 @@ function buildSummary(prices) {
   for (let i = 0; i < 48; i += 1) {
     const requests = 20 + Math.round(20 * Math.sin(i / 4) + (i % 5));
     const failed = i % 7 === 0 ? 2 : 0;
-    // Fixture input includes cache reads; cache creation is a separate bucket.
+    // Canonical input contains all three mutually exclusive input buckets.
     const uncachedInput = requests * (300 - 120);
     const cacheRead = requests * 120;
     const cacheCreation = requests * 30;
@@ -295,8 +295,8 @@ function buildSummary(prices) {
       time: new Date(BASE_TIME - (47 - i) * 30 * 60 * 1000).toISOString(),
       requests,
       failed_requests: failed,
-      total_tokens: requests * 400,
-      input_tokens: requests * 300,
+      total_tokens: uncachedInput + cacheRead + cacheCreation + output,
+      input_tokens: uncachedInput + cacheRead + cacheCreation,
       output_tokens: output,
       cache_read_tokens: cacheRead,
       cache_creation_tokens: cacheCreation,
@@ -355,13 +355,13 @@ function buildRequestBody(index, captureBodies, prices) {
     stream: index % 2 === 0,
     failed,
     failure_status: failed ? 500 : 0,
-    input_tokens: 300 + index,
+    input_tokens: uncachedInput + cacheRead + cacheCreation,
     uncached_input_tokens: uncachedInput,
     output_tokens: output,
     reasoning_tokens: 10,
     cache_read_tokens: cacheRead,
     cache_creation_tokens: cacheCreation,
-    total_tokens: 410 + index * 2,
+    total_tokens: uncachedInput + cacheRead + cacheCreation + output,
     accounting_quality: quality,
     latency_ns: (400 + index * 12) * 1000000,
     ttft_ns: (120 + index * 3) * 1000000,
