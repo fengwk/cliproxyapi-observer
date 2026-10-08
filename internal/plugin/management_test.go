@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -29,11 +30,24 @@ func callManagement(t *testing.T, m *Manager, method, path string, query url.Val
 	return resp
 }
 
+func callManagementWithBody(t *testing.T, m *Manager, method, path string, body []byte) pluginapi.ManagementResponse {
+	t.Helper()
+	raw, err := m.HandleCall(pluginabi.MethodManagementHandle, mustJSON(t, managementRequest{
+		ManagementRequest: pluginapi.ManagementRequest{Method: method, Path: path, Body: body},
+	}))
+	if err != nil {
+		t.Fatalf("management call with body: %v", err)
+	}
+	var resp pluginapi.ManagementResponse
+	mustResult(t, raw, &resp)
+	return resp
+}
+
 func registeredManager(t *testing.T, opener *fakeOpener) *Manager {
 	t.Helper()
 	m := NewManager(opener, nil)
 	m.now = func() time.Time { return managementNow }
-	register(t, m, "live")
+	register(t, m, "enabled: true\n")
 	return m
 }
 
@@ -53,27 +67,27 @@ func TestManagementDeclaresReadOnlyRoutesAndResources(t *testing.T) {
 	var reg managementRegistrationResponse
 	mustResult(t, raw, &reg)
 
-	want := map[string]bool{
-		"/plugins/cliproxyapi-observer/summary":  false,
-		"/plugins/cliproxyapi-observer/requests": false,
-		"/plugins/cliproxyapi-observer/body":     false,
-		"/plugins/cliproxyapi-observer/settings": false,
-		"/plugins/cliproxyapi-observer/health":   false,
+	want := map[string]string{
+		"/plugins/cliproxyapi-observer/summary":  http.MethodGet,
+		"/plugins/cliproxyapi-observer/requests": http.MethodGet,
+		"/plugins/cliproxyapi-observer/body":     http.MethodGet,
+		"/plugins/cliproxyapi-observer/settings": http.MethodGet,
+		"/plugins/cliproxyapi-observer/health":   http.MethodGet,
+		"/plugins/cliproxyapi-observer/validate": http.MethodPost,
 	}
 	for _, route := range reg.Routes {
-		if route.Method != http.MethodGet {
-			t.Errorf("route %s method = %s, want GET", route.Path, route.Method)
-		}
-		if _, ok := want[route.Path]; !ok {
+		expectedMethod, ok := want[route.Path]
+		if !ok {
 			t.Errorf("unexpected route %s", route.Path)
 			continue
 		}
-		want[route.Path] = true
-	}
-	for path, seen := range want {
-		if !seen {
-			t.Errorf("route %s not declared", path)
+		if route.Method != expectedMethod {
+			t.Errorf("route %s method = %s, want %s", route.Path, route.Method, expectedMethod)
 		}
+		delete(want, route.Path)
+	}
+	for path := range want {
+		t.Errorf("route %s not declared", path)
 	}
 	if len(reg.Resources) != 3 {
 		t.Fatalf("resources = %d, want 3", len(reg.Resources))
@@ -324,6 +338,11 @@ func TestSettingsAndHealthRoutes(t *testing.T) {
 	cfg.StatsRetentionDays = 30
 	cfg.MaxBodyBytes = 4096
 	cfg.MaxBodyStorageBytes = 8192
+	cfg.CompactInterval = 30 * time.Minute
+	cfg.CompactMinBytes = 16777216
+	cfg.Prices = map[string]observer.Price{
+		"m1": {Input: 1.0, Output: 2.0},
+	}
 	opener := &fakeOpener{cfg: cfg}
 	m := registeredManager(t, opener)
 
@@ -333,8 +352,20 @@ func TestSettingsAndHealthRoutes(t *testing.T) {
 	}
 	var settings settingsResponse
 	decodeBody(t, resp, &settings)
-	want := settingsResponse{CaptureBodies: true, BodyRetentionSeconds: 43200, RequestRetentionSeconds: 21600, StatsRetentionDays: 30, MaxBodyBytes: 4096, MaxBodyStorageBytes: 8192}
-	if settings != want {
+	want := settingsResponse{
+		CaptureBodies:           true,
+		BodyRetentionSeconds:    43200,
+		RequestRetentionSeconds: 21600,
+		StatsRetentionDays:      30,
+		MaxBodyBytes:            4096,
+		MaxBodyStorageBytes:     8192,
+		CompactIntervalSeconds:  1800,
+		CompactMinBytes:         16777216,
+		Prices: map[string]observer.Price{
+			"m1": {Input: 1.0, Output: 2.0},
+		},
+	}
+	if !reflect.DeepEqual(settings, want) {
 		t.Errorf("settings = %+v, want %+v", settings, want)
 	}
 
@@ -370,8 +401,12 @@ func TestResourceRoutesAreHardened(t *testing.T) {
 		if got := resp.Headers.Get("Content-Type"); !strings.Contains(got, contentType) {
 			t.Errorf("%s Content-Type = %q", route, got)
 		}
-		if resp.Headers.Get("Content-Security-Policy") != cspPolicy {
-			t.Errorf("%s CSP = %q", route, resp.Headers.Get("Content-Security-Policy"))
+		csp := resp.Headers.Get("Content-Security-Policy")
+		if csp != cspPolicy {
+			t.Errorf("%s CSP = %q", route, csp)
+		}
+		if !strings.Contains(csp, "base-uri 'none'") || !strings.Contains(csp, "form-action 'none'") {
+			t.Errorf("%s CSP missing base-uri or form-action: %q", route, csp)
 		}
 		if resp.Headers.Get("X-Content-Type-Options") != "nosniff" {
 			t.Errorf("%s missing nosniff", route)
@@ -398,9 +433,216 @@ func TestResourceRoutesAreHardened(t *testing.T) {
 func TestManagementRejectsNonGetAndUnknownPaths(t *testing.T) {
 	m := registeredManager(t, &fakeOpener{cfg: observerConfigFixture()})
 	if resp := callManagement(t, m, http.MethodPost, "/v0/management/plugins/cliproxyapi-observer/summary", nil); resp.StatusCode != http.StatusMethodNotAllowed {
-		t.Errorf("POST status = %d, want 405", resp.StatusCode)
+		t.Errorf("POST summary status = %d, want 405", resp.StatusCode)
+	}
+	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/validate", nil); resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("GET validate status = %d, want 405", resp.StatusCode)
+	}
+	if resp := callManagement(t, m, http.MethodPut, "/v0/management/plugins/cliproxyapi-observer/validate", nil); resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("PUT validate status = %d, want 405", resp.StatusCode)
 	}
 	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/unknown", nil); resp.StatusCode != http.StatusNotFound {
 		t.Errorf("unknown path status = %d, want 404", resp.StatusCode)
 	}
+}
+
+// TestManagementValidatePatch covers comprehensive validation behavior for POST /validate:
+// ensuring valid patches succeed, invalid payloads are rejected according to the contract,
+// manager raw state is merged, and no lifecycle changes or persistence occur.
+func TestManagementValidatePatch(t *testing.T) {
+	// 1. Valid patches succeed.
+	t.Run("valid single field patch", func(t *testing.T) {
+		m := registeredManager(t, &fakeOpener{cfg: observerConfigFixture()})
+		resp := callManagementWithBody(t, m, http.MethodPost, "/v0/management/plugins/cliproxyapi-observer/validate", []byte(`{"compact-interval": "30m"}`))
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body = %s", resp.StatusCode, resp.Body)
+		}
+		var res map[string]bool
+		decodeBody(t, resp, &res)
+		if !res["valid"] {
+			t.Errorf("response valid = false, want true")
+		}
+	})
+
+	t.Run("valid comprehensive patch with prices", func(t *testing.T) {
+		m := registeredManager(t, &fakeOpener{cfg: observerConfigFixture()})
+		body := []byte(`{
+			"capture-bodies": true,
+			"request-retention": "12h",
+			"body-retention": "12h",
+			"stats-retention-days": 60,
+			"max-body-bytes": 2048,
+			"max-body-storage-bytes": 1048576,
+			"compact-interval": "20m",
+			"compact-min-bytes": 10485760,
+			"prices": {
+				"claude-3-5-sonnet": {
+					"input": 3.0,
+					"output": 15.0,
+					"cache_read": 0.3,
+					"cache_creation": 3.75
+				},
+				"gpt-4o-mini": {
+					"input": 0.15,
+					"output": 0.60,
+					"cache-read": 0.075,
+					"cache-creation": 0.15
+				}
+			}
+		}`)
+		resp := callManagementWithBody(t, m, http.MethodPost, "/v0/management/plugins/cliproxyapi-observer/validate", body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body = %s", resp.StatusCode, resp.Body)
+		}
+	})
+
+	// 2. Cross-field validation with manager raw YAML clone.
+	t.Run("cross field check with live raw", func(t *testing.T) {
+		opener := &fakeOpener{cfg: observerConfigFixture()}
+		m := NewManager(opener, nil)
+		// Register with an explicit small max-body-storage-bytes
+		initialRaw := []byte("max-body-storage-bytes: 1048576\n")
+		register(t, m, string(initialRaw))
+
+		// Try to patch max-body-bytes to 2MiB, which exceeds 1MiB storage limit
+		patch := []byte(`{"max-body-bytes": 2097152}`)
+		resp := callManagementWithBody(t, m, http.MethodPost, "/v0/management/plugins/cliproxyapi-observer/validate", patch)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400, body = %s", resp.StatusCode, resp.Body)
+		}
+		var errResp map[string]string
+		decodeBody(t, resp, &errResp)
+		if errResp["error"] != "invalid settings patch" {
+			t.Errorf("expected error message %q, got %s", "invalid settings patch", resp.Body)
+		}
+	})
+
+	// 3. Payload size bound (256KiB).
+	t.Run("rejects payload over 256KiB", func(t *testing.T) {
+		m := registeredManager(t, &fakeOpener{cfg: observerConfigFixture()})
+		oversized := make([]byte, 256*1024+1)
+		for i := range oversized {
+			oversized[i] = ' '
+		}
+		resp := callManagementWithBody(t, m, http.MethodPost, "/v0/management/plugins/cliproxyapi-observer/validate", oversized)
+		if resp.StatusCode != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want 413", resp.StatusCode)
+		}
+		var errResp map[string]string
+		decodeBody(t, resp, &errResp)
+		if errResp["error"] != "request body exceeds 256KiB limit" {
+			t.Errorf("error = %q, want %q", errResp["error"], "request body exceeds 256KiB limit")
+		}
+	})
+
+	// 4. Rejection of null, array, non-object, unknown, duplicate, invalid types/bounds, trailing.
+	invalidCases := map[string]string{
+		"empty body":                        "",
+		"whitespace only":                   "   \n  \t ",
+		"top level null":                    "null",
+		"top level array":                   "[]",
+		"top level string":                  `"capture-bodies"`,
+		"top level number":                  "123",
+		"unknown key":                       `{"unknown": 123}`,
+		"schema key enabled not allowed":    `{"enabled": true}`,
+		"schema key db not allowed":         `{"db": "data/db.bolt"}`,
+		"schema key flush not allowed":      `{"flush": "2s"}`,
+		"field value null boolean":          `{"capture-bodies": null}`,
+		"field value null duration":         `{"compact-interval": null}`,
+		"field value null int":              `{"stats-retention-days": null}`,
+		"field value null prices":           `{"prices": null}`,
+		"field value array":                 `{"compact-interval": ["15m"]}`,
+		"field value array prices":          `{"prices": []}`,
+		"duplicate patch key":               `{"compact-interval": "15m", "compact-interval": "20m"}`,
+		"type error boolean with string":    `{"capture-bodies": "true"}`,
+		"type error int with string":        `{"stats-retention-days": "365"}`,
+		"type error int with float":         `{"stats-retention-days": 10.5}`,
+		"type error duration with int":      `{"compact-interval": 900}`,
+		"bound error compact-interval min":  `{"compact-interval": "30s"}`,
+		"bound error compact-interval max":  `{"compact-interval": "25h"}`,
+		"bound error compact-min-bytes min": `{"compact-min-bytes": 65535}`,
+		"bound error compact-min-bytes max": `{"compact-min-bytes": 8589934593}`,
+		"trailing data after json":          `{"compact-interval": "20m"} extra_trailing`,
+		"trailing token after json":         `{"compact-interval": "20m"} {"compact-interval": "20m"}`,
+		"prices empty model id":             `{"prices": {"": {"input": 1}}}`,
+		"prices whitespace model id":        `{"prices": {"   ": {"input": 1}}}`,
+		"prices duplicate trimmed model":    `{"prices": {"gpt-4": {"input": 1}, " gpt-4 ": {"input": 2}}}`,
+		"prices null model entry":           `{"prices": {"gpt-4": null}}`,
+		"prices array model entry":          `{"prices": {"gpt-4": []}}`,
+		"prices negative value":             `{"prices": {"gpt-4": {"input": -1}}}`,
+		"prices unknown field":              `{"prices": {"gpt-4": {"unknown": 1}}}`,
+		"prices trailing in model":          `{"prices": {"gpt-4": {"input": 1} trailing}}`,
+	}
+
+	for name, raw := range invalidCases {
+		t.Run(name, func(t *testing.T) {
+			m := registeredManager(t, &fakeOpener{cfg: observerConfigFixture()})
+			resp := callManagementWithBody(t, m, http.MethodPost, "/v0/management/plugins/cliproxyapi-observer/validate", []byte(raw))
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("%s: status = %d, want 400 (body = %s)", name, resp.StatusCode, resp.Body)
+			}
+			var errResp map[string]string
+			decodeBody(t, resp, &errResp)
+			if errResp["error"] != "invalid settings patch" {
+				t.Errorf("%s: error = %q, want %q", name, errResp["error"], "invalid settings patch")
+			}
+		})
+	}
+
+	// 5. Manager raw snapshot availability (503 when no config or corrupt YAML).
+	t.Run("service unavailable when no config", func(t *testing.T) {
+		opener := &fakeOpener{cfg: observerConfigFixture()}
+		m := NewManager(opener, nil)
+		resp := callManagementWithBody(t, m, http.MethodPost, "/v0/management/plugins/cliproxyapi-observer/validate", []byte(`{"compact-interval": "20m"}`))
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503, body = %s", resp.StatusCode, resp.Body)
+		}
+		var errResp map[string]string
+		decodeBody(t, resp, &errResp)
+		if errResp["error"] != "observer unavailable" {
+			t.Errorf("error = %q, want %q", errResp["error"], "observer unavailable")
+		}
+	})
+
+	t.Run("service unavailable when raw yaml corrupt", func(t *testing.T) {
+		opener := &fakeOpener{cfg: observerConfigFixture()}
+		m := NewManager(opener, nil)
+		register(t, m, ": [invalid yaml\n")
+		resp := callManagementWithBody(t, m, http.MethodPost, "/v0/management/plugins/cliproxyapi-observer/validate", []byte(`{"compact-interval": "20m"}`))
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503, body = %s", resp.StatusCode, resp.Body)
+		}
+		var errResp map[string]string
+		decodeBody(t, resp, &errResp)
+		if errResp["error"] != "observer unavailable" {
+			t.Errorf("error = %q, want %q", errResp["error"], "observer unavailable")
+		}
+	})
+
+	// 6. Verification of no lifecycle side effects or state mutation.
+	t.Run("no lifecycle side effects or mutation", func(t *testing.T) {
+		opener := &fakeOpener{cfg: observerConfigFixture()}
+		m := registeredManager(t, opener)
+		liveStore, liveCfg, liveHasConfig := m.snapshot()
+
+		// Send valid patch
+		resp := callManagementWithBody(t, m, http.MethodPost, "/v0/management/plugins/cliproxyapi-observer/validate", []byte(`{"compact-interval": "20m"}`))
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("validate status = %d, want 200", resp.StatusCode)
+		}
+
+		afterStore, afterCfg, afterHasConfig := m.snapshot()
+		if liveStore != afterStore {
+			t.Errorf("store instance mutated during validate: %p != %p", liveStore, afterStore)
+		}
+		if liveHasConfig != afterHasConfig {
+			t.Errorf("hasConfig changed")
+		}
+		if liveCfg.CompactInterval != afterCfg.CompactInterval {
+			t.Errorf("live config mutated: %v -> %v", liveCfg.CompactInterval, afterCfg.CompactInterval)
+		}
+		if len(opener.opened()) != 1 {
+			t.Errorf("opener opened new store count = %d, want 1", len(opener.opened()))
+		}
+	})
 }

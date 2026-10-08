@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const wantCSP = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'self'"
+const wantCSP = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'"
 
 // TestInferenceUnchangedSyncAndStream proves the observer is purely passive:
 // synchronous and streaming completions reach the client unchanged and the
@@ -755,4 +755,196 @@ func TestReconfigureSwitchesDatabase(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("new database never observed fresh traffic\n%s", logTail(h.stdout.String(), h.stderr.String()))
+}
+
+// TestManagementSettingsAndValidateRealHost verifies GET /settings returns compaction
+// and price configuration, and POST /validate enforces auth, sanitization, and candidate
+// validity on a real CPA host.
+func TestManagementSettingsAndValidateRealHost(t *testing.T) {
+	h := newHarness(t)
+
+	// 1. GET /settings contains compact fields and prices.
+	status, _, body := h.managementRequest(t, http.MethodGet, "/v0/management/plugins/"+pluginID+"/settings")
+	if status != http.StatusOK {
+		t.Fatalf("GET /settings status = %d, want 200, body = %s", status, truncate(body, 300))
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(body, &settings); err != nil {
+		t.Fatalf("parse settings json: %v", err)
+	}
+	if _, ok := settings["compact_interval_seconds"]; !ok {
+		t.Errorf("settings missing compact_interval_seconds: %v", settings)
+	}
+	if _, ok := settings["compact_min_bytes"]; !ok {
+		t.Errorf("settings missing compact_min_bytes: %v", settings)
+	}
+	if _, ok := settings["prices"]; !ok {
+		t.Errorf("settings missing prices: %v", settings)
+	}
+
+	// 2. POST /validate authentication enforcement: 401/403 for unauthorized probes.
+	for _, headers := range []map[string]string{
+		nil,
+		{"Authorization": "Bearer wrong-management-key"},
+	} {
+		status, _, _, err := h.rawRequestWithHeaders(http.MethodPost, "/v0/management/plugins/"+pluginID+"/validate", []byte(`{"compact-interval": "20m"}`), headers)
+		if err != nil {
+			t.Fatalf("unauthorized validate probe error: %v", err)
+		}
+		if status != http.StatusUnauthorized && status != http.StatusForbidden {
+			t.Fatalf("unauthorized POST /validate status = %d, want 401 or 403", status)
+		}
+	}
+
+	// 3. POST /validate valid patch returns 200 {"valid": true}.
+	validPatch := []byte(`{
+		"capture-bodies": true,
+		"compact-interval": "20m",
+		"compact-min-bytes": 10485760,
+		"prices": {
+			"gpt-4": {
+				"input": 2.5,
+				"output": 10.0,
+				"cache_read": 0.25,
+				"cache_creation": 2.5
+			}
+		}
+	}`)
+	status, _, body, err := h.rawRequestWithHeaders(http.MethodPost, "/v0/management/plugins/"+pluginID+"/validate", validPatch, map[string]string{"Authorization": "Bearer " + mgmtKey})
+	if err != nil {
+		t.Fatalf("POST /validate valid patch error: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("POST /validate valid patch status = %d, want 200, body = %s", status, truncate(body, 300))
+	}
+	var validResp map[string]bool
+	if err := json.Unmarshal(body, &validResp); err != nil {
+		t.Fatalf("parse validate response: %v", err)
+	}
+	if !validResp["valid"] {
+		t.Errorf("validate response valid = false, want true")
+	}
+
+	// 4. POST /validate invalid patch returns 400 and sanitized error "invalid settings patch".
+	invalidPatch := []byte(`{"compact-interval": "30s"}`) // below 1m bound
+	status, _, body, err = h.rawRequestWithHeaders(http.MethodPost, "/v0/management/plugins/"+pluginID+"/validate", invalidPatch, map[string]string{"Authorization": "Bearer " + mgmtKey})
+	if err != nil {
+		t.Fatalf("POST /validate invalid patch error: %v", err)
+	}
+	if status != http.StatusBadRequest {
+		t.Fatalf("POST /validate invalid patch status = %d, want 400, body = %s", status, truncate(body, 300))
+	}
+	var errResp map[string]string
+	if err := json.Unmarshal(body, &errResp); err != nil {
+		t.Fatalf("parse error response: %v", err)
+	}
+	if errResp["error"] != "invalid settings patch" {
+		t.Errorf("POST /validate error = %q, want %q", errResp["error"], "invalid settings patch")
+	}
+}
+
+// TestCorePatchRoundTripObserverConfig verifies that a shallow PATCH to core config
+// updates compaction settings and prices with cache_read/cache_creation, persists to
+// the host config file, propagates to GET /settings, and preserves existing db/enabled/flush.
+func TestCorePatchRoundTripObserverConfig(t *testing.T) {
+	h := newHarness(t)
+
+	// 1. Shallow PATCH candidate configuration to core config.
+	shallowPatch := []byte(`{
+		"compact-interval": "20m",
+		"compact-min-bytes": 10485760,
+		"prices": {
+			"gpt-4": {
+				"input": 2.5,
+				"output": 10.0,
+				"cache_read": 1.25,
+				"cache_creation": 2.5
+			}
+		}
+	}`)
+
+	status, _, body, err := h.rawRequestWithHeaders(http.MethodPatch, "/v0/management/plugins/"+pluginID+"/config", shallowPatch, map[string]string{
+		"Authorization": "Bearer " + mgmtKey,
+		"Content-Type":  "application/json",
+	})
+	if err != nil {
+		t.Fatalf("PATCH observer config error: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("PATCH observer config status = %d, want 200, body = %s", status, truncate(body, 300))
+	}
+
+	// 2. Poll GET /settings until the new compaction settings and prices take effect.
+	deadline := time.Now().Add(15 * time.Second)
+	var lastSettings map[string]any
+	var matched bool
+	for time.Now().Before(deadline) {
+		status, _, body, err := h.rawRequestWithHeaders(http.MethodGet, "/v0/management/plugins/"+pluginID+"/settings", nil, map[string]string{
+			"Authorization": "Bearer " + mgmtKey,
+		})
+		if err == nil && status == http.StatusOK {
+			var s map[string]any
+			if err := json.Unmarshal(body, &s); err == nil {
+				lastSettings = s
+				interval, _ := s["compact_interval_seconds"].(float64)
+				minBytes, _ := s["compact_min_bytes"].(float64)
+				prices, _ := s["prices"].(map[string]any)
+				if interval == 1200 && minBytes == 10485760 && prices != nil {
+					if gpt4, ok := prices["gpt-4"].(map[string]any); ok {
+						cr, _ := gpt4["cache_read"].(float64)
+						cc, _ := gpt4["cache_creation"].(float64)
+						if cr == 1.25 && cc == 2.5 {
+							matched = true
+							break
+						}
+					}
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !matched {
+		t.Fatalf("settings did not reflect patched values in time: %+v", lastSettings)
+	}
+
+	// 3. Read host config file on disk to prove persistence.
+	configPath := filepath.Join(h.dir, "config.yaml")
+	rawFile, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read host config file: %v", err)
+	}
+	configStr := string(rawFile)
+	if !strings.Contains(configStr, "20m") || !strings.Contains(configStr, "10485760") {
+		t.Errorf("host config file did not persist compaction settings: %s", configStr)
+	}
+	if !strings.Contains(configStr, "gpt-4") {
+		t.Errorf("host config file did not persist prices: %s", configStr)
+	}
+
+	// 4. GET config and prove that db, enabled, and flush are preserved.
+	status, _, body, err = h.rawRequestWithHeaders(http.MethodGet, "/v0/management/plugins/"+pluginID+"/config", nil, map[string]string{
+		"Authorization": "Bearer " + mgmtKey,
+	})
+	var pluginCfg map[string]any
+	if err == nil && status == http.StatusOK {
+		if err := json.Unmarshal(body, &pluginCfg); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		t.Fatalf("GET config failed: status %d body %s error %v", status, string(body), err)
+	}
+	if pluginCfg == nil {
+		t.Fatalf("failed to decode observer plugin config from GET config: %s", body)
+	}
+
+	dbVal, _ := pluginCfg["db"].(string)
+	if !strings.Contains(dbVal, "observer.db") {
+		t.Errorf("db setting was not preserved: %v", pluginCfg["db"])
+	}
+	if enabledVal, ok := pluginCfg["enabled"].(bool); !ok || !enabledVal {
+		t.Errorf("enabled setting was not preserved: %v", pluginCfg["enabled"])
+	}
+	if flushVal, _ := pluginCfg["flush"].(string); flushVal != "1s" {
+		t.Errorf("flush setting was not preserved: %v", pluginCfg["flush"])
+	}
 }
