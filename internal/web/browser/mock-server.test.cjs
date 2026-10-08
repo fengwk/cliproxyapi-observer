@@ -449,3 +449,154 @@ test('动态定价：当前有效价格映射计算历史请求与 summary 成�
     await server.close();
   }
 });
+
+test('有序条件定价：阈值严格大于、UTC 跨夜/24:00 边界与旧 map 回退', () => {
+  const at = (h, m) => Date.UTC(2026, 0, 2, h, m);
+  // UTC 时间区间：起点包含 / 终点不包含；支持跨夜与 24:00。
+  assert.equal(mock.timeInRange('22:00-06:00', at(22, 0)), true);
+  assert.equal(mock.timeInRange('22:00-06:00', at(23, 30)), true);
+  assert.equal(mock.timeInRange('22:00-06:00', at(5, 59)), true);
+  assert.equal(mock.timeInRange('22:00-06:00', at(6, 0)), false);
+  assert.equal(mock.timeInRange('22:00-06:00', at(12, 0)), false);
+  assert.equal(mock.timeInRange('08:00-09:00', at(8, 0)), true);
+  assert.equal(mock.timeInRange('08:00-09:00', at(9, 0)), false);
+  assert.equal(mock.timeInRange('00:00-24:00', at(13, 0)), true);
+  assert.equal(mock.timeInRange('08:00-08:00', at(8, 0)), false);
+
+  const pricing = {
+    prices: { fallback: { input: 9, output: 9, 'cache-read': 9, 'cache-creation': 9 } },
+    rules: [
+      { model: 'm', 'input-tokens-gt': 1000, price: { input: 1, output: 1, 'cache-read': 1, 'cache-creation': 1 } },
+      { model: 'm', price: { input: 2, output: 2, 'cache-read': 2, 'cache-creation': 2 } }
+    ]
+  };
+  // 阈值严格大于：1001 命中第一条，恰好 1000 不命中而落到第二条。
+  assert.equal(mock.resolveModelPrice('m', 1001, at(0, 0), pricing).input, 1);
+  assert.equal(mock.resolveModelPrice('m', 1000, at(0, 0), pricing).input, 2);
+  assert.equal(mock.resolveModelPrice('m', 500, at(0, 0), pricing).input, 2);
+  // 无规则命中时回退旧的无条件 prices map，未配置模型返回 null。
+  assert.equal(mock.resolveModelPrice('fallback', 1, at(0, 0), pricing).input, 9);
+  assert.equal(mock.resolveModelPrice('absent', 1, at(0, 0), pricing), null);
+});
+
+test('价格规则经 config 持久化，并以 first-match 影响请求与 summary 成本', async () => {
+  const server = await mock.startServer();
+  try {
+    const cfgUrl = server.origin + mock.MANAGEMENT_BASE + '/config';
+    const settingsUrl = server.origin + mock.MANAGEMENT_BASE + '/settings';
+    const reqUrl = server.origin + mock.MANAGEMENT_BASE + '/requests?offset=0&limit=52';
+    const sumUrl = server.origin + mock.MANAGEMENT_BASE + '/summary';
+    // 阈值 115：输入 110 不命中落到默认高价，输入 120 命中第一条零价。
+    const patch = Object.assign(ui.settingsToPatch(await (await fetch(settingsUrl, { headers: AUTH_HEADER })).json()), {
+      prices: {},
+      'price-rules': [
+        { model: 'gpt-5.1-codex', 'input-tokens-gt': 115, price: { input: 0, output: 0, 'cache-read': 0, 'cache-creation': 0 } },
+        { model: 'gpt-5.1-codex', price: { input: 1000000, output: 1000000, 'cache-read': 1000000, 'cache-creation': 1000000 } }
+      ]
+    });
+    const res = await fetch(cfgUrl, { method: 'PATCH', headers: AUTH_HEADER, body: JSON.stringify(patch) });
+    assert.equal(res.status, 200);
+    assert.deepEqual(server.getConfig().prices, {});
+    assert.equal(server.getConfig()['price-rules'].length, 2);
+
+    const items = (await (await fetch(reqUrl, { headers: AUTH_HEADER })).json()).items;
+    const gpt = items.filter((it) => it.model === 'gpt-5.1-codex' && it.accounting_quality === 'complete');
+    const total = (it) => it.uncached_input_tokens + it.cache_read_tokens + it.cache_creation_tokens;
+    const low = gpt.find((it) => total(it) === 110);
+    const high = gpt.find((it) => total(it) === 120);
+    assert.ok(low && high, 'fixture 必须提供 110/120 输入 token 的请求');
+    assert.ok(low.cost_usd > 0, '低于阈值应落到默认高价');
+    assert.equal(high.cost_usd, 0, '高于阈值应命中第一条零价');
+
+    const summary = await (await fetch(sumUrl, { headers: AUTH_HEADER })).json();
+    const gptGroup = summary.groups.find((g) => g.model === 'gpt-5.1-codex');
+    assert.equal(gptGroup.cost_usd, 0, '聚合输入远超阈值时命中第一条');
+
+    // 清空规则并恢复旧 map：无条件回退生效。
+    const legacy = Object.assign(ui.settingsToPatch(server.getSettings()), {
+      prices: { 'gpt-5.1-codex': { input: 2, output: 2, 'cache-read': 2, 'cache-creation': 2 } },
+      'price-rules': []
+    });
+    const res2 = await fetch(cfgUrl, { method: 'PATCH', headers: AUTH_HEADER, body: JSON.stringify(legacy) });
+    assert.equal(res2.status, 200);
+    const gpt2 = (await (await fetch(reqUrl, { headers: AUTH_HEADER })).json()).items
+      .filter((it) => it.model === 'gpt-5.1-codex' && it.accounting_quality === 'complete');
+    assert.ok(gpt2.length > 0);
+    assert.ok(gpt2.every((it) => it.cost_usd !== null && it.cost_usd > 0));
+  } finally {
+    await server.close();
+  }
+});
+
+test('后端拒绝畸形价格规则、不写入配置', async () => {
+  const server = await mock.startServer();
+  try {
+    const cfgBefore = JSON.parse(JSON.stringify(server.getConfig()));
+    const malformed = [
+      { model: 'm', price: { input: 0, output: 0, 'cache-read': 0, 'cache-creation': 0 }, 'time-range': '9:00-10:00' },
+      { model: 'm', price: { input: 0, output: 0, 'cache-read': 0, 'cache-creation': 0 }, 'time-range': '08:00-08:00' },
+      { model: 'm', price: { input: 0, output: 0, 'cache-read': 0, 'cache-creation': 0 }, 'input-tokens-gt': Number.MAX_SAFE_INTEGER + 1 },
+      { model: '', price: { input: 0, output: 0, 'cache-read': 0, 'cache-creation': 0 } }
+    ];
+    for (const rule of malformed) {
+      const base = ui.settingsToPatch(server.getSettings());
+      const patch = Object.assign(base, { prices: {}, 'price-rules': [rule] });
+      const validated = await fetch(server.origin + mock.MANAGEMENT_BASE + '/validate', {
+        method: 'POST', headers: AUTH_HEADER, body: JSON.stringify(patch)
+      });
+      assert.equal(validated.status, 400, 'validate 必须拒绝 ' + JSON.stringify(rule));
+      const patched = await fetch(server.origin + mock.MANAGEMENT_BASE + '/config', {
+        method: 'PATCH', headers: AUTH_HEADER, body: JSON.stringify(patch)
+      });
+      assert.equal(patched.status, 400, 'config 必须拒绝 ' + JSON.stringify(rule));
+    }
+    assert.deepEqual(server.getConfig(), cfgBefore);
+  } finally {
+    await server.close();
+  }
+});
+
+test('summary 按客户端 key / 凭据 / provider 真实过滤并暴露内嵌计数器', async () => {
+  const server = await mock.startServer();
+  try {
+    const sum = async (query) => (await (await fetch(
+      server.origin + mock.MANAGEMENT_BASE + '/summary' + (query || ''), { headers: AUTH_HEADER }
+    )).json());
+
+    const all = await sum('');
+    assert.equal(all.totals.requests, 1234);
+    assert.equal(all.totals.cache_hits, 812);
+    assert.equal(all.groups.length, 4);
+    // 未归属桶 id 为空字符串，计数器内嵌于各身份条目。
+    assert.deepEqual(all.client_keys.map((g) => g.id), [mock.CLIENT_KEY_A, mock.CLIENT_KEY_B, '']);
+    assert.deepEqual(all.credentials.map((g) => g.id), [mock.AUTH_INDEX_A, mock.AUTH_INDEX_B, '']);
+    assert.equal(all.client_keys[0].requests, 700);
+    assert.equal(all.client_keys[2].requests, 4);
+    const gpt = all.groups.find((g) => g.model === 'gpt-5.1-codex');
+    assert.equal(gpt.total_tokens, gpt.input_tokens + gpt.output_tokens);
+    assert.ok(gpt.cost_usd !== null);
+
+    const byKey = await sum('?client_key_id=' + mock.CLIENT_KEY_A);
+    assert.equal(byKey.totals.requests, 700);
+    assert.equal(byKey.totals.cache_hits, 480);
+    assert.deepEqual(byKey.client_keys.map((g) => g.id), [mock.CLIENT_KEY_A]);
+    assert.deepEqual(byKey.credentials.map((g) => g.id), [mock.AUTH_INDEX_A]);
+
+    const unknown = await sum('?auth_index=unknown');
+    assert.equal(unknown.totals.requests, 4);
+    assert.deepEqual(unknown.credentials.map((g) => g.id), ['']);
+
+    const missing = await sum('?client_key_id=' + 'f'.repeat(64));
+    assert.equal(missing.totals.requests, 0);
+    assert.deepEqual(missing.client_keys, []);
+    assert.deepEqual(missing.groups, []);
+
+    const gemini = await sum('?provider=gemini');
+    assert.equal(gemini.totals.requests, 152);
+    assert.deepEqual(gemini.groups.map((g) => g.model), ['gemini-3-pro']);
+    assert.equal(gemini.groups[0].cost_usd, null);
+    assert.equal(gemini.groups[0].unpriced_requests, 152);
+  } finally {
+    await server.close();
+  }
+});

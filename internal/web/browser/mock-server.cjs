@@ -124,7 +124,10 @@ function configToSettings(cfg) {
     prices: Object.fromEntries(Object.entries(cfg.prices || {}).map(([id, p]) => [id, {
       input: p.input, output: p.output,
       cache_read: p['cache-read'], cache_creation: p['cache-creation']
-    }]))
+    }])),
+    // settings GET 使用下划线键；config 使用连字符键，两者保持同一份有序规则。
+    price_rules: Array.isArray(cfg['price-rules']) ? cfg['price-rules']
+      : (Array.isArray(cfg.price_rules) ? cfg.price_rules : [])
   };
 }
 
@@ -132,35 +135,118 @@ function validateSettingsPatch(patch) {
   return require('../ui.js').validateSettingsPatch(patch);
 }
 
-function computeModelCost(model, uncachedInput, output, cacheRead, cacheCreation, quality, prices) {
+// --- 有序条件定价 fixture ---
+//
+// 三个 fixture 身份：两对已知客户端 key / 上游凭据，以及旧数据的未归属空桶。
+// totals、groups、series、client_keys、credentials 都从这份身份数据派生，因此
+// key / 凭据筛选会真实影响概览、趋势与分组，而不是假造一个常量。
+const CLIENT_KEY_A = 'a'.repeat(64);
+const CLIENT_KEY_B = 'b'.repeat(64);
+const AUTH_INDEX_A = '1'.repeat(16);
+const AUTH_INDEX_B = '2'.repeat(16);
+
+const FIXTURE_IDENTITIES = [
+  { client_key_id: CLIENT_KEY_A, auth_index: AUTH_INDEX_A, requests: 700, failed_requests: 8, cache_hits: 480 },
+  { client_key_id: CLIENT_KEY_B, auth_index: AUTH_INDEX_B, requests: 530, failed_requests: 4, cache_hits: 330 },
+  { client_key_id: '', auth_index: '', requests: 4, failed_requests: 0, cache_hits: 2 }
+];
+const IDENTITY_WEIGHTS = FIXTURE_IDENTITIES.map((identity) => identity.requests);
+
+const GROUP_TEMPLATES = [
+  {
+    provider: 'openai', model: 'gpt-5.1-codex', requests: 640, failed_requests: 4,
+    input_tokens: 2520000, uncached_input_tokens: 1200000, output_tokens: 800000,
+    cache_read_tokens: 1200000, cache_creation_tokens: 120000, total_tokens: 3320000,
+    quality: 'complete', complete_requests: 640
+  },
+  {
+    provider: 'anthropic', model: 'claude-opus-4-1', requests: 322, failed_requests: 6,
+    input_tokens: 1490000, uncached_input_tokens: 500000, output_tokens: 300000,
+    cache_read_tokens: 900000, cache_creation_tokens: 90000, total_tokens: 1790000,
+    quality: 'complete', complete_requests: 322
+  },
+  {
+    provider: 'unknown-vendor', model: XSS_MODEL, requests: 120, failed_requests: 2,
+    input_tokens: 120000, uncached_input_tokens: 120000, output_tokens: 30000,
+    cache_read_tokens: 0, cache_creation_tokens: 0, total_tokens: 150000,
+    quality: 'complete', complete_requests: 120
+  },
+  {
+    provider: 'gemini', model: 'gemini-3-pro', requests: 152, failed_requests: 0,
+    input_tokens: 648000, uncached_input_tokens: 0, output_tokens: 104567,
+    cache_read_tokens: 245678, cache_creation_tokens: 24567, total_tokens: 723451,
+    quality: 'unclassified', complete_requests: 0
+  }
+];
+
+function num(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// 接受 { prices, rules }、settings 形态（含 price_rules）或旧的无条件 prices map。
+function pricingParts(pricing) {
+  if (!pricing || typeof pricing !== 'object') return { prices: {}, rules: [] };
+  if (pricing.prices || Array.isArray(pricing.rules) || Array.isArray(pricing.price_rules)) {
+    let rules = [];
+    if (Array.isArray(pricing.rules)) rules = pricing.rules;
+    else if (Array.isArray(pricing.price_rules)) rules = pricing.price_rules;
+    return { prices: pricing.prices || {}, rules };
+  }
+  return { prices: pricing, rules: [] };
+}
+
+function rulePrice(price) {
+  const p = price && typeof price === 'object' ? price : {};
+  return {
+    input: num(p.input),
+    output: num(p.output),
+    cache_read: p.cache_read !== undefined ? num(p.cache_read) : num(p['cache-read']),
+    cache_creation: p.cache_creation !== undefined ? num(p.cache_creation) : num(p['cache-creation'])
+  };
+}
+
+// UTC 判定：起点包含、终点不包含；支持跨夜与终点 24:00。
+function timeInRange(range, atMs) {
+  const m = /^([01]\d|2[0-3]):([0-5]\d)-(([01]\d|2[0-3]):[0-5]\d|24:00)$/.exec(String(range));
+  if (!m) return false;
+  const d = new Date(Number.isFinite(atMs) ? atMs : Date.now());
+  if (Number.isNaN(d.getTime())) return false;
+  const minutes = d.getUTCHours() * 60 + d.getUTCMinutes();
+  const start = Number(m[1]) * 60 + Number(m[2]);
+  const end = m[3] === '24:00' ? 1440 : Number(m[3].slice(0, 2)) * 60 + Number(m[3].slice(3));
+  if (start === end) return false;
+  return start < end ? (minutes >= start && minutes < end) : (minutes >= start || minutes < end);
+}
+
+// 有序 AND 匹配：模型相同且「输入 Token 阈值」「UTC 时间区间」同时满足才算命中，
+// 整个请求采用第一条命中的价格；否则回退旧的无条件 prices map。
+// 输入 Token 阈值按含缓存的总输入 token 判定。
+function resolveModelPrice(model, inputTokens, atMs, pricing) {
+  const parts = pricingParts(pricing);
+  for (const rule of parts.rules) {
+    if (!rule || rule.model !== model) continue;
+    if (rule['input-tokens-gt'] !== undefined && !(inputTokens > Number(rule['input-tokens-gt']))) continue;
+    if (rule['time-range'] && !timeInRange(rule['time-range'], atMs)) continue;
+    return rulePrice(rule.price);
+  }
+  if (Object.prototype.hasOwnProperty.call(parts.prices, model)) return rulePrice(parts.prices[model]);
+  return null;
+}
+
+function computeModelCost(model, uncachedInput, output, cacheRead, cacheCreation, quality, pricing, atMs) {
   if (quality !== 'complete') {
     return null;
   }
-  if (!prices || !Object.prototype.hasOwnProperty.call(prices, model)) {
+  const p = resolveModelPrice(model, uncachedInput + cacheRead + cacheCreation, atMs, pricing);
+  if (!p) {
     return null;
   }
-  const p = prices[model];
-  if (!p || typeof p !== 'object') {
-    return null;
-  }
-  const inputPrice = Number(p.input !== undefined ? p.input : 0);
-  const outputPrice = Number(p.output !== undefined ? p.output : 0);
-  const cacheReadPrice = Number(
-    p.cache_read !== undefined
-      ? p.cache_read
-      : (p['cache-read'] !== undefined ? p['cache-read'] : 0)
-  );
-  const cacheCreationPrice = Number(
-    p.cache_creation !== undefined
-      ? p.cache_creation
-      : (p['cache-creation'] !== undefined ? p['cache-creation'] : 0)
-  );
-
   const cost =
-    (uncachedInput * inputPrice +
-      cacheRead * cacheReadPrice +
-      cacheCreation * cacheCreationPrice +
-      output * outputPrice) /
+    (uncachedInput * p.input +
+      cacheRead * p.cache_read +
+      cacheCreation * p.cache_creation +
+      output * p.output) /
     1000000.0;
   if (!Number.isFinite(cost)) {
     return null;
@@ -168,173 +254,276 @@ function computeModelCost(model, uncachedInput, output, cacheRead, cacheCreation
   return cost;
 }
 
-function buildSummary(prices) {
-  const effectivePrices = prices || {};
-
-  const groupTemplates = [
-    {
-      provider: 'openai',
-      model: 'gpt-5.1-codex',
-      requests: 640,
-      failed_requests: 4,
-      input_tokens: 2520000,
-      uncached_input_tokens: 1200000,
-      output_tokens: 800000,
-      cache_read_tokens: 1200000,
-      cache_creation_tokens: 120000,
-      total_tokens: 3320000,
-      quality: 'complete',
-      complete_requests: 640
-    },
-    {
-      provider: 'anthropic',
-      model: 'claude-opus-4-1',
-      requests: 322,
-      failed_requests: 6,
-      input_tokens: 1490000,
-      uncached_input_tokens: 500000,
-      output_tokens: 300000,
-      cache_read_tokens: 900000,
-      cache_creation_tokens: 90000,
-      total_tokens: 1790000,
-      quality: 'complete',
-      complete_requests: 322
-    },
-    {
-      provider: 'unknown-vendor',
-      model: XSS_MODEL,
-      requests: 120,
-      failed_requests: 2,
-      input_tokens: 120000,
-      uncached_input_tokens: 120000,
-      output_tokens: 30000,
-      cache_read_tokens: 0,
-      cache_creation_tokens: 0,
-      total_tokens: 150000,
-      quality: 'complete',
-      complete_requests: 120
-    },
-    {
-      provider: 'gemini',
-      model: 'gemini-3-pro',
-      requests: 152,
-      failed_requests: 0,
-      input_tokens: 648000,
-      uncached_input_tokens: 0,
-      output_tokens: 104567,
-      cache_read_tokens: 245678,
-      cache_creation_tokens: 24567,
-      total_tokens: 723451,
-      quality: 'unclassified',
-      complete_requests: 0
+// 把一组整数计数按权重拆分到各身份，最后一档取余数，保证各身份之和精确等于原值。
+function splitAcross(values, weights) {
+  const total = weights.reduce((a, b) => a + b, 0) || 1;
+  const acc = values.map(() => 0);
+  const rows = [];
+  weights.forEach((w, i) => {
+    if (i === weights.length - 1) {
+      rows.push(values.map((v, j) => v - acc[j]));
+      return;
     }
-  ];
+    rows.push(values.map((v, j) => {
+      const portion = Math.round((v * w) / total);
+      acc[j] += portion;
+      return portion;
+    }));
+  });
+  return rows;
+}
 
-  const groups = [];
-  let totalCost = 0;
-  let hasAnyPriced = false;
-  let totalUnpricedRequests = 0;
-
-  for (const t of groupTemplates) {
-    const cost = computeModelCost(
-      t.model,
-      t.uncached_input_tokens,
-      t.output_tokens,
-      t.cache_read_tokens,
-      t.cache_creation_tokens,
-      t.quality,
-      effectivePrices
-    );
-
-    const isPriced = cost !== null;
-    const unpriced = isPriced ? (t.requests - t.complete_requests) : t.requests;
-    totalUnpricedRequests += unpriced;
-
-    if (isPriced) {
-      totalCost += cost;
-      hasAnyPriced = true;
-    }
-
-    const g = {
-      provider: t.provider,
-      model: t.model,
-      requests: t.requests,
-      failed_requests: t.failed_requests,
-      input_tokens: t.input_tokens,
-      output_tokens: t.output_tokens,
-      cache_read_tokens: t.cache_read_tokens,
-      cache_creation_tokens: t.cache_creation_tokens,
-      total_tokens: t.total_tokens,
-      cost_usd: isPriced ? cost : null
-    };
-    if (unpriced > 0) {
-      g.unpriced_requests = unpriced;
-    }
-    groups.push(g);
+function identityFilterMatches(identity, filter) {
+  if (filter.client_key_id) {
+    const wanted = filter.client_key_id === 'unknown' ? '' : filter.client_key_id;
+    if (identity.client_key_id !== wanted) return false;
   }
+  if (filter.auth_index) {
+    const wanted = filter.auth_index === 'unknown' ? '' : filter.auth_index;
+    if (identity.auth_index !== wanted) return false;
+  }
+  return true;
+}
 
-  const series = [];
+function buildIdentityGroupRows(activeGroups) {
+  const perIdentity = FIXTURE_IDENTITIES.map(() => []);
+  activeGroups.forEach((t) => {
+    const requestSplit = splitAcross([t.requests], IDENTITY_WEIGHTS).map((r) => r[0]);
+    const failedSplit = splitAcross([t.failed_requests], IDENTITY_WEIGHTS).map((r) => r[0]);
+    const buckets = splitAcross(
+      [t.input_tokens, t.uncached_input_tokens, t.cache_read_tokens, t.cache_creation_tokens, t.output_tokens],
+      IDENTITY_WEIGHTS
+    );
+    FIXTURE_IDENTITIES.forEach((_, i) => {
+      const row = buckets[i];
+      const input = row[0], uncached = row[1], cacheRead = row[2], cacheCreation = row[3], output = row[4];
+      perIdentity[i].push({
+        provider: t.provider,
+        model: t.model,
+        requests: requestSplit[i],
+        failed_requests: failedSplit[i],
+        input_tokens: input,
+        uncached_input_tokens: uncached,
+        output_tokens: output,
+        cache_read_tokens: cacheRead,
+        cache_creation_tokens: cacheCreation,
+        total_tokens: input + output,
+        quality: t.quality,
+        complete_requests: t.quality === 'complete' ? requestSplit[i] : 0
+      });
+    });
+  });
+  return perIdentity;
+}
+
+function aggregateGroups(rows, pricing) {
+  const map = new Map();
+  rows.forEach((row) => {
+    const key = row.provider + '\u0000' + row.model;
+    let g = map.get(key);
+    if (!g) {
+      g = {
+        provider: row.provider, model: row.model, requests: 0, failed_requests: 0,
+        input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0,
+        total_tokens: 0, cost: 0, priced: false, unpriced: 0
+      };
+      map.set(key, g);
+    }
+    g.requests += row.requests;
+    g.failed_requests += row.failed_requests;
+    g.input_tokens += row.input_tokens;
+    g.output_tokens += row.output_tokens;
+    g.cache_read_tokens += row.cache_read_tokens;
+    g.cache_creation_tokens += row.cache_creation_tokens;
+    g.total_tokens += row.total_tokens;
+    // 成本按每行（身份 × 模型）自身的 token 计算后求和，保证与 client_keys /
+    // credentials 的逐身份成本一致：totals = Σgroups = Σidentities。
+    const cost = computeModelCost(
+      row.model, row.uncached_input_tokens, row.output_tokens, row.cache_read_tokens,
+      row.cache_creation_tokens, row.quality, pricing, BASE_TIME
+    );
+    if (cost === null) g.unpriced += row.requests;
+    else { g.cost += cost; g.priced = true; }
+  });
+
+  const out = [];
+  map.forEach((g) => {
+    const result = {
+      provider: g.provider, model: g.model, requests: g.requests, failed_requests: g.failed_requests,
+      input_tokens: g.input_tokens, output_tokens: g.output_tokens,
+      cache_read_tokens: g.cache_read_tokens, cache_creation_tokens: g.cache_creation_tokens,
+      total_tokens: g.total_tokens, cost_usd: g.priced ? g.cost : null
+    };
+    if (g.unpriced > 0) result.unpriced_requests = g.unpriced;
+    out.push(result);
+  });
+  return out;
+}
+
+function identityTotals(rows, identity, pricing) {
+  const totals = {
+    requests: 0, failed_requests: identity.failed_requests,
+    input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0,
+    total_tokens: 0, cache_hits: identity.cache_hits
+  };
+  let cost = 0, priced = false, unpriced = 0;
+  rows.forEach((row) => {
+    totals.requests += row.requests;
+    totals.input_tokens += row.input_tokens;
+    totals.output_tokens += row.output_tokens;
+    totals.cache_read_tokens += row.cache_read_tokens;
+    totals.cache_creation_tokens += row.cache_creation_tokens;
+    totals.total_tokens += row.total_tokens;
+    const c = computeModelCost(
+      row.model, row.uncached_input_tokens, row.output_tokens, row.cache_read_tokens,
+      row.cache_creation_tokens, row.quality, pricing, BASE_TIME
+    );
+    if (c === null) unpriced += row.requests;
+    else { cost += c; priced = true; }
+  });
+  totals.latency_ns = totals.requests * 900000000;
+  totals.latency_samples = totals.requests;
+  totals.ttft_ns = totals.requests * 250000000;
+  totals.ttft_samples = totals.requests;
+  totals.cost_usd = priced ? cost : null;
+  totals.unpriced_requests = unpriced;
+  return totals;
+}
+
+function buildMasterSeries() {
+  const out = [];
   for (let i = 0; i < 48; i += 1) {
     const requests = 20 + Math.round(20 * Math.sin(i / 4) + (i % 5));
-    const failed = i % 7 === 0 ? 2 : 0;
-    // Canonical input contains all three mutually exclusive input buckets.
-    const uncachedInput = requests * (300 - 120);
-    const cacheRead = requests * 120;
-    const cacheCreation = requests * 30;
-    const output = requests * 100;
-    const seriesCost = computeModelCost(
-      'gpt-5.1-codex',
-      uncachedInput,
-      output,
-      cacheRead,
-      cacheCreation,
-      'complete',
-      effectivePrices
-    );
-    series.push({
-      time: new Date(BASE_TIME - (47 - i) * 30 * 60 * 1000).toISOString(),
+    const time = new Date(BASE_TIME - (47 - i) * 30 * 60 * 1000).toISOString();
+    out.push({
+      time,
+      at: Date.parse(time),
       requests,
-      failed_requests: failed,
-      total_tokens: uncachedInput + cacheRead + cacheCreation + output,
-      input_tokens: uncachedInput + cacheRead + cacheCreation,
-      output_tokens: output,
-      cache_read_tokens: cacheRead,
-      cache_creation_tokens: cacheCreation,
-      latency_ns: requests * 900000000,
-      latency_samples: requests,
-      ttft_ns: requests * 250000000,
-      ttft_samples: requests,
-      cost_usd: seriesCost !== null ? seriesCost : null,
-      unpriced_requests: seriesCost !== null ? 0 : requests
+      failed_requests: i % 7 === 0 ? 2 : 0,
+      uncached: requests * (300 - 120),
+      cacheRead: requests * 120,
+      cacheCreation: requests * 30,
+      output: requests * 100
     });
   }
+  return out;
+}
+
+function buildSeries(selected, pricing) {
+  const master = buildMasterSeries();
+  const perIdentity = FIXTURE_IDENTITIES.map(() => []);
+  master.forEach((point) => {
+    const split = splitAcross(
+      [point.requests, point.failed_requests, point.uncached, point.cacheRead, point.cacheCreation, point.output],
+      IDENTITY_WEIGHTS
+    );
+    FIXTURE_IDENTITIES.forEach((_, i) => {
+      const s = split[i];
+      const requests = s[0], uncached = s[2], cacheRead = s[3], cacheCreation = s[4], output = s[5];
+      const input = uncached + cacheRead + cacheCreation;
+      const cost = computeModelCost('gpt-5.1-codex', uncached, output, cacheRead, cacheCreation, 'complete', pricing, point.at);
+      perIdentity[i].push({
+        time: point.time, requests, failed_requests: s[1],
+        total_tokens: input + output, input_tokens: input, output_tokens: output,
+        cache_read_tokens: cacheRead, cache_creation_tokens: cacheCreation,
+        latency_ns: requests * 900000000, latency_samples: requests,
+        ttft_ns: requests * 250000000, ttft_samples: requests,
+        cost_usd: cost, unpriced_requests: cost === null ? requests : 0
+      });
+    });
+  });
+
+  return master.map((point, idx) => {
+    const merged = {
+      time: point.time, requests: 0, failed_requests: 0, total_tokens: 0, input_tokens: 0,
+      output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0,
+      latency_ns: 0, latency_samples: 0, ttft_ns: 0, ttft_samples: 0, cost_usd: null, unpriced_requests: 0
+    };
+    let priced = false;
+    selected.forEach((i) => {
+      const p = perIdentity[i][idx];
+      merged.requests += p.requests;
+      merged.failed_requests += p.failed_requests;
+      merged.total_tokens += p.total_tokens;
+      merged.input_tokens += p.input_tokens;
+      merged.output_tokens += p.output_tokens;
+      merged.cache_read_tokens += p.cache_read_tokens;
+      merged.cache_creation_tokens += p.cache_creation_tokens;
+      merged.latency_ns += p.latency_ns;
+      merged.latency_samples += p.latency_samples;
+      merged.ttft_ns += p.ttft_ns;
+      merged.ttft_samples += p.ttft_samples;
+      merged.unpriced_requests += p.unpriced_requests;
+      if (p.cost_usd !== null) { merged.cost_usd = (merged.cost_usd || 0) + p.cost_usd; priced = true; }
+    });
+    if (!priced) merged.cost_usd = null;
+    return merged;
+  });
+}
+
+function buildSummary(pricing, filter) {
+  const f = filter || {};
+  const selected = FIXTURE_IDENTITIES
+    .map((_, i) => i)
+    .filter((i) => identityFilterMatches(FIXTURE_IDENTITIES[i], f));
+  const activeGroups = GROUP_TEMPLATES.filter((t) =>
+    (!f.provider || t.provider === f.provider) && (!f.model || t.model === f.model));
+
+  const perIdentityGroups = buildIdentityGroupRows(activeGroups);
+  const selectedRows = [];
+  selected.forEach((i) => perIdentityGroups[i].forEach((row) => selectedRows.push(row)));
+  // groups 与 totals 使用同一份逐行成本，保证 totals = Σgroups = Σidentities。
+  const groups = aggregateGroups(selectedRows, pricing);
+  const totals = {
+    requests: 0, failed_requests: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 45678,
+    cache_read_tokens: 0, cache_creation_tokens: 0, total_tokens: 0, cache_hits: 0,
+    latency_ns: 0, latency_samples: 0, ttft_ns: 0, ttft_samples: 0, cost_usd: null, unpriced_requests: 0
+  };
+  const clientKeys = [];
+  const credentials = [];
+
+  selected.forEach((i) => {
+    const t = identityTotals(perIdentityGroups[i], FIXTURE_IDENTITIES[i], pricing);
+    totals.requests += t.requests;
+    totals.failed_requests += t.failed_requests;
+    totals.input_tokens += t.input_tokens;
+    totals.output_tokens += t.output_tokens;
+    totals.cache_read_tokens += t.cache_read_tokens;
+    totals.cache_creation_tokens += t.cache_creation_tokens;
+    totals.total_tokens += t.total_tokens;
+    totals.cache_hits += t.cache_hits;
+    totals.latency_ns += t.latency_ns;
+    totals.latency_samples += t.latency_samples;
+    totals.ttft_ns += t.ttft_ns;
+    totals.ttft_samples += t.ttft_samples;
+    clientKeys.push(Object.assign({ id: FIXTURE_IDENTITIES[i].client_key_id }, t));
+    credentials.push(Object.assign({ id: FIXTURE_IDENTITIES[i].auth_index }, t));
+  });
+
+  let cost = 0, priced = false;
+  groups.forEach((g) => {
+    if (g.cost_usd === null) {
+      totals.unpriced_requests += g.requests;
+    } else {
+      cost += g.cost_usd;
+      priced = true;
+      if (g.unpriced_requests) totals.unpriced_requests += g.unpriced_requests;
+    }
+  });
+  totals.cost_usd = priced ? cost : null;
 
   return {
     from: new Date(BASE_TIME - 24 * 60 * 60 * 1000).toISOString(),
     to: new Date(BASE_TIME).toISOString(),
-    totals: {
-      requests: 1234,
-      failed_requests: 12,
-      input_tokens: 4567890,
-      output_tokens: 1234567,
-      reasoning_tokens: 45678,
-      cache_read_tokens: 2345678,
-      cache_creation_tokens: 234567,
-      total_tokens: 5983451,
-      cache_hits: 812,
-      latency_ns: 1234 * 900000000,
-      latency_samples: 1234,
-      ttft_ns: 1234 * 250000000,
-      ttft_samples: 1234,
-      cost_usd: hasAnyPriced ? totalCost : null,
-      unpriced_requests: totalUnpricedRequests
-    },
+    totals,
     groups,
-    series
+    series: buildSeries(selected, pricing),
+    client_keys: clientKeys,
+    credentials
   };
 }
 
-function buildRequestBody(index, captureBodies, prices) {
+function buildRequestBody(index, captureBodies, pricing) {
   const failed = index % 11 === 0;
   const model = index === 0 ? XSS_MODEL : index % 3 === 0 ? 'claude-opus-4-1' : 'gpt-5.1-codex';
   const quality = index % 5 === 0 ? 'unclassified' : 'complete';
@@ -342,16 +531,21 @@ function buildRequestBody(index, captureBodies, prices) {
   const output = 100 + index;
   const cacheRead = index * 7;
   const cacheCreation = index * 2;
-  const cost = computeModelCost(model, uncachedInput, output, cacheRead, cacheCreation, quality, prices);
+  const time = new Date(BASE_TIME - index * 60 * 1000).toISOString();
+  const cost = computeModelCost(
+    model, uncachedInput, output, cacheRead, cacheCreation, quality, pricing, Date.parse(time)
+  );
   return {
     sequence: index + 1,
     request_id: index === 0 ? 'req-body-xss' : 'req-' + index,
     trace_id: 'trace-' + index,
-    time: new Date(BASE_TIME - index * 60 * 1000).toISOString(),
+    time,
     provider: index % 2 === 0 ? 'openai' : 'anthropic',
     model,
     alias: index % 4 === 0 ? 'codex-alias' : '',
     executor: 'native',
+    client_key_id: index === 51 ? '' : (index % 2 === 0 ? 'a' : 'b').repeat(64),
+    auth_index: index === 51 ? '' : (index % 2 === 0 ? '1' : '2').repeat(16),
     stream: index % 2 === 0,
     failed,
     failure_status: failed ? 500 : 0,
@@ -374,7 +568,7 @@ function buildRequestBody(index, captureBodies, prices) {
 
 const TOTAL_FIXTURE_REQUESTS = 52;
 
-function buildRequestsPage(url, captureBodies, prices, controls) {
+function buildRequestsPage(url, captureBodies, pricing, controls) {
   if (url.searchParams.has('cursor')) {
     const cursor = url.searchParams.get('cursor');
     if (cursor !== null && cursor !== '') {
@@ -426,7 +620,7 @@ function buildRequestsPage(url, captureBodies, prices, controls) {
         ? controls.totalRequestsCount
         : TOTAL_FIXTURE_REQUESTS;
     for (let i = 0; i < count; i += 1) {
-      allItems.push(buildRequestBody(i, captureBodies, prices));
+      allItems.push(buildRequestBody(i, captureBodies, pricing));
     }
   }
 
@@ -438,6 +632,10 @@ function buildRequestsPage(url, captureBodies, prices, controls) {
   }
   if (modelFilter) {
     filtered = filtered.filter((it) => it.model === modelFilter);
+  }
+  for (const field of ['client_key_id', 'auth_index']) {
+    const value = url.searchParams.get(field) || '';
+    if (value) filtered = filtered.filter((it) => value === 'unknown' ? !it[field] : it[field] === value);
   }
 
   const items = filtered.slice(offset, offset + limit);
@@ -658,6 +856,13 @@ function createHandlerState(options) {
       }
 
       // 4. 管理 API 路由（支持 reverse proxy）
+      if (req.method === 'GET' && /\/v8\/management\/credentials$/.test(pathname)) {
+        if (req.headers.authorization !== 'Bearer ' + SECRET) return json(res, 403, { error: 'unauthorized' });
+        return json(res, 200, { files: [
+          { auth_index: '1'.repeat(16), name: 'first.json', label: '工作账户' },
+          { auth_index: '2'.repeat(16), name: 'second.json', label: '备用账户' }
+        ] });
+      }
       const matchMgmt = pathname.match(/^(?:.*\/)?(v[0-9]+)\/management\/plugins\/cliproxyapi-observer(?:\/(.*))?$/);
       if (matchMgmt) {
         const version = matchMgmt[1];
@@ -729,7 +934,12 @@ function createHandlerState(options) {
           switch (endpoint) {
             case 'summary':
               counters.summaryReads += 1;
-              return json(res, 200, buildSummary(effectiveSettings.prices));
+              return json(res, 200, buildSummary(effectiveSettings, {
+                provider: url.searchParams.get('provider') || '',
+                model: url.searchParams.get('model') || '',
+                client_key_id: url.searchParams.get('client_key_id') || '',
+                auth_index: url.searchParams.get('auth_index') || ''
+              }));
             case 'requests': {
               counters.requestsReads += 1;
               if (controls.simulateRequests500) {
@@ -740,7 +950,7 @@ function createHandlerState(options) {
               }
               try {
                 const capture = effectiveSettings.capture_bodies;
-                const page = buildRequestsPage(url, capture, effectiveSettings.prices, controls);
+                const page = buildRequestsPage(url, capture, effectiveSettings, controls);
                 return json(res, 200, page);
               } catch (err) {
                 return json(res, err.statusCode || 400, { error: err.message });
@@ -838,7 +1048,14 @@ module.exports = {
   configToSettings,
   validateSettingsPatch,
   computeModelCost,
+  resolveModelPrice,
+  timeInRange,
   buildRequestsPage,
   buildSummary,
+  FIXTURE_IDENTITIES,
+  CLIENT_KEY_A,
+  CLIENT_KEY_B,
+  AUTH_INDEX_A,
+  AUTH_INDEX_B,
   TOTAL_FIXTURE_REQUESTS
 };
