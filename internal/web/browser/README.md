@@ -7,7 +7,9 @@
   - 公开资源路由 `/v0/resource/plugins/cliproxyapi-observer/{ui,ui.js,ui.css}`（带 CSP）；
   - 管理 API `/v0/management/plugins/cliproxyapi-observer/{summary,requests,settings,health,body}`
     （要求 `Authorization: Bearer observer-test-secret`）；
-  - 上游凭据名称 `GET /v8/management/credentials`（返回假 `files[].auth_index/label/name`）；
+  - 上游凭据名称 `GET /v8/management/credentials`（返回假 `files[].auth_index/label/name`，默认
+    `fake-file-a.json`/`fake-file-b.json`，可改写 `controls.credentialFiles` 验证「同标签不同文件可区分、
+    名称缺失回落索引、恶意文件名仅作文本」）；UI 只保留非机密展示字段，按 `label（文件名）` 展示并以 `auth_index` 精确筛选。
   - 模拟 management-center 的嵌入宿主页 `/embed`，用于验证父级 `data-theme` 跟随。
   - summary 真实按 `client_key_id` / `auth_index` / `provider` / `model` 过滤，并返回
     `client_keys` / `credentials` 有序身份数组（未归属桶 id 为空字符串）；定价按

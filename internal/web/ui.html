@@ -79,7 +79,7 @@
             <datalist id="client-key-options"><option value="unknown">未归属（含旧记录）</option></datalist>
           </div>
           <div class="filter">
-            <label for="filter-auth">上游凭据名称</label>
+            <label for="filter-auth">上游凭据 / 认证文件</label>
             <select id="filter-auth">
               <option value="">全部</option>
               <option value="unknown">未归属（含旧记录）</option>
@@ -87,7 +87,7 @@
           </div>
           <button id="identity-apply" class="btn btn-secondary" type="button" disabled>应用 key 筛选</button>
         </div>
-        <p class="settings-note">Key 筛选影响概览、趋势、分组及请求记录。客户端 key 只显示指纹；上游凭据使用 CPA 当前标签或名称，删除后显示索引。旧数据归入未归属；点击指纹或分组可直接筛选。</p>
+        <p class="settings-note">Key 筛选影响概览、趋势、分组及请求记录。客户端 key 只显示指纹；上游凭据 / 认证文件显示 CPA 标签（文件名），同一标签的不同文件仍按文件名区分，删除后显示索引。旧数据归入未归属；点击指纹或分组可直接筛选。</p>
         <p id="credential-status" class="settings-note" role="status"></p>
       </section>
 
@@ -147,7 +147,7 @@
                 <th>模型</th>
                 <th class="col-secondary">Provider</th>
                 <th>客户端 key</th>
-                <th>上游凭据</th>
+                <th>上游凭据 / 认证文件</th>
                 <th class="num col-secondary">Token</th>
                 <th class="num">延迟</th>
                 <th class="num col-secondary">TTFT</th>
@@ -171,7 +171,7 @@
         <div class="card-header">
           <h2 id="keys-heading">Key 分组</h2>
           <label for="key-group-kind">分组维度</label>
-          <select id="key-group-kind"><option value="client">客户端 key</option><option value="auth">上游凭据</option></select>
+          <select id="key-group-kind"><option value="client">客户端 key</option><option value="auth">上游凭据 / 认证文件</option></select>
         </div>
         <div class="table-scroll">
           <table>

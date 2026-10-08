@@ -152,6 +152,15 @@ const FIXTURE_IDENTITIES = [
 ];
 const IDENTITY_WEIGHTS = FIXTURE_IDENTITIES.map((identity) => identity.requests);
 
+// CPA /v8/management/credentials 只需 name + label + auth_index；文件名用 .json，
+// 测试可改写 controls.credentialFiles 验证「同标签不同文件」「删除回落索引」「XSS 文本化」。
+function defaultCredentialFiles() {
+  return [
+    { auth_index: AUTH_INDEX_A, name: 'fake-file-a.json', label: '工作账户' },
+    { auth_index: AUTH_INDEX_B, name: 'fake-file-b.json', label: '备用账户' }
+  ];
+}
+
 const GROUP_TEMPLATES = [
   {
     provider: 'openai', model: 'gpt-5.1-codex', requests: 640, failed_requests: 4,
@@ -765,7 +774,8 @@ function createHandlerState(options) {
     simulateRequests500: false,
     requestsDelayMs: 0,
     totalRequestsCount: TOTAL_FIXTURE_REQUESTS,
-    customRequestsItems: null
+    customRequestsItems: null,
+    credentialFiles: defaultCredentialFiles()
   };
 
   const counters = {
@@ -792,6 +802,7 @@ function createHandlerState(options) {
     controls.requestsDelayMs = 0;
     controls.totalRequestsCount = TOTAL_FIXTURE_REQUESTS;
     controls.customRequestsItems = null;
+    controls.credentialFiles = defaultCredentialFiles();
 
     counters.validations = 0;
     counters.validateFailures = 0;
@@ -858,10 +869,7 @@ function createHandlerState(options) {
       // 4. 管理 API 路由（支持 reverse proxy）
       if (req.method === 'GET' && /\/v8\/management\/credentials$/.test(pathname)) {
         if (req.headers.authorization !== 'Bearer ' + SECRET) return json(res, 403, { error: 'unauthorized' });
-        return json(res, 200, { files: [
-          { auth_index: '1'.repeat(16), name: 'first.json', label: '工作账户' },
-          { auth_index: '2'.repeat(16), name: 'second.json', label: '备用账户' }
-        ] });
+        return json(res, 200, { files: controls.credentialFiles });
       }
       const matchMgmt = pathname.match(/^(?:.*\/)?(v[0-9]+)\/management\/plugins\/cliproxyapi-observer(?:\/(.*))?$/);
       if (matchMgmt) {

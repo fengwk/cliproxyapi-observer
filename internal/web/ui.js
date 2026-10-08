@@ -390,14 +390,35 @@
     return core ? core.replace(/\/v0\/management\/plugins\/cliproxyapi-observer$/, '/v8/management/credentials') : '';
   }
 
+  function filenameBase(value) {
+    var s = toStr(value).trim();
+    var idx = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+    return idx >= 0 ? s.slice(idx + 1) : s;
+  }
+
+  function safeDisplay(value) {
+    return toStr(value).replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 200);
+  }
+
   // Retain only display names and nonsecret host indexes, not the full response.
+  // Concrete auth files (.json, path reduced to basename) are shown as
+  // "label（filename）" so a shared label can never hide which file was used;
+  // source/path/id/secret fields are never read or stored.
   function credentialNames(response) {
     var names = Object.create(null);
     var files = response && Array.isArray(response.files) ? response.files : [];
     files.forEach(function (entry) {
       if (!entry || !/^[a-f0-9]{16}$/.test(toStr(entry.auth_index))) return;
-      var name = toStr(entry.label).trim() || toStr(entry.name).trim() || entry.auth_index;
-      names[entry.auth_index] = name.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 200);
+      var label = safeDisplay(toStr(entry.label).trim());
+      var raw = toStr(entry.name).trim();
+      var display;
+      if (/\.json$/i.test(raw)) {
+        var file = safeDisplay(filenameBase(raw));
+        display = !label || label === file ? file : label + '（' + file + '）';
+      } else {
+        display = label || safeDisplay(raw) || entry.auth_index;
+      }
+      names[entry.auth_index] = display;
     });
     return names;
   }
@@ -1655,7 +1676,7 @@
           state.requestClientKeyID = state.clientKeyID;
           state.requestAuthIndex = state.authIndex;
           state.credentials = byKind.credentials || Object.create(null);
-          setText(els.credentialStatus, byKind.credentials ? '' : 'CPA 凭据名称加载失败，本次使用索引显示；请求筛选仍可用。');
+          setText(els.credentialStatus, byKind.credentials ? '' : 'CPA 凭据 / 认证文件名称加载失败，本次仅按索引显示；上游凭据筛选仍可用。');
           state.refreshing = false;
           applyRequestsPage(byKind.requests, 0);
           renderKeyGroups();

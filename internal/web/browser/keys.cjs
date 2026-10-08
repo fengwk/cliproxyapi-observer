@@ -42,11 +42,11 @@ async function main() {
     await page.locator('#identity-apply').waitFor();
     await page.waitForFunction(() => !document.getElementById('identity-apply').disabled);
 
-    // 1. 上游凭据展示 CPA 标签，缓存命中率带分子分母并显式标注。
-    assert.match(await page.locator('#requests-body').textContent(), /工作账户/);
-    assert.match(await page.locator('#requests-body').textContent(), /备用账户/);
+    // 1. 上游凭据展示 CPA 标签与认证文件名，缓存命中率带分子分母并显式标注。
+    assert.match(await page.locator('#requests-body').textContent(), /工作账户（fake-file-a\.json）/);
+    assert.match(await page.locator('#requests-body').textContent(), /备用账户（fake-file-b\.json）/);
     assert.match(await page.locator('[data-metric="cache"]').textContent(), /请求命中率.*812\/1,234/);
-    results.push('current CPA labels and explicit request-level cache ratio');
+    results.push('current CPA labels with auth file names and explicit request-level cache ratio');
 
     // 2. 请求表点击完整指纹：只显示 12 位前缀，筛选使用完整 64 位。
     const button = page.locator('#requests-body button[title]').first();
@@ -66,16 +66,17 @@ async function main() {
     assert.equal(await metric(page, 'requests'), '700');
     results.push('full fingerprint filtering, not a truncated prefix');
 
-    // 3. 上游凭据按名称选择，使用非机密 auth_index 过滤，概览同步变化。
+    // 3. 上游凭据按「标签（文件名）」选择，使用非机密 auth_index 过滤，概览同步变化。
+    assert.match(await page.locator('#filter-auth').textContent(), /备用账户（fake-file-b\.json） · 2222222222222222/);
     await page.locator('#filter-client-key').fill('');
     await page.locator('#filter-auth').selectOption('2'.repeat(16));
     await page.locator('#identity-apply').click();
     await page.waitForFunction(() => {
       const rows = Array.from(document.querySelectorAll('#requests-body tr'));
-      return rows.length === 25 && rows.every((row) => row.textContent.includes('备用账户'));
+      return rows.length === 25 && rows.every((row) => row.textContent.includes('备用账户（fake-file-b.json）'));
     });
     await waitMetric(page, 'requests', '530');
-    results.push('credential-name selection filters by nonsecret auth_index');
+    results.push('auth file selection filters by nonsecret auth_index');
 
     // 4. 未归属桶：空 id 表示旧记录；key 筛选必须传播到 summary。
     await page.locator('#filter-client-key').fill('unknown');
@@ -119,14 +120,85 @@ async function main() {
     await page.waitForFunction(() => document.querySelectorAll('#keys-body tr').length === 3);
     await page.locator('#key-group-kind').selectOption('auth');
     await page.waitForFunction(() => document.querySelectorAll('#keys-body tr').length === 3);
-    assert.match(await page.locator('#keys-body').textContent(), /工作账户/);
+    assert.match(await page.locator('#keys-body').textContent(), /工作账户（fake-file-a\.json）/);
     await page.locator('#keys-body tr').filter({ hasText: '工作账户' }).locator('button').click();
     await page.waitForFunction(() => document.getElementById('filter-auth').value === '1'.repeat(16));
     assert.equal(await page.locator('#filter-auth').inputValue(), '1'.repeat(16));
     await page.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 26);
     results.push('group table click filters full id and dimension switching works');
 
-    // 7. 响应式与安全：移动端无横向溢出、纯文本渲染、无页面错误。
+    // 7. 同一标签的不同认证文件仍各自可选，并以不同 auth_index 独立全局筛选。
+    server.controls.credentialFiles = [
+      { auth_index: '1'.repeat(16), name: 'dup-one.json', label: '同名' },
+      { auth_index: '2'.repeat(16), name: 'dup-two.json', label: '同名' }
+    ];
+    await page.locator('#refresh').click();
+    await page.waitForFunction(() => {
+      const opts = Array.from(document.querySelectorAll('#filter-auth option')).map((o) => o.textContent);
+      return opts.includes('同名（dup-one.json） · ' + '1'.repeat(16)) &&
+        opts.includes('同名（dup-two.json） · ' + '2'.repeat(16));
+    });
+    await page.locator('#filter-auth').selectOption('2'.repeat(16));
+    await page.locator('#identity-apply').click();
+    await page.waitForFunction(() => {
+      const rows = Array.from(document.querySelectorAll('#requests-body tr'));
+      return rows.length === 25 && rows.every((row) => row.textContent.includes('同名（dup-two.json）'));
+    });
+    await waitMetric(page, 'requests', '530');
+    results.push('same-label auth files stay distinguishable and filter independently');
+
+    // 8. 凭据名称缺失时回落索引，仍可按 auth_index 精确筛选且统计一致。
+    await page.locator('#filter-auth').selectOption('');
+    await page.locator('#identity-apply').click();
+    await page.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 50);
+    server.controls.credentialFiles = [];
+    await page.locator('#refresh').click();
+    await page.waitForFunction(() => Array.from(document.querySelectorAll('#filter-auth option'))
+      .some((o) => o.textContent === '索引 ' + '1'.repeat(16) + ' · ' + '1'.repeat(16)));
+    assert.equal((await page.locator('#credential-status').textContent()).trim(), '');
+    await page.locator('#filter-auth').selectOption('1'.repeat(16));
+    await page.locator('#identity-apply').click();
+    await page.waitForFunction(() => {
+      const rows = Array.from(document.querySelectorAll('#requests-body tr'));
+      return rows.length === 26 && rows.every((row) => row.textContent.includes('索引 ' + '1'.repeat(16)));
+    });
+    await waitMetric(page, 'requests', '700');
+    results.push('missing credential names fall back to the nonsecret index');
+
+    // 9. 恶意文件名/标签只作文本渲染，不产生元素、脚本或弹窗。
+    let dialogMessage = null;
+    page.on('dialog', (d) => { dialogMessage = d.message(); d.dismiss().catch(() => {}); });
+    server.controls.credentialFiles = [
+      { auth_index: '1'.repeat(16), name: '<img src=x onerror=alert(1)>.json', label: '<script>evil</script>' }
+    ];
+    await page.locator('#refresh').click();
+    await page.waitForFunction(() => Array.from(document.querySelectorAll('#filter-auth option'))
+      .some((o) => o.textContent.includes('onerror=alert(1)')));
+    await page.locator('#filter-auth').selectOption('1'.repeat(16));
+    await page.locator('#identity-apply').click();
+    await page.waitForFunction(() => {
+      const rows = Array.from(document.querySelectorAll('#requests-body tr'));
+      return rows.length === 26 && rows.some((row) => row.textContent.includes('onerror=alert(1)'));
+    });
+    assert.match(await page.locator('#requests-body').textContent(),
+      /<script>evil<\/script>（<img src=x onerror=alert\(1\)>\.json）/);
+    assert.equal(await page.locator('#requests-body img, #requests-body script, #keys-body img, #keys-body script').count(), 0);
+    assert.equal(dialogMessage, null);
+    results.push('hostile file names and labels render as text only');
+
+    // 恢复默认假认证文件，使响应式截图展示「标签（文件名）」。
+    server.controls.credentialFiles = [
+      { auth_index: mock.AUTH_INDEX_A, name: 'fake-file-a.json', label: '工作账户' },
+      { auth_index: mock.AUTH_INDEX_B, name: 'fake-file-b.json', label: '备用账户' }
+    ];
+    await page.locator('#refresh').click();
+    await page.waitForFunction(() => Array.from(document.querySelectorAll('#filter-auth option'))
+      .some((o) => o.textContent === '工作账户（fake-file-a.json） · ' + '1'.repeat(16)));
+    await page.locator('#filter-auth').selectOption('');
+    await page.locator('#identity-apply').click();
+    await page.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 50);
+
+    // 10. 响应式与安全：移动端无横向溢出、纯文本渲染、无页面错误。
     await page.setViewportSize({ width: 390, height: 900 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
     assert.equal(await page.locator('#requests-body img, #requests-body script').count(), 0);

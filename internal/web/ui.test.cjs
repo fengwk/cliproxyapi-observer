@@ -752,3 +752,38 @@ test('凭据名称优先标签并安全降级，保留反向代理前缀', () =>
   assert.equal(ui.buildRequestRows([{ auth_index: index }])[0].credential, '索引 ' + index);
   assert.equal(ui.buildRequestRows([{}])[0].credential, '未归属');
 });
+
+// Auth files show "label（filename）" so a shared label cannot hide which file was used;
+// only nonsecret display fields are retained, never source/path/id/secret values.
+test('认证文件显示标签与文件名，同标签不重复且不覆盖文件名', () => {
+  const a = '3'.repeat(16);
+  const b = '4'.repeat(16);
+  const same = '5'.repeat(16);
+  const bare = '6'.repeat(16);
+  const mem = '7'.repeat(16);
+  const evil = '8'.repeat(16);
+  const names = ui.credentialNames({ files: [
+    {
+      auth_index: a, name: '/etc/cpa/auth/fake-file-a.json', label: '工作账户',
+      source: 'file', path: '/secret/path', id: 'real-id', api_key: 'sk-secret'
+    },
+    { auth_index: b, name: 'fake-file-b.json', label: '工作账户' },
+    { auth_index: same, name: 'plain.json', label: 'plain.json' },
+    { auth_index: bare, name: 'no-label.json' },
+    { auth_index: mem, name: 'memory-credential', label: '仅标签' },
+    { auth_index: evil, name: '<img src=x onerror=alert(1)>.json', label: '<b>粗</b>' },
+    { auth_index: 'not-hex', name: 'ignored.json', label: 'x' }
+  ] });
+  assert.equal(names[a], '工作账户（fake-file-a.json）');
+  assert.equal(names[b], '工作账户（fake-file-b.json）');
+  assert.notEqual(names[a], names[b]);
+  assert.equal(names[same], 'plain.json');
+  assert.equal(names[bare], 'no-label.json');
+  assert.equal(names[mem], '仅标签');
+  assert.equal(names[evil], '<b>粗</b>（<img src=x onerror=alert(1)>.json）');
+  assert.equal(Object.keys(names).length, 6);
+  const dumped = JSON.stringify(names);
+  ['sk-secret', '/secret/path', 'real-id', 'memory-credential'].forEach((leak) => {
+    assert.equal(dumped.includes(leak), false);
+  });
+});
