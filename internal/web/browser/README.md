@@ -7,10 +7,21 @@
   - 公开资源路由 `/v0/resource/plugins/cliproxyapi-observer/{ui,ui.js,ui.css}`（带 CSP）；
   - 管理 API `/v0/management/plugins/cliproxyapi-observer/{summary,requests,settings,health,body}`
     （要求 `Authorization: Bearer observer-test-secret`）；
+  - 上游凭据名称 `GET /v8/management/credentials`（返回假 `files[].auth_index/label/name`，默认
+    `fake-file-a.json`/`fake-file-b.json`，可改写 `controls.credentialFiles` 验证「同标签不同文件可区分、
+    名称缺失回落索引、恶意文件名仅作文本」）；UI 只保留非机密展示字段，按 `label（文件名）` 展示并以 `auth_index` 精确筛选。
   - 模拟 management-center 的嵌入宿主页 `/embed`，用于验证父级 `data-theme` 跟随。
+  - summary 真实按 `client_key_id` / `auth_index` / `provider` / `model` 过滤，并返回
+    `client_keys` / `credentials` 有序身份数组（未归属桶 id 为空字符串）；定价按
+    `prices` map 与有序 `price-rules`（first-match、阈值严格大于、UTC 区间）真实计算。
 - `capture.cjs`：Playwright 验证脚本，输出截图与 `results.json`。
 - `settings.cjs`：真实 Chromium 设置保存、价格增删、刷新保留草稿、错误/超时/过期连接、
   503 重配置确认与宿主浮层命中测试，输出截图与 `settings-results.json`。
+- `keys.cjs`：真实 Chromium 的客户端指纹 / 上游凭据筛选、概览与分组联动、分组维度切换
+  与整行点击过滤，输出截图与 `key-results.json`。
+- `price-rules.cjs`：真实 Chromium 的有序条件定价场景：阈值严格大于、first-match、
+  重排持久化、UTC/跨夜/24:00 边界、删除/清空、后端拒绝保留草稿，并输出
+  light/white/dark × 1280/390 截图与 `price-rules-results.json`。
 - `mock-server.test.cjs`：Node mock 合约回归。mock CSP 直接读取
   `internal/plugin/management.go` 的 `cspPolicy`，不会使用另一套策略。
 
@@ -30,6 +41,10 @@ CHROMIUM_PATH=/usr/bin/chromium \
 node internal/web/browser/capture.cjs "$tmp/evidence"
 NODE_PATH="$tmp/node_modules" CHROMIUM_PATH=/usr/bin/chromium \
 node internal/web/browser/settings.cjs "$tmp/settings-evidence"
+NODE_PATH="$tmp/node_modules" CHROMIUM_PATH=/usr/bin/chromium \
+node internal/web/browser/keys.cjs "$tmp/keys-evidence"
+NODE_PATH="$tmp/node_modules" CHROMIUM_PATH=/usr/bin/chromium \
+node internal/web/browser/price-rules.cjs "$tmp/price-rules-evidence"
 node --test internal/web/ui.test.cjs internal/web/browser/mock-server.test.cjs
 ```
 
@@ -69,6 +84,11 @@ node --test internal/web/ui.test.cjs internal/web/browser/mock-server.test.cjs
 | 分页翻页与替换 | `#requests-prev` / `#requests-next` / `#requests-page` 双向翻页；每页 50 条替换渲染，无游标无累加；空页与末页禁用导航；筛选变更重置第 1 页 |
 | 刷新取消在途翻页 | 点击刷新立即中止在途翻页请求并失效令牌，重置为第 1 页并丢弃旧响应 |
 | 动态生效定价与小计 | Summary 与历史请求均按当前价格动态映射，小计与未定价分类明确展示 |
+| 客户端 key / 上游凭据筛选 | 概览、趋势、分组与请求记录同源过滤；概览数值随身份变化；`offset` 重置为 0 |
+| 完整指纹与凭据名称 | 请求表只显示 12 位前缀，点击以完整 64 位指纹过滤；上游凭据显示 CPA 标签/名称并以非机密 `auth_index` 过滤 |
+| Key 分组与维度切换 | `client_keys` / `credentials` 身份数组，未归属 id 为空；点击整行按完整 id 过滤，切换维度立即反映 |
+| 有序条件定价 | `price-rules` 顺序、阈值（含缓存、严格大于）、UTC 区间（起含终不含、跨夜、24:00）与 first-match；旧 `prices` map 作为无条件回退 |
+| 价格规则编辑 | 上移/下移/删除、响应式整行控制、危险色删除、可访问性标签、重排与删除标记脏草稿 |
 | 安全防护 | 无 localStorage/sessionStorage/cookie；管理密钥不进 URL，仅经 `Authorization` 头；严格禁止重定向 |
 | 异步确认弹窗完整生命周期 | 取消/Escape 保留草稿且 0 请求；重复点击不重复弹窗；断开/重连使在途弹窗失效；干净草稿不弹窗 |
 | 无障碍主题复选框 | `appearance: none`、label 文本点击与 Space 键切换、禁用状态防篡改 |
@@ -91,8 +111,11 @@ node --test internal/web/ui.test.cjs internal/web/browser/mock-server.test.cjs
   写入结果未知、回读失败、仍未生效均保留草稿，明确提示核对，不宣称成功。
 - 普通仪表盘刷新不覆盖脏草稿；重新连接会清除旧连接草稿并中止旧保存。
   所有请求拒绝重定向，凭据只在内存 / Authorization 头中使用。
-- `prices: {}` 替换整个价格表；价格在查询时按当前生效设置动态计算，不保留快照，更新价格立即反映到历史请求与 summary 成本。容量表单单位为 MiB，
-  转换结果必须为精确整数 bytes；不隐式裁剪越界数值。
+- `prices: {}` 为规范保存的一部分：编辑器始终写入空的旧价格表加有序 `price-rules`
+  列表（先显式规则，后由旧 map 行转换的无条件规则），因此旧 `prices` map 向后兼容且
+  不会与规则双写。价格在查询时按当前生效设置（first-match 规则，未命中回落 `prices`
+  map）动态计算，不保留快照；更新规则后历史请求与 summary 成本立即反映。容量表单单位为
+  MiB，转换结果必须为精确整数 bytes；不隐式裁剪越界数值。
 
 mock 控制可直接使用 `startServer()` 返回的 `controls` / `counters`，或本地
 `POST /__mock/control` 与 `GET /__mock/counters`。支持校验失败、写入失败、配置回读失败、

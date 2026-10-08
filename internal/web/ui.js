@@ -263,7 +263,9 @@
         label: '缓存 Token',
         value: hasData ? formatCompact(cacheRead + cacheCreation) : '—',
         sub: hasData
-          ? '读 ' + formatCompact(cacheRead) + ' / 写 ' + formatCompact(cacheCreation) + ' · 命中 ' + formatInt(cacheHits)
+          ? '读 ' + formatCompact(cacheRead) + ' / 写 ' + formatCompact(cacheCreation) +
+            ' · 请求命中率 ' + (requests > 0 ? formatRate(cacheHits / requests) : '—') +
+            '（' + formatInt(cacheHits) + '/' + formatInt(requests) + '；缓存读 Token > 0）'
           : ''
       },
       {
@@ -316,7 +318,7 @@
     return rows;
   }
 
-  function buildRequestRows(items) {
+  function buildRequestRows(items, credentials) {
     var list = Array.isArray(items) ? items : [];
     var rows = [];
     for (var i = 0; i < list.length; i++) {
@@ -332,6 +334,10 @@
         model: toStr(it.model) || '—',
         alias: toStr(it.alias),
         provider: toStr(it.provider) || '—',
+        clientKeyID: /^[a-f0-9]{64}$/.test(toStr(it.client_key_id)) ? it.client_key_id : '',
+        authIndex: /^[a-f0-9]{16}$/.test(toStr(it.auth_index)) ? it.auth_index : '',
+        credential: (credentials && credentials[it.auth_index]) ||
+          (/^[a-f0-9]{16}$/.test(toStr(it.auth_index)) ? '索引 ' + it.auth_index : '未归属'),
         tokens:
           formatCompact(counter(it, 'total_tokens')) +
           '（入 ' + formatCompact(counter(it, 'input_tokens')) +
@@ -366,7 +372,8 @@
       maxBodyStorageBytes: Number(s.max_body_storage_bytes),
       compactIntervalSeconds: Number(s.compact_interval_seconds === undefined ? 900 : s.compact_interval_seconds),
       compactMinBytes: Number(s.compact_min_bytes === undefined ? 8388608 : s.compact_min_bytes),
-      prices: s.prices || {}
+      prices: s.prices || {},
+      priceRules: Array.isArray(s.price_rules) ? s.price_rules : []
     };
   }
 
@@ -378,6 +385,43 @@
   }
 
   var MIB = 1048576;
+  function credentialsUrl(base) {
+    var core = coreApiBase(base);
+    return core ? core.replace(/\/v0\/management\/plugins\/cliproxyapi-observer$/, '/v8/management/credentials') : '';
+  }
+
+  function filenameBase(value) {
+    var s = toStr(value).trim();
+    var idx = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+    return idx >= 0 ? s.slice(idx + 1) : s;
+  }
+
+  function safeDisplay(value) {
+    return toStr(value).replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 200);
+  }
+
+  // Retain only display names and nonsecret host indexes, not the full response.
+  // Concrete auth files (.json, path reduced to basename) are shown as
+  // "label（filename）" so a shared label can never hide which file was used;
+  // source/path/id/secret fields are never read or stored.
+  function credentialNames(response) {
+    var names = Object.create(null);
+    var files = response && Array.isArray(response.files) ? response.files : [];
+    files.forEach(function (entry) {
+      if (!entry || !/^[a-f0-9]{16}$/.test(toStr(entry.auth_index))) return;
+      var label = safeDisplay(toStr(entry.label).trim());
+      var raw = toStr(entry.name).trim();
+      var display;
+      if (/\.json$/i.test(raw)) {
+        var file = safeDisplay(filenameBase(raw));
+        display = !label || label === file ? file : label + '（' + file + '）';
+      } else {
+        display = label || safeDisplay(raw) || entry.auth_index;
+      }
+      names[entry.auth_index] = display;
+    });
+    return names;
+  }
   var SETTING_FIELDS = [
     ['request-retention', '请求记录保留（默认 24 小时）', 'duration', 60, 2592000, 'requestRetentionSeconds'],
     ['body-retention', '请求体保留（最多 24 小时）', 'duration', 60, 86400, 'bodyRetentionSeconds'],
@@ -418,12 +462,62 @@
         'cache-creation': price.cache_creation === undefined ? (price['cache-creation'] || 0) : price.cache_creation
       };
     });
+    if (s.priceRules.length) patch['price-rules'] = normalizePriceRules(s.priceRules);
     return patch;
+  }
+
+  // Accepts the backend's underscore aliases but always emits hyphenated canonical keys.
+  var RULE_KEYS = ['model', 'price', 'input-tokens-gt', 'input_tokens_gt', 'time-range', 'time_range'];
+  var TIME_RANGE = /^(?:[01]\d|2[0-3]):[0-5]\d-(?:(?:[01]\d|2[0-3]):[0-5]\d|24:00)$/;
+  function normalizePriceRules(raw) {
+    if (!Array.isArray(raw) || raw.length > 1000) throw new Error('价格规则必须是最多 1000 项的列表');
+    return raw.map(function (rule) {
+      if (!rule || typeof rule !== 'object' || Array.isArray(rule)) throw new Error('价格规则无效');
+      var seenRuleKeys = Object.create(null);
+      Object.keys(rule).forEach(function (key) {
+        if (RULE_KEYS.indexOf(key) < 0) throw new Error('价格规则包含未知字段');
+        var canonical = key.replace(/_/g, '-');
+        if (seenRuleKeys[canonical]) throw new Error('价格规则包含重复字段');
+        seenRuleKeys[canonical] = true;
+      });
+      if (typeof rule.model !== 'string' || !rule.model.trim()) throw new Error('规则模型 ID 不能为空');
+      var result = { model: rule.model.trim(), price: {} };
+      var price = rule.price;
+      if (!price || typeof price !== 'object' || Array.isArray(price)) throw new Error('价格字段无效');
+      var seenPriceKeys = Object.create(null);
+      Object.keys(price).forEach(function (key) {
+        var canonical = key.replace(/_/g, '-');
+        if (PRICE_KEYS.indexOf(canonical) < 0) throw new Error('价格字段无效');
+        if (seenPriceKeys[canonical]) throw new Error('价格包含重复字段');
+        seenPriceKeys[canonical] = true;
+      });
+      PRICE_KEYS.forEach(function (key) {
+        var alias = key.replace(/-/g, '_');
+        var value = price[key] === undefined ? price[alias] : price[key];
+        if (value === undefined) value = 0;
+        if (typeof value !== 'number') throw new Error('模型价格必须是数字');
+        result.price[key] = boundedNumber(value, 0, Number.MAX_VALUE, '模型价格', false);
+      });
+      var threshold = rule['input-tokens-gt'] === undefined ? rule.input_tokens_gt : rule['input-tokens-gt'];
+      if (threshold !== undefined) {
+        if (typeof threshold !== 'number') throw new Error('输入 Token 阈值必须是整数');
+        result['input-tokens-gt'] = boundedNumber(threshold, 0, Number.MAX_SAFE_INTEGER, '输入 Token 阈值', true);
+      }
+      var range = rule['time-range'] === undefined ? rule.time_range : rule['time-range'];
+      if (range !== undefined && range !== '') {
+        // UTC HH:mm-HH:mm; start inclusive, end exclusive, overnight and end 24:00 allowed.
+        if (typeof range !== 'string' || !TIME_RANGE.test(range) || range.slice(0, 5) === range.slice(6)) {
+          throw new Error('时间区间使用 UTC HH:mm-HH:mm，起点包含终点不包含且不能相同');
+        }
+        result['time-range'] = range;
+      }
+      return result;
+    });
   }
 
   function validateSettingsPatch(patch) {
     if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('设置必须是对象');
-    var allowed = ['capture-bodies', 'prices'].concat(SETTING_FIELDS.map(function (f) { return f[0]; }));
+    var allowed = ['capture-bodies', 'prices', 'price-rules'].concat(SETTING_FIELDS.map(function (f) { return f[0]; }));
     Object.keys(patch).forEach(function (key) { if (allowed.indexOf(key) < 0) throw new Error('不支持的设置字段'); });
     if (typeof patch['capture-bodies'] !== 'boolean') throw new Error('捕获开关无效');
     SETTING_FIELDS.forEach(function (f) {
@@ -448,6 +542,7 @@
           Object.keys(price).some(function (key) { return PRICE_KEYS.indexOf(key) < 0; })) throw new Error('价格字段无效');
       PRICE_KEYS.forEach(function (key) { boundedNumber(price[key], 0, Number.MAX_VALUE, '模型价格', false); });
     });
+    if (patch['price-rules'] !== undefined) normalizePriceRules(patch['price-rules']);
     return patch;
   }
 
@@ -465,6 +560,7 @@
         result.prices = Object.keys(p.prices).sort().map(function (id) {
           return [id, PRICE_KEYS.map(function (key) { return p.prices[id][key]; })];
         });
+        result['price-rules'] = normalizePriceRules(p['price-rules'] || []);
         return JSON.stringify(result);
       };
       return normalize(a) === normalize(b);
@@ -613,11 +709,11 @@
     });
   }
 
-  function renderRequestsTable(doc, tbody, items, onView) {
+  function renderRequestsTable(doc, tbody, items, onView, credentials, onKey) {
     clearChildren(tbody);
-    var rows = buildRequestRows(items);
+    var rows = buildRequestRows(items, credentials);
     if (!rows.length) {
-      tbody.appendChild(emptyRow(doc, 10, '暂无数据'));
+      tbody.appendChild(emptyRow(doc, 12, '暂无数据'));
       return rows;
     }
     for (var i = 0; i < rows.length; i++) {
@@ -653,6 +749,23 @@
       tr.appendChild(modelCell);
 
       tr.appendChild(cell(doc, 'col-secondary', r.provider));
+      var keyCell = cell(doc, '', '未归属');
+      if (r.clientKeyID) {
+        clearChildren(keyCell);
+        var keyButton = doc.createElement('button');
+        keyButton.type = 'button';
+        keyButton.className = 'btn btn-secondary btn-sm';
+        keyButton.title = r.clientKeyID;
+        setText(keyButton, r.clientKeyID.slice(0, 12) + '…');
+        (function (button, id) {
+          button.addEventListener('click', function () { if (onKey) onKey(id); });
+        })(keyButton, r.clientKeyID);
+        keyCell.appendChild(keyButton);
+      }
+      tr.appendChild(keyCell);
+      var authCell = cell(doc, '', r.credential);
+      authCell.title = r.authIndex;
+      tr.appendChild(authCell);
       tr.appendChild(cell(doc, 'num col-secondary', r.tokens));
       tr.appendChild(cell(doc, 'num', r.latency));
       tr.appendChild(cell(doc, 'num col-secondary', r.ttft));
@@ -751,14 +864,35 @@
     var heading = doc.createElement('h3');
     setText(heading, '模型价格 · USD / 百万 Token');
     container.appendChild(heading);
+    var priceNote = doc.createElement('p');
+    priceNote.className = 'settings-note';
+    setText(
+      priceNote,
+      '规则自上而下匹配：模型 ID、输入 Token 阈值（含缓存，严格大于）与 UTC+0 时间区间（HH:mm-HH:mm，' +
+        '起点包含、终点不包含，可跨夜，终点可为 24:00）需同时满足（AND），整个请求采用第一条命中的价格；' +
+        '无条件规则即默认价，建议放在最后。'
+    );
+    container.appendChild(priceNote);
     var rows = doc.createElement('div');
     container.appendChild(rows);
     var priceRows = [];
-    function addPrice(id, price) {
+    // Screen-reader labels follow the current position and model of every rule.
+    function relabel() {
+      priceRows.forEach(function (r, index) {
+        var name = r.model.value.trim() || '未命名规则';
+        var prefix = '第 ' + (index + 1) + ' 条（' + name + '）';
+        r.up.setAttribute('aria-label', '上移 ' + prefix);
+        r.down.setAttribute('aria-label', '下移 ' + prefix);
+        r.remove.setAttribute('aria-label', '删除 ' + prefix);
+        r.remove.title = '删除 ' + prefix;
+      });
+    }
+    function addPrice(id, price, rule) {
       var row = doc.createElement('div');
       row.className = 'price-row';
       var model = input('精确完整模型 ID', id, 'text');
       model.node.setAttribute('data-price', 'model');
+      model.node.addEventListener('input', relabel);
       row.appendChild(model.wrapper);
       var record = { row: row, model: model.node, values: {} };
       PRICE_KEYS.forEach(function (key, i) {
@@ -767,20 +901,51 @@
         record.values[key] = p.node;
         row.appendChild(p.wrapper);
       });
+      var threshold = input('输入 Token >（可选，含缓存）', rule && rule['input-tokens-gt'] !== undefined ? rule['input-tokens-gt'] : '', 'number');
+      threshold.node.step = '1'; threshold.node.min = '0';
+      threshold.node.setAttribute('data-price', 'input-tokens-gt');
+      record.threshold = threshold.node;
+      var daily = input('每日时间 UTC+0（可选）', rule && rule['time-range'] || '', 'text');
+      daily.node.placeholder = '00:00-08:30';
+      daily.node.setAttribute('data-price', 'time-range');
+      record.daily = daily.node;
+      row.appendChild(threshold.wrapper); row.appendChild(daily.wrapper);
+      var actions = doc.createElement('div');
+      actions.className = 'price-actions';
+      var up = doc.createElement('button');
+      up.type = 'button'; up.className = 'btn btn-secondary btn-sm'; setText(up, '上移');
+      var down = doc.createElement('button');
+      down.type = 'button'; down.className = 'btn btn-secondary btn-sm'; setText(down, '下移');
       var remove = doc.createElement('button');
-      remove.type = 'button'; remove.className = 'btn btn-secondary';
-      setText(remove, '删除');
+      remove.type = 'button'; remove.className = 'btn btn-danger btn-sm price-delete'; setText(remove, '删除');
+      record.up = up; record.down = down; record.remove = remove;
+      function move(delta) {
+        var index = priceRows.indexOf(record), target = index + delta;
+        if (target < 0 || target >= priceRows.length) return;
+        priceRows.splice(index, 1); priceRows.splice(target, 0, record);
+        clearChildren(rows);
+        priceRows.forEach(function (r) { rows.appendChild(r.row); });
+        relabel();
+        changed();
+        var focus = delta < 0 ? up : down;
+        if (typeof focus.focus === 'function') focus.focus();
+      }
+      up.addEventListener('click', function () { move(-1); });
+      down.addEventListener('click', function () { move(1); });
       remove.addEventListener('click', function () {
-        rows.removeChild(row); priceRows.splice(priceRows.indexOf(record), 1); changed();
+        rows.removeChild(row); priceRows.splice(priceRows.indexOf(record), 1); relabel(); changed();
       });
-      row.appendChild(remove);
-      priceRows.push(record); rows.appendChild(row);
+      actions.appendChild(up); actions.appendChild(down); actions.appendChild(remove);
+      row.appendChild(actions);
+      priceRows.push(record); rows.appendChild(row); relabel();
     }
-    var currentPrices = settingsToPatch(settings).prices;
+    var currentPatch = settingsToPatch(settings);
+    (currentPatch['price-rules'] || []).forEach(function (rule) { addPrice(rule.model, rule.price, rule); });
+    var currentPrices = currentPatch.prices;
     Object.keys(currentPrices).forEach(function (id) { addPrice(id, currentPrices[id]); });
     var add = doc.createElement('button');
     add.type = 'button'; add.className = 'btn btn-secondary'; add.id = 'price-add';
-    setText(add, '添加模型价格');
+    setText(add, '添加价格规则');
     add.addEventListener('click', function () { addPrice('', {}); changed(); });
     container.appendChild(add);
     return {
@@ -792,14 +957,24 @@
           if (f[2] === 'duration') patch[f[0]] = durationSeconds(v, c.unit.value) + 's';
           else patch[f[0]] = Number(v) * (f[2] === 'bytes' ? MIB : 1);
         });
+        var rules = [];
         priceRows.forEach(function (r) {
           var id = r.model.value.trim();
-          if (!id || Object.prototype.hasOwnProperty.call(patch.prices, id)) throw new Error('模型 ID 为空或重复');
-          patch.prices[id] = {};
+          if (!id) throw new Error('模型 ID 不能为空');
+          var rule = { model: id, price: {} };
           PRICE_KEYS.forEach(function (key) {
-            patch.prices[id][key] = boundedNumber(r.values[key].value, 0, Number.MAX_VALUE, '模型价格', false);
+            rule.price[key] = boundedNumber(r.values[key].value, 0, Number.MAX_VALUE, '模型价格', false);
           });
+          if (toStr(r.threshold.value).trim()) {
+            rule['input-tokens-gt'] = boundedNumber(r.threshold.value, 0, Number.MAX_SAFE_INTEGER, '输入 Token 阈值', true);
+          }
+          if (toStr(r.daily.value).trim()) rule['time-range'] = r.daily.value.trim();
+          rules.push(rule);
         });
+        // Canonical save: always replace the legacy map with an empty object and
+        // persist every row as an ordered rule. Rows render explicit rules first
+        // and converted legacy map rows after them, so their order stays stable.
+        patch['price-rules'] = normalizePriceRules(rules);
         return validateSettingsPatch(patch);
       }
     };
@@ -1065,6 +1240,10 @@
       requestsPrev: doc.getElementById('requests-prev'),
       requestsNext: doc.getElementById('requests-next'),
       requestsPage: doc.getElementById('requests-page'),
+      clientKey: doc.getElementById('filter-client-key'),
+      auth: doc.getElementById('filter-auth'),
+      identityApply: doc.getElementById('identity-apply'),
+      credentialStatus: doc.getElementById('credential-status'),
       settingsBody: doc.getElementById('settings-body'),
       save: doc.getElementById('settings-save'),
       revert: doc.getElementById('settings-revert'),
@@ -1102,6 +1281,13 @@
       bounds: null,
       requestProvider: '',
       requestModel: '',
+      clientKeyID: '',
+      authIndex: '',
+      requestClientKeyID: '',
+      requestAuthIndex: '',
+      credentials: Object.create(null),
+      clientGroups: [],
+      authGroups: [],
       series: [],
       providers: {},
       models: {}
@@ -1260,7 +1446,8 @@
 
     function fetchJson(path, params, signal, method, payload) {
       if (!state.connected || !state.key) return Promise.reject(new Error('尚未连接'));
-      var url = buildApiUrl(path === 'config' ? coreApiBase(apiBase) : apiBase, path, params);
+      var url = path === 'credentials' ? credentialsUrl(apiBase) :
+        buildApiUrl(path === 'config' ? coreApiBase(apiBase) : apiBase, path, params);
       if (!url) return Promise.reject(new Error('无效的接口地址'));
       if (typeof win.fetch !== 'function') return Promise.reject(new Error('浏览器不支持 fetch'));
       var headers = {};
@@ -1315,6 +1502,8 @@
 
     function applySummary(summary) {
       var s = summary && typeof summary === 'object' ? summary : {};
+      state.clientGroups = Array.isArray(s.client_keys) ? s.client_keys : [];
+      state.authGroups = Array.isArray(s.credentials) ? s.credentials : [];
       renderOverview(doc, els.cards, buildOverview(s.totals));
       var count = renderGroupsTable(doc, els.groupsBody, s.groups).length;
       setText(els.groupsNote, count ? count + ' 个分组' : '');
@@ -1332,6 +1521,7 @@
       var pending = !state.connected || state.loadingPage || state.refreshing || saving;
       els.requestsPrev.disabled = pending || state.offset === 0;
       els.requestsNext.disabled = pending || !state.hasMore || state.offset > 2147483647 - REQUEST_PAGE_LIMIT;
+      els.identityApply.disabled = pending;
     }
 
     function applyRequestsPage(page, offset) {
@@ -1340,7 +1530,8 @@
       state.items = items.slice(0, REQUEST_PAGE_LIMIT);
       state.offset = offset;
       state.hasMore = p.has_more === true;
-      renderRequestsTable(doc, els.requestsBody, state.items, openBody);
+      renderRequestsTable(doc, els.requestsBody, state.items, openBody, state.credentials, filterByKey);
+      updateIdentityOptions();
       updateRequestsNote();
       pageActions();
     }
@@ -1348,6 +1539,91 @@
     function updateRequestsNote() {
       setText(els.requestsPage, '第 ' + (Math.floor(state.offset / REQUEST_PAGE_LIMIT) + 1) + ' 页 · 本页 ' + state.items.length + ' 条');
       setText(els.requestsNote, '请求明细仅保留 ' + formatDuration(state.retention) + '，统计按所选时间范围展示');
+    }
+
+    function updateIdentityOptions() {
+      var selected = els.auth.value || '';
+      var authNames = assign(Object.create(null), state.credentials);
+      if (selected && selected !== 'unknown' && !authNames[selected]) authNames[selected] = '索引 ' + selected;
+      var keys = Object.create(null);
+      state.clientGroups.forEach(function (group) {
+        if (/^[a-f0-9]{64}$/.test(toStr(group.id))) keys[group.id] = true;
+      });
+      state.authGroups.forEach(function (group) {
+        if (/^[a-f0-9]{16}$/.test(toStr(group.id)) && !authNames[group.id]) authNames[group.id] = '索引 ' + group.id;
+      });
+      state.items.forEach(function (item) {
+        if (/^[a-f0-9]{64}$/.test(toStr(item.client_key_id))) keys[item.client_key_id] = true;
+        if (/^[a-f0-9]{16}$/.test(toStr(item.auth_index)) && !authNames[item.auth_index]) {
+          authNames[item.auth_index] = '索引 ' + item.auth_index;
+        }
+      });
+      clearChildren(els.auth);
+      els.auth.appendChild(optionEl(doc, '', '全部'));
+      els.auth.appendChild(optionEl(doc, 'unknown', '未归属（含旧记录）'));
+      Object.keys(authNames).sort().forEach(function (index) {
+        els.auth.appendChild(optionEl(doc, index, authNames[index] + ' · ' + index));
+      });
+      els.auth.value = selected;
+      var options = doc.getElementById('client-key-options');
+      clearChildren(options);
+      options.appendChild(optionEl(doc, 'unknown', '未归属（含旧记录）'));
+      Object.keys(keys).sort().forEach(function (key) { options.appendChild(optionEl(doc, key, key.slice(0, 12) + '…')); });
+    }
+
+    function applyIdentityFilter() {
+      if (!state.connected || saving || state.refreshing || state.loadingPage) return;
+      var key = els.clientKey.value.trim();
+      var auth = els.auth.value || '';
+      if ((key && key !== 'unknown' && !/^[a-f0-9]{64}$/.test(key)) ||
+          (auth && auth !== 'unknown' && !/^[a-f0-9]{16}$/.test(auth))) {
+        setStatus('请输入完整的 64 位客户端指纹，或使用 unknown 筛选未归属记录', 'error');
+        return;
+      }
+      state.clientKeyID = key;
+      state.authIndex = auth;
+      refreshAll();
+    }
+
+    function filterByKey(key) {
+      if (!state.connected || saving || state.refreshing || state.loadingPage) return;
+      els.clientKey.value = key;
+      applyIdentityFilter();
+    }
+
+    function renderKeyGroups() {
+      var tbody = doc.getElementById('keys-body');
+      clearChildren(tbody);
+      var auth = doc.getElementById('key-group-kind').value === 'auth';
+      var groups = auth ? state.authGroups : state.clientGroups;
+      if (!groups.length) { tbody.appendChild(emptyRow(doc, 8, '暂无数据')); return; }
+      groups.slice().sort(function (a, b) { return counter(b, 'requests') - counter(a, 'requests'); }).forEach(function (group) {
+        var id = toStr(group.id);
+        var tr = doc.createElement('tr');
+        var name = !id ? '未归属' : auth ? state.credentials[id] || '索引 ' + id : id.slice(0, 12) + '…';
+        var td = cell(doc, '', '');
+        var button = doc.createElement('button');
+        button.type = 'button'; button.className = 'btn btn-secondary btn-sm';
+        button.title = id; setText(button, name);
+        button.addEventListener('click', function () {
+          if (auth) { els.auth.value = id || 'unknown'; applyIdentityFilter(); }
+          else filterByKey(id || 'unknown');
+        });
+        td.appendChild(button); tr.appendChild(td);
+        var requests = counter(group, 'requests');
+        var cards = buildOverview(group);
+        tr.appendChild(cell(doc, 'num', formatInt(requests)));
+        tr.appendChild(cell(doc, 'num', formatInt(counter(group, 'failed_requests')) + ' / ' +
+          (requests > 0 ? formatRate(counter(group, 'failed_requests') / requests) : '—')));
+        tr.appendChild(cell(doc, 'num', cards[2].value + '（入 ' + formatCompact(counter(group, 'input_tokens')) + ' / 出 ' + formatCompact(counter(group, 'output_tokens')) + '）'));
+        tr.appendChild(cell(doc, 'num', formatCompact(counter(group, 'cache_read_tokens')) + ' / ' +
+          formatCompact(counter(group, 'cache_creation_tokens')) + ' · ' +
+          (requests > 0 ? formatRate(counter(group, 'cache_hits') / requests) : '—')));
+        tr.appendChild(cell(doc, 'num', cards[4].value));
+        tr.appendChild(cell(doc, 'num', cards[5].value));
+        tr.appendChild(cell(doc, 'num', aggregateCost(group)));
+        tbody.appendChild(tr);
+      });
     }
 
     function applySettings(settings, preserveStatus) {
@@ -1385,12 +1661,20 @@
       setStatus('加载中…', '');
 
       var common = { from: bounds.from, to: bounds.to, provider: state.provider, model: state.model };
+      common.client_key_id = state.clientKeyID;
+      common.auth_index = state.authIndex;
       var signal = controller ? controller.signal : undefined;
       var tasks = [
         fetchJson('summary', common, signal).then(function (d) { return { kind: 'summary', data: d }; }),
         fetchJson('requests', assign({}, common, { offset: 0, limit: REQUEST_PAGE_LIMIT }), signal).then(function (d) { return { kind: 'requests', data: d }; }),
         fetchJson('settings', null, signal).then(function (d) { return { kind: 'settings', data: d }; }),
-        fetchJson('health', null, signal).then(function (d) { return { kind: 'health', data: d }; })
+        fetchJson('health', null, signal).then(function (d) { return { kind: 'health', data: d }; }),
+        fetchJson('credentials', null, signal).then(function (d) {
+          return { kind: 'credentials', data: credentialNames(d) };
+        }).catch(function (err) {
+          if (err.auth || isAbortError(err)) throw err;
+          return { kind: 'credentials', data: null };
+        })
       ];
 
       Promise.all(tasks)
@@ -1402,8 +1686,13 @@
           state.bounds = bounds;
           state.requestProvider = common.provider;
           state.requestModel = common.model;
+          state.requestClientKeyID = state.clientKeyID;
+          state.requestAuthIndex = state.authIndex;
+          state.credentials = byKind.credentials || Object.create(null);
+          setText(els.credentialStatus, byKind.credentials ? '' : 'CPA 凭据 / 认证文件名称加载失败，本次仅按索引显示；上游凭据筛选仍可用。');
           state.refreshing = false;
           applyRequestsPage(byKind.requests, 0);
+          renderKeyGroups();
           applySettings(byKind.settings, preserveSettingsStatus);
           setStatus('已更新 ' + formatTime(new Date().toISOString()), 'ok');
           applyHealth(byKind.health);
@@ -1558,6 +1847,8 @@
         to: state.bounds.to,
         provider: state.requestProvider,
         model: state.requestModel,
+        client_key_id: state.requestClientKeyID,
+        auth_index: state.requestAuthIndex,
         limit: REQUEST_PAGE_LIMIT,
         offset: offset
       };
@@ -1712,6 +2003,11 @@
       state.items = [];
       state.bounds = null;
       state.hasMore = false;
+      state.clientKeyID = ''; state.authIndex = '';
+      state.credentials = Object.create(null);
+      els.clientKey.value = ''; els.auth.value = '';
+      state.clientGroups = []; state.authGroups = [];
+      updateIdentityOptions();
       renderRequestsTable(doc, els.requestsBody, [], openBody);
       updateRequestsNote();
       dirty = false; editor = null;
@@ -1725,6 +2021,8 @@
     // ---- 事件绑定 ----
 
     els.connect.addEventListener('click', connect);
+    els.identityApply.addEventListener('click', applyIdentityFilter);
+    doc.getElementById('key-group-kind').addEventListener('change', renderKeyGroups);
     if (els.save) els.save.addEventListener('click', saveSettings);
     if (els.revert) els.revert.addEventListener('click', reloadSettings);
     els.refresh.addEventListener('click', function () { refreshAll(); });
@@ -1792,10 +2090,13 @@
     validateBodyDetail: validateBodyDetail,
     deriveApiBase: deriveApiBase,
     coreApiBase: coreApiBase,
+    credentialsUrl: credentialsUrl,
+    credentialNames: credentialNames,
     durationSeconds: durationSeconds,
     settingsToPatch: settingsToPatch,
     validateSettingsPatch: validateSettingsPatch,
     patchesMatch: patchesMatch,
+    normalizePriceRules: normalizePriceRules,
     buildApiUrl: buildApiUrl,
     isAllowedTransport: isAllowedTransport,
     isLoopbackHost: isLoopbackHost,

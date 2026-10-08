@@ -128,7 +128,12 @@ async function main() {
       assert.equal(server.getConfig().flush, '1s');
       assert.deepEqual(server.getConfig().store, { fixture: 'preserve-me' });
       assert.equal(server.getConfig().enabled, true);
-      assert.equal(server.getConfig().prices[mock.XSS_MODEL]['cache-read'], 0.2);
+      // Canonical save replaces the legacy map with an ordered rule list.
+      assert.deepEqual(server.getConfig().prices, {});
+      const savedRules = server.getConfig()['price-rules'];
+      assert.ok(savedRules.some((r) => r.model === 'gpt-5.1-codex' && r.price.input === 1.25),
+        '默认 prices map 行必须转换为无条件规则保留');
+      assert.equal(savedRules.find((r) => r.model === mock.XSS_MODEL).price['cache-read'], 0.2);
       assert.equal(await page.locator('#settings-body img').count(), 0);
       await page.reload(); await connect(page);
       assert.equal(await page.locator('#setting-capture-bodies').isChecked(), true);
@@ -137,6 +142,7 @@ async function main() {
       await page.locator('.price-row').last().getByRole('button', { name: '删除' }).click();
       await save(page, page); await saved(page);
       assert.deepEqual(server.getConfig().prices, {});
+      assert.deepEqual(server.getConfig()['price-rules'], []);
       await page.reload(); await connect(page);
       assert.equal(await page.locator('.price-row').count(), 0);
       assert.equal(await page.evaluate(() => window.__observerXss || 0), 0);
@@ -155,7 +161,7 @@ async function main() {
       await page.screenshot({ path: path.join(OUT, 'standalone-saved.png'), fullPage: true });
     });
 
-    await run('Client bounds and duplicate/blank/negative prices never reach persistence', async ({ server, page }) => {
+    await run('Client bounds and blank/malformed/negative prices never reach persistence', async ({ server, page }) => {
       await page.goto(server.resourceURL); await connect(page);
       for (const [id, value] of [
         ['setting-body-retention', '2'], ['setting-request-retention', '31'],
@@ -174,16 +180,24 @@ async function main() {
       await page.locator('#settings-status').filter({ hasText: '未保存' }).waitFor();
       assert.equal(server.counters.validations, 0);
       const row = page.locator('.price-row').last();
-      await row.locator('[data-price="model"]').fill(' gpt-5.1-codex ');
+      // 有序规则允许多条同模型规则；但畸形 UTC 区间必须先被本地拒绝。
+      await row.locator('[data-price="model"]').fill('gpt-5.1-codex');
+      await row.locator('[data-price="time-range"]').fill('8:00-9:00');
       await save(page, page);
-      assert.match(await page.locator('#settings-status').textContent(), /重复/);
-      await row.locator('[data-price="model"]').fill('new-model');
+      await page.locator('#settings-status').filter({ hasText: '时间区间' }).waitFor();
+      assert.equal(server.counters.configWrites, 0);
+      assert.equal(server.counters.validations, 0);
+      await row.locator('[data-price="time-range"]').fill('');
       await row.locator('[data-price="input"]').fill('-1');
       await save(page, page);
+      await page.locator('#settings-status').filter({ hasText: '未保存' }).waitFor();
       assert.equal(server.counters.configWrites, 0);
-      await revert(page, page);
-      await page.locator('#settings-status').filter({ hasText: '已重新加载' }).waitFor();
-      assert.equal(await page.locator('.price-row').count(), 1);
+      // 恢复合法值：重复模型作为有序规则持久化（first-match 语义）。
+      await row.locator('[data-price="input"]').fill('0');
+      await save(page, page); await saved(page);
+      assert.equal(server.counters.configWrites, 1);
+      assert.deepEqual(server.getConfig()['price-rules'].map((r) => r.model), ['gpt-5.1-codex', 'gpt-5.1-codex']);
+      assert.equal(await page.locator('.price-row').count(), 2);
       assert.equal(await page.locator('#setting-max-body-bytes').inputValue(), '1');
     });
 
@@ -377,7 +391,7 @@ async function main() {
       // A previously retained complete request acquires a price after settings save.
       const initialClaudeRow = page.locator('#requests-body tr:has-text("claude-opus-4-1")').first();
       assert.ok(await initialClaudeRow.isVisible());
-      const initialClaudeCost = await initialClaudeRow.locator('td').nth(7).textContent();
+      const initialClaudeCost = await initialClaudeRow.locator('td').nth(9).textContent();
       assert.equal(initialClaudeCost, '未定价');
 
       // Verify initial summary total cost
@@ -402,10 +416,10 @@ async function main() {
         const rows = Array.from(document.querySelectorAll('#requests-body tr'));
         const r = rows.find((el) => el.textContent.includes('claude-opus-4-1'));
         if (!r) return false;
-        const c = r.querySelectorAll('td')[7];
+        const c = r.querySelectorAll('td')[9];
         return c && c.textContent.includes('$');
       });
-      const updatedClaudeCost = await page.locator('#requests-body tr:has-text("claude-opus-4-1")').first().locator('td').nth(7).textContent();
+      const updatedClaudeCost = await page.locator('#requests-body tr:has-text("claude-opus-4-1")').first().locator('td').nth(9).textContent();
       assert.match(updatedClaudeCost, /\$/);
 
       // Assert summary total cost has updated dynamically
@@ -715,7 +729,7 @@ async function main() {
       assert.equal(server.counters.configWrites, 0);
     }, { javaScriptEnabled: false });
 
-    await run('v8 resource preserves proxy prefix but all host native/config calls use v0', async ({ server, page }) => {
+    await run('v8 resource preserves proxy prefix; plugin/config use v0 and credential names use v8', async ({ server, page }) => {
       const calls = [];
       page.on('request', (r) => { if (r.url().includes('/management/')) calls.push(r.url()); });
       await page.goto(server.origin + '/proxy/v8/resource/plugins/' + mock.PLUGIN_ID + '/ui');
@@ -723,7 +737,10 @@ async function main() {
       await page.locator('#setting-capture-bodies').check();
       await save(page, page); await saved(page);
       assert.ok(calls.length >= 8);
-      for (const url of calls) assert.ok(url.startsWith(server.origin + '/proxy/v0/management/plugins/' + mock.PLUGIN_ID + '/'));
+      assert.ok(calls.includes(server.origin + '/proxy/v8/management/credentials'));
+      for (const url of calls) assert.ok(
+        url === server.origin + '/proxy/v8/management/credentials' ||
+        url.startsWith(server.origin + '/proxy/v0/management/plugins/' + mock.PLUGIN_ID + '/'));
     });
   } finally { await browser.close(); }
   fs.writeFileSync(path.join(OUT, 'settings-results.json'), JSON.stringify(results, null, 2));

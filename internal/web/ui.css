@@ -404,7 +404,7 @@ button:focus-visible, .setting-capture input:focus-visible {
 
 .price-row {
   display: grid;
-  grid-template-columns: minmax(180px, 2fr) repeat(4, minmax(85px, 1fr)) auto;
+  grid-template-columns: minmax(180px, 2fr) repeat(4, minmax(85px, 1fr));
   gap: 8px;
   margin-bottom: 12px;
 }
@@ -413,6 +413,11 @@ button:focus-visible, .setting-capture input:focus-visible {
   width: 100%;
   min-width: 0;
 }
+
+.price-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-end; justify-content: flex-end; }
+.price-row .price-actions { grid-column: 3 / -1; }
+.price-delete { color: var(--error-color, #c65746); border-color: currentColor; }
+.price-delete:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--error-color, #c65746); }
 
 .price-row label {
   min-width: 0;
@@ -430,6 +435,25 @@ button:focus-visible, .setting-capture input:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.request-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.request-filters .filter { flex: 1 1 220px; min-width: 0; }
+.request-filters input, .request-filters select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  padding: 7px 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+}
+
 @media (max-width: 760px) {
   .price-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -440,6 +464,7 @@ button:focus-visible, .setting-capture input:focus-visible {
   .price-row label:first-child {
     grid-column: 1 / -1;
   }
+  .price-row .price-actions { grid-column: 1 / -1; justify-content: flex-start; }
 }
 
 .card {

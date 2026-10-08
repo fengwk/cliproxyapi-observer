@@ -621,7 +621,7 @@ test('prices reject blank normalized duplicate IDs and nonfinite or negative val
   assert.equal(ui.patchesMatch(patch, { ...patch, 'capture-bodies': true }), false);
 });
 
-test('editable prices stay text-only and controls create a draft, never auto-save', () => {
+test('editable price rules stay text-only and controls create a draft, never auto-save', () => {
   const doc = new FakeDocument(), container = doc.createElement('div');
   let edits = 0;
   const id = '<img onerror="evil" src=x>';
@@ -629,12 +629,169 @@ test('editable prices stay text-only and controls create a draft, never auto-sav
     ...effectiveSettings, prices: { [id]: { input: 1, output: 2, cache_read: 3, cache_creation: 4 } }
   }, () => edits++);
   assert.equal(edits, 0);
-  assert.equal(editor.read().prices[id]['cache-read'], 3);
+  // Legacy map rows render as the first ordered rule and save canonically.
+  const draft = editor.read();
+  assert.deepEqual(Object.keys(draft.prices), []);
+  assert.equal(draft['price-rules'].length, 1);
+  assert.equal(draft['price-rules'][0].model, id);
+  assert.equal(draft['price-rules'][0].price['cache-read'], 3);
   assert.equal(findNodes(container, (n) => n.tagName === 'img').length, 0);
   const capture = findNodes(container, (n) => n.id === 'setting-capture-bodies')[0];
   capture.checked = true; capture.dispatch('input');
   assert.equal(edits, 1);
   assert.equal(editor.read()['capture-bodies'], true);
   findNodes(container, (n) => n.tagName === 'button' && n.textContent === '删除')[0].dispatch('click');
-  assert.equal(Object.keys(editor.read().prices).length, 0);
+  assert.equal(editor.read()['price-rules'].length, 0);
+  assert.deepEqual(Object.keys(editor.read().prices), []);
+});
+
+test('normalizePriceRules 规范化别名并严格校验阈值与 UTC 区间', () => {
+  assert.deepEqual(
+    ui.normalizePriceRules([
+      { model: ' m ', input_tokens_gt: 0, time_range: '00:00-08:30', price: { input: 1, output: 2, cache_read: 3, cache_creation: 4 } }
+    ]),
+    [{
+      model: 'm',
+      price: { input: 1, output: 2, 'cache-read': 3, 'cache-creation': 4 },
+      'input-tokens-gt': 0,
+      'time-range': '00:00-08:30'
+    }]
+  );
+  const zero = { input: 0, output: 0, 'cache-read': 0, 'cache-creation': 0 };
+  // 跨夜与 24:00 终点合法。
+  ui.normalizePriceRules([{ model: 'm', price: zero, 'time-range': '22:00-06:00' }]);
+  ui.normalizePriceRules([{ model: 'm', price: zero, 'time-range': '00:00-24:00' }]);
+  ui.normalizePriceRules([{ model: 'm', price: zero, 'input-tokens-gt': Number.MAX_SAFE_INTEGER }]);
+  for (const rule of [
+    { model: 'm', price: zero, 'time-range': '08:00-08:00' },
+    { model: 'm', price: zero, 'time-range': '8:00-9:00' },
+    { model: 'm', price: zero, 'time-range': '24:00-01:00' },
+    { model: 'm', price: zero, 'time-range': '25:00-01:00' },
+    { model: 'm', price: zero, unknown: 1 },
+    { model: 'm', price: { ...zero, extra: 1 } },
+    { model: 'm', price: zero, 'input-tokens-gt': Number.MAX_SAFE_INTEGER + 1 },
+    { model: 'm', price: zero, 'input-tokens-gt': -1 },
+    { model: 'm', price: zero, 'input-tokens-gt': true },
+    { model: 'm', price: zero, 'input-tokens-gt': '1' },
+    { model: 'm', price: zero, 'input-tokens-gt': 1, input_tokens_gt: 2 },
+    { model: 'm', price: zero, 'time-range': null },
+    { model: 'm', price: zero, 'time-range': ' ' },
+    { model: 'm', price: { ...zero, input: false } },
+    { model: 'm', price: { ...zero, cache_read: 1 } },
+    { model: 'm', price: { ...zero, input: -1 } },
+    { model: '', price: zero }
+  ]) assert.throws(() => ui.normalizePriceRules([rule]), JSON.stringify(rule));
+  assert.throws(() => ui.normalizePriceRules('nope'));
+  assert.equal(ui.normalizePriceRules([{ model: 'm', price: {} }])[0].price.input, 0);
+});
+
+test('规则编辑器保持显式规则优先的顺序，并在重排/删除时标记草稿', () => {
+  const doc = new FakeDocument(), container = doc.createElement('div');
+  let edits = 0;
+  const editor = ui.renderSettings(doc, container, {
+    ...effectiveSettings,
+    price_rules: [{ model: 'cond', price: { input: 1, output: 1, 'cache-read': 1, 'cache-creation': 1 }, 'input-tokens-gt': 100 }],
+    prices: { legacy: { input: 2, output: 2, cache_read: 2, cache_creation: 2 } }
+  }, () => edits++);
+  assert.deepEqual(editor.read()['price-rules'].map((r) => r.model), ['cond', 'legacy']);
+  assert.equal(edits, 0);
+  // 第二条规则上移，顺序改变且草稿变脏。
+  const upButtons = findNodes(container, (n) => n.tagName === 'button' && n.textContent === '上移');
+  assert.equal(upButtons.length, 2);
+  upButtons[1].dispatch('click');
+  assert.deepEqual(editor.read()['price-rules'].map((r) => r.model), ['legacy', 'cond']);
+  assert.equal(edits, 1);
+  // 删除第一条规则只移除它本身。
+  findNodes(container, (n) => n.tagName === 'button' && n.textContent === '删除')[0].dispatch('click');
+  assert.deepEqual(editor.read()['price-rules'].map((r) => r.model), ['cond']);
+  assert.equal(edits, 2);
+  // 移动目标按钮带可达性标签。
+  const action = findNodes(container, (n) => n.tagName === 'button' && n.textContent === '下移')[0];
+  assert.match(action.getAttribute('aria-label'), /下移 第 1 条/);
+});
+
+test('settingsToPatch 同时保留旧 map 与有序规则，压缩后回读等价', () => {
+  const readback = ui.settingsToPatch({
+    ...effectiveSettings,
+    prices: { legacy: { input: 1, output: 1, cache_read: 1, cache_creation: 1 } },
+    price_rules: [{ model: 'legacy', price: { input: 1, output: 1, cache_read: 1, cache_creation: 1 } }]
+  });
+  assert.equal(readback.prices.legacy.input, 1);
+  assert.equal(readback['price-rules'].length, 1);
+  const saved = {
+    'capture-bodies': false, 'request-retention': '86400s', 'body-retention': '86400s',
+    'stats-retention-days': 365, 'max-body-bytes': 1048576, 'max-body-storage-bytes': 268435456,
+    'compact-interval': '900s', 'compact-min-bytes': 8388608,
+    prices: {},
+    'price-rules': [{ model: 'm', price: { input: 1, output: 2, 'cache-read': 3, 'cache-creation': 4 }, 'input-tokens-gt': 10 }]
+  };
+  const canonicalReadback = ui.settingsToPatch({
+    ...effectiveSettings,
+    prices: {},
+    price_rules: [{ model: 'm', price: { input: 1, output: 2, cache_read: 3, cache_creation: 4 }, input_tokens_gt: 10 }]
+  });
+  assert.equal(ui.patchesMatch(saved, canonicalReadback), true);
+  // 空规则数组与缺失在比较时归一。
+  assert.equal(ui.patchesMatch({ ...saved, 'price-rules': [] }, { ...saved, 'price-rules': undefined }), true);
+});
+// The percentage is request-level, not a guessed token-level cache ratio.
+test('缓存请求命中率显示分子分母与零请求降级', () => {
+  const cache = ui.buildOverview({ requests: 4, cache_hits: 3 }).find((c) => c.key === 'cache');
+  assert.match(cache.sub, /75.*%/);
+  assert.match(cache.sub, /3\/4.*缓存读 Token > 0/);
+  assert.match(ui.buildOverview({ requests: 0 }).find((c) => c.key === 'cache').sub, /请求命中率 —/);
+});
+
+// Use current CPA labels without retaining other credential or token fields.
+test('凭据名称优先标签并安全降级，保留反向代理前缀', () => {
+  const index = '1'.repeat(16);
+  const names = ui.credentialNames({ files: [
+    { auth_index: index, name: 'filename', label: '<img onerror=evil>\u0000', api_key: 'secret-never-used' },
+    { auth_index: 'unsafe-index', name: 'bad' }
+  ] });
+  assert.equal(names[index], '<img onerror=evil>');
+  assert.equal(Object.keys(names).length, 1);
+  assert.equal(JSON.stringify(names).includes('secret-never-used'), false);
+  assert.equal(ui.credentialsUrl('/proxy/v8/management/plugins/cliproxyapi-observer'), '/proxy/v8/management/credentials');
+  assert.equal(ui.credentialsUrl('https://evil/'), '');
+  const rows = ui.buildRequestRows([{ auth_index: index, client_key_id: 'a'.repeat(64) }], names);
+  assert.equal(rows[0].credential, '<img onerror=evil>');
+  assert.equal(rows[0].clientKeyID.length, 64);
+  assert.equal(ui.buildRequestRows([{ auth_index: index }])[0].credential, '索引 ' + index);
+  assert.equal(ui.buildRequestRows([{}])[0].credential, '未归属');
+});
+
+// Auth files show "label（filename）" so a shared label cannot hide which file was used;
+// only nonsecret display fields are retained, never source/path/id/secret values.
+test('认证文件显示标签与文件名，同标签不重复且不覆盖文件名', () => {
+  const a = '3'.repeat(16);
+  const b = '4'.repeat(16);
+  const same = '5'.repeat(16);
+  const bare = '6'.repeat(16);
+  const mem = '7'.repeat(16);
+  const evil = '8'.repeat(16);
+  const names = ui.credentialNames({ files: [
+    {
+      auth_index: a, name: '/etc/cpa/auth/fake-file-a.json', label: '工作账户',
+      source: 'file', path: '/secret/path', id: 'real-id', api_key: 'sk-secret'
+    },
+    { auth_index: b, name: 'fake-file-b.json', label: '工作账户' },
+    { auth_index: same, name: 'plain.json', label: 'plain.json' },
+    { auth_index: bare, name: 'no-label.json' },
+    { auth_index: mem, name: 'memory-credential', label: '仅标签' },
+    { auth_index: evil, name: '<img src=x onerror=alert(1)>.json', label: '<b>粗</b>' },
+    { auth_index: 'not-hex', name: 'ignored.json', label: 'x' }
+  ] });
+  assert.equal(names[a], '工作账户（fake-file-a.json）');
+  assert.equal(names[b], '工作账户（fake-file-b.json）');
+  assert.notEqual(names[a], names[b]);
+  assert.equal(names[same], 'plain.json');
+  assert.equal(names[bare], 'no-label.json');
+  assert.equal(names[mem], '仅标签');
+  assert.equal(names[evil], '<b>粗</b>（<img src=x onerror=alert(1)>.json）');
+  assert.equal(Object.keys(names).length, 6);
+  const dumped = JSON.stringify(names);
+  ['sk-secret', '/secret/path', 'real-id', 'memory-credential'].forEach((leak) => {
+    assert.equal(dumped.includes(leak), false);
+  });
 });
