@@ -178,7 +178,7 @@ POST /v0/management/plugins/cliproxyapi-observer/validate
 | `max-body-storage-bytes` | `268435456` | 正文总存储上限 |
 | `flush` | `1s` | 异步写批次间隔（默认批次 1s / 100 事件） |
 | `compact-interval` | `15m` | 自动压缩周期，范围 `1m..24h`（始终启用，无需开关） |
-| `compact-min-bytes` | `8388608` | 触发自动压缩的最小字节数，范围 `64KiB..8GiB` |
+| `compact-min-bytes` | `8388608` | 触发自动压缩的最小可回收页面字节数，范围 `64KiB..8GiB` |
 | `prices` | 空 | 精确完整模型 ID 到 USD/百万 token 单价的映射 |
 
 `prices` 每项包含 `input`、`output`、`cache-read`、`cache-creation`。单价必须为有限非负数，
@@ -188,15 +188,18 @@ JSON settings/patch 使用 `cache_read`、`cache_creation`，YAML 同时兼容�
 
 ### 自动物理回收
 
-过期记录由后台清理移除；清理成功后（包括启动时），当实际 `.db` 文件达到
-`compact-min-bytes` 且 free + pending 页面至少占文件的 25%，自动执行 bbolt 压缩。
+过期记录由后台清理移除；清理成功后（包括启动时），当 free + pending 页面字节数达到
+`compact-min-bytes` 且至少占实际 `.db` 文件的 25%，自动执行 bbolt 压缩。
 `compact-interval` 限制两次压缩尝试之间的最短时间，失败也计入间隔。
 因此过期后无需管理 API 操作，符合阈值的文件会真正缩小，而不只是内部页面复用。
 
-Linux/macOS 使用同目录 0600 临时数据库、约 1MiB 写事务，完成复制并 Sync 后原子替换。
+Linux/macOS 使用同目录 0600 临时数据库、约 1MiB 写事务与分配增量，
+完成复制并 Sync 后，仅在临时文件实际小于原文件时原子替换。
+大小未减少时保留原库、删除临时库，不计成功压缩，下一次尝试仍受间隔限制。
 复制期间原数据库仍可读取，采集保持有界且不阻塞；队列满时按原规则丢弃并计数。
 替换前失败保留原库并删除临时文件，失败可在之后重试；压缩不会更改保留的正文、
-请求序号或统计。其他操作系统不执行不安全的覆盖回写。
+请求序号或统计。孤立临时文件清理失败也计入压缩错误，不会静默忽略。
+其他操作系统不执行不安全的覆盖回写。
 
 `health` 增加缓存的 `database_bytes`、`reclaimable_bytes`、`compactions`、
 `compaction_errors`、`last_compaction_unix`（Unix 秒，未发生时为 0）和

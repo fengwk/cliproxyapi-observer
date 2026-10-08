@@ -32,8 +32,9 @@ plugins:
       max-body-bytes: 1048576
       max-body-storage-bytes: 268435456
       flush: "1s"
-      # Automatic storage compaction interval and threshold (always active).
+      # Automatic storage compaction attempt interval (always active).
       compact-interval: "15m"
+      # Minimum reclaimable free+pending page bytes, also requiring >=25% of file size.
       compact-min-bytes: 8388608
       # Static USD-per-million prices for exact, full model IDs. Requests whose
       # accounting is incomplete (unknown counters) stay unpriced rather than

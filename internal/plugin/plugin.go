@@ -42,7 +42,7 @@ func Metadata() pluginapi.Metadata {
 			{Name: "max-body-storage-bytes", Type: pluginapi.ConfigFieldTypeInteger, Description: "Total captured body storage budget in bytes (default 268435456)."},
 			{Name: "flush", Type: pluginapi.ConfigFieldTypeString, Description: "Async writer batch interval, e.g. 1s (default 1s)."},
 			{Name: "compact-interval", Type: pluginapi.ConfigFieldTypeString, Description: "Automatic database compaction interval, e.g. 15m (default 15m)."},
-			{Name: "compact-min-bytes", Type: pluginapi.ConfigFieldTypeInteger, Description: "Minimum database size in bytes before compacting (default 8388608)."},
+			{Name: "compact-min-bytes", Type: pluginapi.ConfigFieldTypeInteger, Description: "Minimum reclaimable free and pending page bytes before compacting (default 8388608)."},
 			{Name: "prices", Type: pluginapi.ConfigFieldTypeObject, Description: "Exact full model id to USD-per-million-token price map (input, output, cache-read, cache-creation)."},
 		},
 	}

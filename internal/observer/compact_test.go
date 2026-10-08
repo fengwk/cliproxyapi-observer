@@ -361,3 +361,174 @@ func TestStartupOrphanCleanupDoesNotFollowSymlinks(t *testing.T) {
 		t.Fatal("victim changed")
 	}
 }
+
+// Build a real expired database, then open it without a writer so eligibility
+// boundaries can be checked without cleanup transactions changing page counts.
+func maintenanceFixture(t *testing.T) *Store {
+	t.Helper()
+	cfg := compactConfig(t)
+	cfg.CompactMinBytes = MaxCompactMinBytes
+	s, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clk := &clock{t: time.Now()}
+	inflateStore(t, s, clk)
+	clk.advance(2 * time.Minute)
+	flushAll(t, s)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := bolt.Open(cfg.DataPath, 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s = &Store{
+		cfg: cfg, db: db, primaryPath: cfg.DataPath,
+		compactCopy: bolt.Compact, compactSync: (*bolt.DB).Sync,
+		compactRename: os.Rename, compactRemove: os.Remove,
+	}
+	t.Cleanup(func() { _ = s.db.Close() })
+	return s
+}
+
+// The minimum is reclaimable bytes, not primary file size. Equality is
+// eligible, but even a lowered threshold must respect the attempt interval.
+func TestCompactionReclaimableMinimumBoundary(t *testing.T) {
+	s := maintenanceFixture(t)
+	size, free, err := s.measureDatabase()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if free < size/4 || free < MinCompactMinBytes || free+1 >= size {
+		t.Fatalf("fixture does not distinguish thresholds: size=%d free=%d", size, free)
+	}
+	original, err := os.ReadFile(s.primaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	s.cfg.CompactMinBytes = free + 1
+	s.maybeCompact(now)
+	if s.Status().Compactions != 0 || !s.lastCompactAttempt.IsZero() {
+		t.Fatal("compacted below reclaimable minimum", s.Status())
+	}
+	s.cfg.CompactMinBytes = free
+	s.lastCompactAttempt = now
+	s.maybeCompact(now.Add(s.cfg.CompactInterval - time.Nanosecond))
+	current, err := os.ReadFile(s.primaryPath)
+	if err != nil || !bytes.Equal(original, current) || s.Status().Compactions != 0 {
+		t.Fatal("source changed before interval became due", err, s.Status())
+	}
+	s.maybeCompact(now.Add(s.cfg.CompactInterval))
+	if s.Status().Compactions != 1 || fileSize(t, s.primaryPath) >= size {
+		t.Fatal("exact reclaimable/interval boundary did not compact", s.Status())
+	}
+}
+
+// Even a valid compact copy must not replace the source when allocation slack
+// leaves an equal/larger file. No-op attempts are rate limited and retried.
+func TestCompactionNonShrinkingCopyPreservesSource(t *testing.T) {
+	for _, extra := range []int64{0, 1 << 20} {
+		t.Run(fmt.Sprintf("extra-%d", extra), func(t *testing.T) {
+			s := maintenanceFixture(t)
+			s.cfg.CompactMinBytes = MinCompactMinBytes
+			size, _, err := s.measureDatabase()
+			if err != nil {
+				t.Fatal(err)
+			}
+			original, err := os.ReadFile(s.primaryPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source := s.db
+			attempts := 0
+			s.compactCopy = func(dst, src *bolt.DB, n int64) error {
+				attempts++
+				if dst.AllocSize != 1<<20 {
+					return fmt.Errorf("unexpected destination AllocSize: %d", dst.AllocSize)
+				}
+				if err := bolt.Compact(dst, src, n); err != nil {
+					return err
+				}
+				return os.Truncate(dst.Path(), size+extra)
+			}
+			now := time.Now()
+			s.maybeCompact(now)
+			current, err := os.ReadFile(s.primaryPath)
+			status := s.Status()
+			if err != nil || !bytes.Equal(original, current) || s.db != source {
+				t.Fatal("non-shrinking copy replaced/modified source", err)
+			}
+			if status.Compactions != 0 || status.CompactionErrors != 0 || status.LastCompactionUnix != 0 || status.LastCompactionReclaimedBytes != 0 {
+				t.Fatal("no-op reported success/error", status)
+			}
+			stages, err := filepath.Glob(s.primaryPath + ".observer-compact-*")
+			if err != nil || len(stages) != 0 {
+				t.Fatal("no-op leaked stage", stages, err)
+			}
+			if err := source.Update(func(tx *bolt.Tx) error {
+				return tx.Bucket(bucketRequests).Put([]byte("still-live"), []byte("value"))
+			}); err != nil {
+				t.Fatal("no-op closed source", err)
+			}
+			s.maybeCompact(now.Add(s.cfg.CompactInterval - time.Nanosecond))
+			if attempts != 1 {
+				t.Fatal("no-op attempt was not rate limited")
+			}
+			s.compactCopy = bolt.Compact
+			s.maybeCompact(now.Add(s.cfg.CompactInterval))
+			if s.Status().Compactions != 1 || s.Status().LastCompactionReclaimedBytes <= 0 {
+				t.Fatal("no-op did not retry later", s.Status())
+			}
+			if err := s.view(func(tx *bolt.Tx) error {
+				if string(tx.Bucket(bucketRequests).Get([]byte("still-live"))) != "value" {
+					return fmt.Errorf("write after no-op lost on retry")
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// Inject permission failure instead of relying on UID-dependent chmod behavior.
+// Startup cleanup reports it without removing symlinks or damaging the primary.
+func TestOrphanCompactionRemovalFailureIsObservable(t *testing.T) {
+	s := maintenanceFixture(t)
+	orphan := s.primaryPath + ".observer-compact-1234"
+	if err := os.WriteFile(orphan, []byte("unfinished"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := s.primaryPath + ".observer-compact-5678"
+	if err := os.Symlink(orphan, link); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(s.primaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.compactRemove = func(path string) error {
+		if path != orphan {
+			t.Errorf("cleanup tried removing a symlink: %s", path)
+		}
+		return syscall.EACCES
+	}
+	s.removeOrphanCompactions()
+	if s.Status().CompactionErrors != 1 {
+		t.Fatal("orphan removal error not observable", s.Status())
+	}
+	current, err := os.ReadFile(s.primaryPath)
+	if err != nil || !bytes.Equal(original, current) {
+		t.Fatal("orphan removal failure modified primary", err)
+	}
+	s.compactRemove = os.Remove
+	s.removeOrphanCompactions()
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatal("orphan not removed on retry")
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatal("symlink removed", err)
+	}
+}

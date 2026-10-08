@@ -15,6 +15,7 @@ import (
 func (s *Store) removeOrphanCompactions() {
 	entries, err := os.ReadDir(filepath.Dir(s.primaryPath))
 	if err != nil {
+		s.compactionErrors.Add(1)
 		return
 	}
 	prefix := filepath.Base(s.primaryPath) + ".observer-compact-"
@@ -24,8 +25,14 @@ func (s *Store) removeOrphanCompactions() {
 			continue
 		}
 		info, err := entry.Info()
-		if err == nil && info.Mode().IsRegular() {
-			_ = os.Remove(filepath.Join(filepath.Dir(s.primaryPath), entry.Name()))
+		if err != nil {
+			s.compactionErrors.Add(1)
+			continue
+		}
+		if info.Mode().IsRegular() {
+			if err := s.compactRemove(filepath.Join(filepath.Dir(s.primaryPath), entry.Name())); err != nil && !os.IsNotExist(err) {
+				s.compactionErrors.Add(1)
+			}
 		}
 	}
 }
@@ -48,7 +55,7 @@ func (s *Store) maybeCompact(now time.Time) {
 	if !s.lastCompactAttempt.IsZero() && now.Sub(s.lastCompactAttempt) < s.cfg.CompactInterval {
 		return
 	}
-	if err == nil && (size < s.cfg.CompactMinBytes || free < size/4) {
+	if err == nil && (free < s.cfg.CompactMinBytes || free < size/4) {
 		return
 	}
 	s.lastCompactAttempt = now
@@ -62,7 +69,7 @@ func (s *Store) maybeCompact(now time.Time) {
 	_, _, _ = s.measureDatabase()
 }
 
-func (s *Store) compactDatabase() error {
+func (s *Store) compactDatabase() (resultErr error) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		return fmt.Errorf("atomic database replacement unsupported")
 	}
@@ -71,7 +78,11 @@ func (s *Store) compactDatabase() error {
 		return err
 	}
 	stage := file.Name()
-	defer os.Remove(stage)
+	defer func() {
+		if err := s.compactRemove(stage); err != nil && !os.IsNotExist(err) && resultErr == nil {
+			resultErr = err
+		}
+	}()
 	if err := file.Close(); err != nil {
 		return err
 	}
@@ -79,10 +90,14 @@ func (s *Store) compactDatabase() error {
 	if err != nil {
 		return err
 	}
+	// Bound allocation slack instead of bbolt's default 16MiB growth quantum.
+	dst.AllocSize = 1 << 20
 	swapped := false
 	defer func() {
 		if !swapped {
-			_ = dst.Close()
+			if err := dst.Close(); err != nil && resultErr == nil {
+				resultErr = err
+			}
 		}
 	}()
 	// Readers may keep using source during the copy; only writer is paused.
@@ -97,6 +112,11 @@ func (s *Store) compactDatabase() error {
 	if err != nil {
 		return err
 	}
+	// Allocation slack can defeat free-page estimates. A no-op is still an
+	// interval-limited attempt, never a successful swap.
+	if info.Size() >= before {
+		return nil
+	}
 	s.mu.Lock()
 	if err := s.compactRename(stage, s.primaryPath); err != nil {
 		s.mu.Unlock()
@@ -109,9 +129,6 @@ func (s *Store) compactDatabase() error {
 	s.compactions.Add(1)
 	s.lastCompactionUnix.Store(s.now().Unix())
 	reclaimed := before - info.Size()
-	if reclaimed < 0 {
-		reclaimed = 0
-	}
 	s.lastCompactionReclaimedBytes.Store(reclaimed)
 	// Post-swap errors must never discard the working new database.
 	closeErr := old.Close()

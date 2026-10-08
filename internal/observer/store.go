@@ -74,6 +74,7 @@ type Store struct {
 	compactCopy                  func(*bolt.DB, *bolt.DB, int64) error
 	compactSync                  func(*bolt.DB) error
 	compactRename                func(string, string) error
+	compactRemove                func(string) error
 	nowV                         atomic.Value // stores func() time.Time
 
 	usageCh    chan Request
@@ -148,6 +149,7 @@ func openStore(config Config, cleanupPeriod time.Duration) (*Store, error) {
 		compactCopy:   bolt.Compact,
 		compactSync:   (*bolt.DB).Sync,
 		compactRename: os.Rename,
+		compactRemove: os.Remove,
 		usageCh:       make(chan Request, usageQueueCapacity),
 		bodyCh:        make(chan pendingBody, bodyQueueCapacity),
 		flushCh:       make(chan chan error, 1),
