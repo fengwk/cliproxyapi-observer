@@ -22,15 +22,51 @@ async function connect(frame) {
   await frame.locator('#connect').click();
   await ready(frame);
 }
-async function save(page, frame, accept = true) {
-  const dialog = new Promise((resolve) => page.once('dialog', async (d) => {
-    assert.match(d.message(), /提示词.*永久删除.*新请求/);
-    await (accept ? d.accept() : d.dismiss());
-    resolve();
-  }));
-  await frame.locator('#settings-save').click();
-  await dialog;
+
+function resolveTarget(arg1, arg2, arg3) {
+  let root = arg1;
+  let accept = true;
+  if (typeof arg2 === 'boolean') {
+    accept = arg2;
+  } else if (arg2 && typeof arg2.locator === 'function') {
+    root = arg2;
+    if (typeof arg3 === 'boolean') {
+      accept = arg3;
+    }
+  }
+  return { root, accept };
 }
+
+async function save(arg1, arg2, arg3) {
+  const { root, accept } = resolveTarget(arg1, arg2, arg3);
+  const dialog = root.locator('#confirmation-dialog');
+  await root.locator('#settings-save').click();
+  await dialog.waitFor({ state: 'visible' });
+  assert.equal(await root.locator('#confirmation-title').textContent(), '确认保存设置');
+  assert.match(await root.locator('#confirmation-desc').textContent(), /提示词.*永久删除.*价格/);
+  if (accept) {
+    await root.locator('#confirmation-confirm').click();
+  } else {
+    await root.locator('#confirmation-cancel').click();
+  }
+  await dialog.waitFor({ state: 'hidden' });
+}
+
+async function revert(arg1, arg2, arg3) {
+  const { root, accept } = resolveTarget(arg1, arg2, arg3);
+  const dialog = root.locator('#confirmation-dialog');
+  await root.locator('#settings-revert').click();
+  await dialog.waitFor({ state: 'visible' });
+  assert.equal(await root.locator('#confirmation-title').textContent(), '放弃未保存草稿');
+  assert.match(await root.locator('#confirmation-desc').textContent(), /放弃未保存草稿/);
+  if (accept) {
+    await root.locator('#confirmation-confirm').click();
+  } else {
+    await root.locator('#confirmation-cancel').click();
+  }
+  await dialog.waitFor({ state: 'hidden' });
+}
+
 const saved = (frame) => frame.locator('#settings-status').filter({ hasText: '保存成功' }).waitFor();
 
 async function main() {
@@ -43,6 +79,9 @@ async function main() {
     const server = await mock.startServer({ captureBodies: false });
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, ...options });
     const page = await context.newPage();
+    page.on('dialog', (d) => {
+      throw new Error('严禁原生弹窗：' + d.message());
+    });
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
     try {
@@ -124,24 +163,25 @@ async function main() {
         ['setting-max-body-storage-bytes', '0.5'], ['setting-compact-min-bytes', '0.01']
       ]) {
         const control = page.locator('#' + id), old = await control.inputValue();
-        await control.fill(value); await page.locator('#settings-save').click();
+        await control.fill(value);
+        await save(page, page);
         await page.locator('#settings-status').filter({ hasText: '未保存' }).waitFor();
         assert.equal(server.counters.validations, 0); assert.equal(server.counters.configWrites, 0);
         await control.fill(old);
       }
       await page.locator('#price-add').click();
-      await page.locator('#settings-save').click();
+      await save(page, page);
+      await page.locator('#settings-status').filter({ hasText: '未保存' }).waitFor();
       assert.equal(server.counters.validations, 0);
       const row = page.locator('.price-row').last();
       await row.locator('[data-price="model"]').fill(' gpt-5.1-codex ');
-      await page.locator('#settings-save').click();
+      await save(page, page);
       assert.match(await page.locator('#settings-status').textContent(), /重复/);
       await row.locator('[data-price="model"]').fill('new-model');
       await row.locator('[data-price="input"]').fill('-1');
-      await page.locator('#settings-save').click();
+      await save(page, page);
       assert.equal(server.counters.configWrites, 0);
-      page.once('dialog', (d) => d.accept());
-      await page.locator('#settings-revert').click();
+      await revert(page, page);
       await page.locator('#settings-status').filter({ hasText: '已重新加载' }).waitFor();
       assert.equal(await page.locator('.price-row').count(), 1);
       assert.equal(await page.locator('#setting-max-body-bytes').inputValue(), '1');
@@ -168,8 +208,7 @@ async function main() {
       assert.equal(await page.locator('#setting-stats-retention-days').inputValue(), '10');
       assert.ok(!(await page.locator('#settings-status').textContent()).includes('保存成功'));
       await page.screenshot({ path: path.join(OUT, 'save-read-failure.png'), fullPage: true });
-      page.once('dialog', (d) => d.accept());
-      await page.locator('#settings-revert').click();
+      await revert(page, page);
       await page.locator('#settings-status').filter({ hasText: '重新加载失败' }).waitFor();
       assert.equal(await page.locator('#setting-stats-retention-days').inputValue(), '10');
     });
@@ -223,6 +262,365 @@ async function main() {
       assert.equal(server.counters.configWrites, 0);
     });
 
+    await run('Async confirmation modal: cancel, Escape, focus restoration, duplicate clicks, and clean vs dirty revert', async ({ server, page }) => {
+      await page.goto(server.resourceURL); await connect(page);
+      const dialog = page.locator('#confirmation-dialog');
+      const title = page.locator('#confirmation-title');
+      const desc = page.locator('#confirmation-desc');
+      const confirmBtn = page.locator('#confirmation-confirm');
+      const cancelBtn = page.locator('#confirmation-cancel');
+      const saveBtn = page.locator('#settings-save');
+      const revertBtn = page.locator('#settings-revert');
+
+      // 1. Accessibility attributes
+      assert.equal(await dialog.getAttribute('aria-labelledby'), 'confirmation-title');
+      assert.equal(await dialog.getAttribute('aria-describedby'), 'confirmation-desc');
+      assert.equal(await dialog.evaluate((el) => el.open), false);
+
+      // 2. Clean revert: not dirty -> no modal opened, reloads directly
+      await revertBtn.click();
+      assert.equal(await dialog.evaluate((el) => el.open), false);
+      await page.locator('#settings-status').filter({ hasText: '已重新加载' }).waitFor();
+
+      // 3. Make dirty
+      await page.locator('#setting-capture-bodies').check();
+      assert.match(await page.locator('#settings-status').textContent(), /未保存的草稿/);
+
+      // 4. Cancel save via cancel button
+      await saveBtn.click();
+      await dialog.waitFor({ state: 'visible' });
+      assert.equal(await title.textContent(), '确认保存设置');
+      assert.match(await desc.textContent(), /提示词.*永久删除.*价格/);
+      assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.id), 'confirmation-cancel');
+      await cancelBtn.click();
+      await dialog.waitFor({ state: 'hidden' });
+      assert.equal(server.counters.validations, 0);
+      assert.equal(server.counters.configWrites, 0);
+      assert.equal(await page.locator('#setting-capture-bodies').isChecked(), true);
+      assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.id), 'settings-save');
+
+      // 5. Cancel save via Escape key
+      await saveBtn.click();
+      await dialog.waitFor({ state: 'visible' });
+      await page.keyboard.press('Escape');
+      await dialog.waitFor({ state: 'hidden' });
+      assert.equal(server.counters.validations, 0);
+      assert.equal(server.counters.configWrites, 0);
+      assert.equal(await page.locator('#setting-capture-bodies').isChecked(), true);
+      assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.id), 'settings-save');
+
+      // 6. Duplicate clicks do not open multiple modals
+      await saveBtn.click();
+      await dialog.waitFor({ state: 'visible' });
+      await page.evaluate(() => {
+        document.getElementById('settings-save').click();
+        document.getElementById('settings-revert').click();
+      });
+      assert.equal(await page.locator('#confirmation-dialog').count(), 1);
+      assert.equal(await dialog.evaluate((el) => el.open), true);
+      await cancelBtn.click();
+      await dialog.waitFor({ state: 'hidden' });
+
+      // Backdrop cancellation follows the same no-write path.
+      await saveBtn.click();
+      await dialog.waitFor({ state: 'visible' });
+      await page.mouse.click(5, 5);
+      await dialog.waitFor({ state: 'hidden' });
+      assert.equal(server.counters.validations, 0);
+      assert.equal(server.counters.configWrites, 0);
+      assert.equal(await page.locator('#setting-capture-bodies').isChecked(), true);
+
+      // 7. Dirty revert: shows modal, cancel keeps draft
+      await revertBtn.click();
+      await dialog.waitFor({ state: 'visible' });
+      assert.equal(await title.textContent(), '放弃未保存草稿');
+      assert.match(await desc.textContent(), /放弃未保存草稿/);
+      assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.id), 'confirmation-cancel');
+      await cancelBtn.click();
+      await dialog.waitFor({ state: 'hidden' });
+      assert.equal(await page.locator('#setting-capture-bodies').isChecked(), true);
+      assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.id), 'settings-revert');
+
+      // 8. Dirty revert confirm via Space key on confirm button
+      await revertBtn.click();
+      await dialog.waitFor({ state: 'visible' });
+      await confirmBtn.focus();
+      await page.keyboard.press('Space');
+      await dialog.waitFor({ state: 'hidden' });
+      await page.locator('#settings-status').filter({ hasText: '已重新加载' }).waitFor();
+      assert.equal(await page.locator('#setting-capture-bodies').isChecked(), false);
+    });
+
+    // Saving reconfigures the backend; an earlier page response must never win.
+    await run('Saving settings cancels pending page and resets derived refresh to page one', async ({ server, page }) => {
+      await page.goto(server.resourceURL); await connect(page);
+      const entered = deferred(), release = deferred(), finished = deferred();
+      await page.route('**/requests**', async (route) => {
+        if (new URL(route.request().url()).searchParams.get('offset') !== '50') return route.continue();
+        entered.resolve(); await release.promise;
+        try { await route.fulfill({ json: { items: [{ model: 'STALE-BEFORE-SAVE' }], offset: 50, limit: 50, has_more: false } }); }
+        catch (_) { /* client aborted */ }
+        finished.resolve();
+      });
+      await page.locator('#requests-next').click(); await entered.promise;
+      await page.locator('#setting-capture-bodies').check();
+      await save(page); await saved(page); await ready(page);
+      release.resolve(); await finished.promise;
+      assert.equal(await page.locator('#requests-body').getByText('STALE-BEFORE-SAVE').count(), 0);
+      assert.equal(await page.locator('#requests-page').textContent(), '第 1 页 · 本页 50 条');
+      assert.equal(server.counters.configWrites, 1);
+    });
+
+    await run('Prices save: visibly updates historical request row cost AND summary cost dynamically in real browser', async ({ server, page }) => {
+      await page.goto(server.resourceURL); await connect(page);
+
+      // A previously retained complete request acquires a price after settings save.
+      const initialClaudeRow = page.locator('#requests-body tr:has-text("claude-opus-4-1")').first();
+      assert.ok(await initialClaudeRow.isVisible());
+      const initialClaudeCost = await initialClaudeRow.locator('td').nth(7).textContent();
+      assert.equal(initialClaudeCost, '未定价');
+
+      // Verify initial summary total cost
+      const initialTotalCost = await page.locator('[data-metric="cost"] .metric-value').textContent();
+
+      // Go to settings: add price configuration for claude-opus-4-1
+      await page.locator('#price-add').click();
+      const row = page.locator('.price-row').last();
+      await row.locator('[data-price="model"]').fill('claude-opus-4-1');
+      await row.locator('[data-price="input"]').fill('3.0');
+      await row.locator('[data-price="output"]').fill('15.0');
+      await row.locator('[data-price="cache-read"]').fill('0.75');
+      await row.locator('[data-price="cache-creation"]').fill('3.0');
+
+      // Save settings with confirmation modal
+      await save(page, page);
+      await saved(page);
+
+      // After save succeeds, refreshAll is invoked by UI.
+      // Assert historical row cost dynamically displays formatted cost ($...)
+      await page.waitForFunction(() => {
+        const rows = Array.from(document.querySelectorAll('#requests-body tr'));
+        const r = rows.find((el) => el.textContent.includes('claude-opus-4-1'));
+        if (!r) return false;
+        const c = r.querySelectorAll('td')[7];
+        return c && c.textContent.includes('$');
+      });
+      const updatedClaudeCost = await page.locator('#requests-body tr:has-text("claude-opus-4-1")').first().locator('td').nth(7).textContent();
+      assert.match(updatedClaudeCost, /\$/);
+
+      // Assert summary total cost has updated dynamically
+      await page.waitForFunction((prev) => {
+        const el = document.querySelector('[data-metric="cost"] .metric-value');
+        return el && el.textContent !== prev;
+      }, initialTotalCost);
+
+      // Assert groups table row for claude-opus-4-1 also shows priced cost ($)
+      await page.waitForFunction(() => {
+        const rows = Array.from(document.querySelectorAll('#groups-body tr'));
+        const r = rows.find((el) => el.textContent.includes('claude-opus-4-1'));
+        if (!r) return false;
+        const c = r.querySelectorAll('td')[8];
+        return c && c.textContent.includes('$');
+      });
+    });
+
+    await run('Async confirmation modal: Tab focus trap, auth failure closing, and stale confirm clicked after reconnect zero writes', async ({ server, page }) => {
+      await page.goto(server.resourceURL); await connect(page);
+      const dialog = page.locator('#confirmation-dialog');
+      const cancelBtn = page.locator('#confirmation-cancel');
+      const confirmBtn = page.locator('#confirmation-confirm');
+      const saveBtn = page.locator('#settings-save');
+
+      // 1. Tab focus trap inside open modal
+      await page.locator('#setting-capture-bodies').check();
+      await saveBtn.click();
+      await dialog.waitFor({ state: 'visible' });
+
+      // Initial focus on cancel button
+      assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.id), 'confirmation-cancel');
+
+      // Tab moves to confirm button
+      await page.keyboard.press('Tab');
+      assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.id), 'confirmation-confirm');
+
+      // Shift+Tab moves back to cancel button
+      await page.keyboard.press('Shift+Tab');
+      assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.id), 'confirmation-cancel');
+
+      // Close modal
+      await cancelBtn.click();
+      await dialog.waitFor({ state: 'hidden' });
+      assert.equal(server.counters.validations, 0);
+      assert.equal(server.counters.configWrites, 0);
+
+      // 2. Auth failure closing modal
+      await saveBtn.click();
+      await dialog.waitFor({ state: 'visible' });
+
+      // Route 403 on management endpoints to simulate auth failure
+      await page.route('**' + mock.MANAGEMENT_BASE + '/settings**', (route) => {
+        return route.fulfill({ status: 403, json: { error: 'invalid key' } });
+      });
+
+      // An in-flight refresh failure invalidates the modal, not just reconnect.
+      await page.evaluate(() => {
+        document.getElementById('refresh').click();
+      });
+      await dialog.waitFor({ state: 'hidden' });
+      assert.equal(await dialog.evaluate((el) => el.open), false);
+      await page.locator('#conn-status').filter({ hasText: '管理密钥' }).waitFor();
+      assert.equal(server.counters.validations, 0);
+      assert.equal(server.counters.configWrites, 0);
+
+      // 3. Stale confirm clicked after reconnect causes zero writes
+      await page.unroute('**' + mock.MANAGEMENT_BASE + '/settings**');
+      await connect(page);
+      await page.locator('#setting-capture-bodies').check();
+      await saveBtn.click();
+      await dialog.waitFor({ state: 'visible' });
+
+      // Reconnect happens while modal is open
+      await page.evaluate(() => document.getElementById('connect').click());
+      await ready(page);
+      await dialog.waitFor({ state: 'hidden' });
+
+      // Simulate stale click on confirm button
+      await page.evaluate(() => {
+        document.getElementById('confirmation-confirm').click();
+      });
+
+      // Zero writes and zero validations must reach the server for the new connection
+      assert.equal(server.counters.validations, 0);
+      assert.equal(server.counters.configWrites, 0);
+      assert.equal(await page.locator('#setting-capture-bodies').isChecked(), false);
+    });
+
+    await run('Themed accessible checkbox: computed checked/disabled/focus/highcontrast styles and modal screenshots across themes', async ({ server, page }) => {
+      await page.goto(server.resourceURL); await connect(page);
+      const checkbox = page.locator('#setting-capture-bodies');
+      const span = page.locator('label:has(#setting-capture-bodies) span');
+
+      // 1. Appearance none
+      const cs = await checkbox.evaluate((el) => {
+        const s = window.getComputedStyle(el);
+        return {
+          appearance: s.appearance || s.webkitAppearance,
+          display: s.display
+        };
+      });
+      assert.equal(cs.appearance, 'none');
+      assert.equal(cs.display, 'grid');
+
+      // 2. Toggle via label span click and computed checked style
+      assert.equal(await checkbox.isChecked(), false);
+      await span.click();
+      assert.equal(await checkbox.isChecked(), true);
+
+      const checkedStyle = await checkbox.evaluate((el) => {
+        const s = window.getComputedStyle(el);
+        const theme = window.getComputedStyle(document.documentElement);
+        const probe = document.createElement('span');
+        probe.style.color = theme.getPropertyValue('--primary-color');
+        document.body.appendChild(probe);
+        const expected = getComputedStyle(probe).color;
+        probe.remove();
+        return {
+          bg: s.backgroundColor,
+          border: s.borderColor,
+          expected,
+          indicator: getComputedStyle(el, '::before').transform
+        };
+      });
+      assert.equal(checkedStyle.bg, checkedStyle.expected);
+      assert.equal(checkedStyle.border, checkedStyle.expected);
+      assert.notEqual(checkedStyle.indicator, 'matrix(0, 0, 0, 0, 0, 0)');
+
+      // Toggle back
+      await span.click();
+      assert.equal(await checkbox.isChecked(), false);
+
+      // 3. Toggle via Space key when focused
+      await checkbox.focus();
+      await page.keyboard.press('Space');
+      assert.equal(await checkbox.isChecked(), true);
+
+      // 4. Focus / focus-visible style
+      const focusStyle = await checkbox.evaluate((el) => {
+        const s = window.getComputedStyle(el);
+        return {
+          outlineStyle: s.outlineStyle,
+          outlineWidth: s.outlineWidth
+        };
+      });
+      assert.notEqual(focusStyle.outlineStyle, 'none');
+      assert.equal(focusStyle.outlineWidth, '2px');
+
+      await page.keyboard.press('Space');
+      assert.equal(await checkbox.isChecked(), false);
+
+      // 5. Disabled style: disconnect
+      await page.evaluate(() => {
+        document.getElementById('mgmt-key').value = '';
+        document.getElementById('connect').click();
+      });
+      assert.equal(await checkbox.isDisabled(), true);
+      const disabledStyle = await checkbox.evaluate((el) => {
+        const s = window.getComputedStyle(el);
+        return { opacity: s.opacity, cursor: s.cursor };
+      });
+      assert.equal(disabledStyle.opacity, '0.55');
+      assert.equal(disabledStyle.cursor, 'not-allowed');
+
+      // Disabled checkbox ignores click and Space
+      await span.click({ force: true }).catch(() => {});
+      assert.equal(await checkbox.isChecked(), false);
+      await checkbox.focus().catch(() => {});
+      await page.keyboard.press('Space').catch(() => {});
+      assert.equal(await checkbox.isChecked(), false);
+
+      // 6. High contrast / forced colors stylesheet rule verification
+      const hasForcedColorRules = await page.evaluate(() => {
+        let count = 0;
+        for (const sheet of document.styleSheets) {
+          try {
+            for (const rule of sheet.cssRules) {
+              if (rule.conditionText && rule.conditionText.includes('forced-colors')) count++;
+            }
+          } catch (_) {}
+        }
+        return count > 0;
+      });
+      assert.equal(hasForcedColorRules, true, 'CSS 必须包含 @media (forced-colors: active) 无障碍高对比度规则');
+      await page.emulateMedia({ forcedColors: 'active' });
+      assert.equal(await checkbox.evaluate((el) => getComputedStyle(el).forcedColorAdjust), 'none');
+      await page.emulateMedia({ forcedColors: 'none' });
+
+      // 7. Standalone page AND modal screenshots across 3 themes at 1280px and 390px
+      await connect(page);
+      for (const width of [1280, 390]) {
+        await page.setViewportSize({ width, height: 900 });
+        for (const theme of ['', 'white', 'dark']) {
+          await page.evaluate((t) => {
+            if (t) document.documentElement.setAttribute('data-theme', t);
+            else document.documentElement.removeAttribute('data-theme');
+          }, theme);
+          const tName = theme || 'light';
+          // Page screenshot
+          await page.screenshot({ path: path.join(OUT, 'standalone-settings-' + tName + '-' + width + '.png'), fullPage: true });
+
+          // Modal screenshot
+          await page.locator('#setting-capture-bodies').check();
+          await page.locator('#settings-save').click();
+          await page.locator('#confirmation-dialog').waitFor({ state: 'visible' });
+          await page.screenshot({ path: path.join(OUT, 'standalone-modal-' + tName + '-' + width + '.png') });
+          await page.locator('#confirmation-cancel').click();
+          await page.locator('#confirmation-dialog').waitFor({ state: 'hidden' });
+          await revert(page);
+          await page.waitForFunction(() => !document.getElementById('setting-capture-bodies').checked);
+        }
+      }
+    });
+
     await run('All three themes at wide/390px iframe: host overlay never blocks connection actions/status', async ({ server, page }) => {
       await page.goto(server.embedURL);
       const frame = page.frame({ url: (u) => u.pathname === mock.RESOURCE_BASE + '/ui' });
@@ -257,6 +655,25 @@ async function main() {
             window.scrollTo(0, card.offsetTop - 140);
           });
           await page.screenshot({ path: path.join(OUT, 'settings-' + (theme || 'light') + '-' + width + '.png') });
+
+          // Iframe modal screenshot for each theme and width
+          await frame.locator('#setting-capture-bodies').check();
+          await frame.locator('#settings-save').click();
+          await frame.locator('#confirmation-dialog').waitFor({ state: 'visible' });
+          const hostOverlay = await page.locator('.host-overlay').boundingBox();
+          const modal = await frame.locator('#confirmation-dialog').boundingBox();
+          assert.ok(modal.y >= 0 && modal.y + modal.height <= 900, 'modal fits visible host viewport');
+          for (const id of ['confirmation-title', 'confirmation-desc', 'confirmation-cancel', 'confirmation-confirm']) {
+            const box = await frame.locator('#' + id).boundingBox();
+            assert.equal(box.x < hostOverlay.x + hostOverlay.width && box.x + box.width > hostOverlay.x &&
+              box.y < hostOverlay.y + hostOverlay.height && box.y + box.height > hostOverlay.y, false, id + ' overlaps host overlay');
+            assert.equal(await page.evaluate((b) => document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2).tagName, box), 'IFRAME');
+          }
+          await page.screenshot({ path: path.join(OUT, 'iframe-modal-' + (theme || 'light') + '-' + width + '.png') });
+          await frame.locator('#confirmation-cancel').click();
+          await frame.locator('#confirmation-dialog').waitFor({ state: 'hidden' });
+          await revert(frame);
+          await frame.waitForFunction(() => !document.getElementById('setting-capture-bodies').checked);
         }
       }
       await frame.locator('#setting-capture-bodies').check();
@@ -313,4 +730,5 @@ async function main() {
   console.log(`${results.filter((r) => r.ok).length}/${results.length} passed`);
   if (results.some((r) => !r.ok)) process.exitCode = 1;
 }
+
 main().catch((e) => { console.error(e); process.exitCode = 1; });

@@ -352,6 +352,43 @@ main {
   order: -1;
   flex: none;
   margin: 0;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border-hover);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  display: grid;
+  place-content: center;
+  cursor: pointer;
+}
+
+.setting-capture input::before {
+  content: '';
+  width: 6px;
+  height: 11px;
+  border: solid var(--primary-contrast);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) scale(0);
+}
+
+.setting-capture input:checked {
+  background: var(--primary-color);
+  border-color: var(--primary-color);
+}
+
+.setting-capture input:checked::before { transform: rotate(45deg); }
+.setting-capture input:disabled { opacity: 0.55; cursor: not-allowed; }
+button:focus-visible, .setting-capture input:focus-visible {
+  outline: 2px solid var(--text-primary);
+  outline-offset: 3px;
+}
+
+@media (forced-colors: active) {
+  .setting-capture input { forced-color-adjust: none; border-color: ButtonText; background: Canvas; }
+  .setting-capture input:checked { border-color: Highlight; background: Highlight; }
+  .setting-capture input::before { border-color: HighlightText; }
+  .setting-capture input:disabled { border-color: GrayText; }
 }
 
 .settings input:not([type='checkbox']), .settings select {
@@ -683,8 +720,14 @@ td.num.warn {
 .table-footer {
   display: flex;
   justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
   padding-top: 12px;
 }
+
+dialog.dialog.confirmation-dialog { width: min(480px, 92vw); }
+#confirmation-desc { white-space: pre-line; overflow-wrap: anywhere; }
 
 /* ---------- 设置 ---------- */
 

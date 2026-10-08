@@ -139,9 +139,9 @@
           </table>
         </div>
         <div class="table-footer">
-          <button id="load-more" class="btn btn-secondary" type="button" hidden data-testid="load-more">
-            加载更多
-          </button>
+          <button id="requests-prev" class="btn btn-secondary" type="button" disabled>上一页</button>
+          <span id="requests-page" role="status" aria-live="polite">第 1 页 · 本页 0 条</span>
+          <button id="requests-next" class="btn btn-secondary" type="button" disabled>下一页</button>
         </div>
       </section>
 
@@ -153,7 +153,7 @@
           <p class="muted">连接后显示。</p>
         </div>
         <p class="settings-note">请求体捕获是显式选择：可能将提示词、代码等敏感内容写入磁盘。缩短保留时间会在清理后永久删除旧数据，无法恢复。只有点击保存才会应用。</p>
-        <p class="settings-note">模型价格仅用于新请求的价格快照，不会重新定价历史请求。压缩尝试间隔默认至少 15 分钟，仅可回收空间达到阈值且占比 ≥25% 时缩小数据库；需要临时磁盘空间，失败保留原文件并重试，不是磁盘擦除。</p>
+        <p class="settings-note">历史请求与统计在查询时按当前生效的精确模型价格计算；保存价格后会刷新历史成本。压缩尝试间隔默认至少 15 分钟，仅可回收空间达到阈值且占比 ≥25% 时缩小数据库；需要临时磁盘空间，失败保留原文件并重试，不是磁盘擦除。</p>
         <div class="settings-actions">
           <button id="settings-save" type="button" class="btn btn-primary" disabled>保存设置</button>
           <button id="settings-revert" type="button" class="btn btn-secondary" disabled>重新加载 / 放弃草稿</button>
@@ -180,6 +180,16 @@
       </div>
     </dialog>
 
+    <dialog id="confirmation-dialog" class="dialog confirmation-dialog" aria-labelledby="confirmation-title" aria-describedby="confirmation-desc">
+      <div class="dialog-head"><h3 id="confirmation-title">确认操作</h3></div>
+      <div class="dialog-confirm">
+        <p id="confirmation-desc"></p>
+        <div class="settings-actions">
+          <button id="confirmation-cancel" class="btn btn-secondary" type="button" autofocus>取消</button>
+          <button id="confirmation-confirm" class="btn btn-primary" type="button">确认</button>
+        </div>
+      </div>
+    </dialog>
     <script src="ui.js"></script>
   </body>
 </html>
