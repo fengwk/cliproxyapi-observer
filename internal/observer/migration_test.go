@@ -936,9 +936,9 @@ func TestMigration_ReopenAndReprice(t *testing.T) {
 // TestMigration_RetentionCleanupAndCompaction tests requirement 8:
 // Migrated counters persist across retention cleanup of requests and auto-compaction.
 func TestMigration_RetentionCleanupAndCompaction(t *testing.T) {
-	targetTime := targetTestTime()
+	targetTime := time.Now().UTC()
 	targetMinute := statsMinute(targetTime)
-	clk := &clock{t: targetTime}
+	clk := &clock{t: targetTime.Add(time.Second)}
 
 	cfg := compactConfig(t)
 	cfg.StatsRetentionDays = 365
@@ -977,6 +977,27 @@ func TestMigration_RetentionCleanupAndCompaction(t *testing.T) {
 	defer s.Close()
 	s.setNow(clk.now)
 
+	if reqs := allRequests(t, s); len(reqs) != 1 {
+		t.Fatalf("expected retained request before cleanup, got %d", len(reqs))
+	}
+	// Force enough reclaimable pages for an actual file replacement, not just
+	// a below-threshold call to maybeCompact.
+	padding := []byte("migration-test-padding")
+	if err := s.db.Update(func(tx *bolt.Tx) error {
+		bucket, err := tx.CreateBucket(padding)
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte("payload"), bytes.Repeat([]byte("x"), 8<<20))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Update(func(tx *bolt.Tx) error { return tx.DeleteBucket(padding) }); err != nil {
+		t.Fatal(err)
+	}
+	beforeSize := fileSize(t, cfg.DataPath)
+	beforeCompactions := s.Status().Compactions
+
 	// Advance clock past request retention (1 min) but within stats retention (365 days)
 	clk.advance(10 * time.Minute)
 
@@ -992,6 +1013,9 @@ func TestMigration_RetentionCleanupAndCompaction(t *testing.T) {
 
 	// Trigger compaction
 	s.maybeCompact(clk.now())
+	if s.Status().Compactions != beforeCompactions+1 || fileSize(t, cfg.DataPath) >= beforeSize {
+		t.Fatalf("migration fixture was not physically compacted: %+v", s.Status())
+	}
 
 	// Verify migrated counters are intact after cleanup and compaction
 	sumAfter, err := s.Summary(Query{From: targetTime.Add(-time.Minute), To: targetTime.Add(time.Minute)})
