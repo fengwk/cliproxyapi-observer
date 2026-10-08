@@ -72,6 +72,7 @@ type configYAML struct {
 	CompactInterval     string           `yaml:"compact-interval"`
 	CompactMinBytes     *int64           `yaml:"compact-min-bytes"`
 	Prices              map[string]Price `yaml:"prices"`
+	PriceRules          []PriceRule      `yaml:"price-rules"`
 }
 
 func defaultConfig() Config {
@@ -166,6 +167,7 @@ func ParseConfig(raw []byte) (Config, error) {
 		if in.Prices != nil {
 			cfg.Prices = in.Prices
 		}
+		cfg.PriceRules = in.PriceRules
 	}
 	return normalizeConfig(cfg)
 }
@@ -256,6 +258,11 @@ func normalizeConfig(cfg Config) (Config, error) {
 		prices[model] = price
 	}
 	cfg.Prices = prices
+	rules, err := NormalizePriceRules(cfg.PriceRules)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.PriceRules = rules
 	return cfg, nil
 }
 

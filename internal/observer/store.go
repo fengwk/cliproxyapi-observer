@@ -29,7 +29,7 @@ var (
 	bucketTraceBody     = []byte("trace_body")
 	bucketTraceBodyRefs = []byte("trace_body_refs")
 	allBuckets          = [][]byte{
-		bucketRequests, bucketStats, bucketBodies, bucketBodyMeta,
+		bucketRequests, bucketStats, bucketKeyStats, bucketIdentity, bucketBodies, bucketBodyMeta,
 		bucketBodyIndex, bucketUsageTrace, bucketTraceBody, bucketTraceBodyRefs,
 	}
 )
@@ -61,8 +61,9 @@ type pendingBody struct {
 // goroutine owns every mutation; readers use short bbolt view transactions
 // guarded against concurrent Close.
 type Store struct {
-	cfg    Config
-	prices map[string]Price
+	cfg             Config
+	prices          map[string]Price
+	clientKeySecret [32]byte
 
 	db                           *bolt.DB
 	primaryPath                  string
@@ -175,7 +176,15 @@ func openStore(config Config, cleanupPeriod time.Duration) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.initClientKeySecret(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := s.migrateStats(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := s.migrateKeyStats(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -273,6 +282,12 @@ func (s *Store) SubmitUsage(record pluginapi.UsageRecord) bool {
 		return false
 	}
 	req := NormalizeUsage(record)
+	req.ClientKeyID = s.clientKeyID(record.APIKey)
+	// AuthIndex is a host-derived, nonsecret credential hash. Never copy AuthID
+	// or Source: third-party providers may put credential material in them.
+	if validHexID(record.AuthIndex, 16) {
+		req.AuthIndex = record.AuthIndex
+	}
 
 	s.enqueueMu.RLock()
 	defer s.enqueueMu.RUnlock()
@@ -431,6 +446,9 @@ func (s *Store) Status() Status {
 // Requests returns a newest-first offset page. Provider/model filters narrow
 // the scanned range without any exact total scan.
 func (s *Store) Requests(query Query) (RequestPage, error) {
+	if !ValidClientKeyFilter(query.ClientKeyID) || !ValidAuthFilter(query.AuthIndex) {
+		return RequestPage{}, ErrInvalidQuery
+	}
 	if query.Offset < 0 || query.Offset > math.MaxInt32 {
 		return RequestPage{}, ErrInvalidQuery
 	}
@@ -476,7 +494,7 @@ func (s *Store) Requests(query Query) (RequestPage, error) {
 		}
 		c := rb.Cursor()
 		key, value := seekReverse(c, to)
-		filtered := query.Provider != "" || query.Model != ""
+		filtered := query.Provider != "" || query.Model != "" || query.ClientKeyID != "" || query.AuthIndex != ""
 		skipped := 0
 		for ; key != nil; key, value = c.Prev() {
 			ts, ok := requestKeyTime(key)
@@ -500,7 +518,7 @@ func (s *Store) Requests(query Query) (RequestPage, error) {
 					if err := json.Unmarshal(value, &r); err != nil {
 						continue
 					}
-					r.CostUSD = RequestCost(r, s.prices)
+					r.CostUSD = s.requestCost(r)
 					page.Items = append(page.Items, r)
 					continue
 				}
@@ -520,7 +538,7 @@ func (s *Store) Requests(query Query) (RequestPage, error) {
 				continue
 			}
 			if len(page.Items) < limit {
-				r.CostUSD = RequestCost(r, s.prices)
+				r.CostUSD = s.requestCost(r)
 				page.Items = append(page.Items, r)
 				continue
 			}
@@ -552,6 +570,9 @@ func matchesQuery(r Request, query Query) bool {
 	if query.Model != "" && r.Model != query.Model {
 		return false
 	}
+	if !matchesIdentity(r.ClientKeyID, query.ClientKeyID) || !matchesIdentity(r.AuthIndex, query.AuthIndex) {
+		return false
+	}
 	return true
 }
 
@@ -569,6 +590,9 @@ func (s *Store) attachBodyAvailability(tx *bolt.Tx, items []Request, now time.Ti
 // Summary aggregates the selected minute range from preaggregated stats only,
 // groups by provider/model and downsamples the series to at most 300 points.
 func (s *Store) Summary(query Query) (Summary, error) {
+	if !ValidClientKeyFilter(query.ClientKeyID) || !ValidAuthFilter(query.AuthIndex) {
+		return Summary{}, ErrInvalidQuery
+	}
 	now := s.now()
 	to := query.To
 	if to.IsZero() {
@@ -598,8 +622,43 @@ func (s *Store) Summary(query Query) (Summary, error) {
 	var totals Counters
 	groups := make(map[string]*Group)
 	minutes := make(map[int64]Counters)
+	clientGroups := make(map[string]Counters)
+	authGroups := make(map[string]Counters)
+	aggregate := func(minute int64, provider, model string, counters Counters) {
+		addCounters(&totals, counters)
+		gk := provider + "\x00" + model
+		g := groups[gk]
+		if g == nil {
+			g = &Group{Provider: provider, Model: model}
+			groups[gk] = g
+		}
+		addCounters(&g.Counters, counters)
+		mc := minutes[minute]
+		addCounters(&mc, counters)
+		minutes[minute] = mc
+	}
+	filtered := query.ClientKeyID != "" || query.AuthIndex != "" || len(s.cfg.PriceRules) > 0
 
 	err := s.view(func(tx *bolt.Tx) error {
+		// Both sets are read in one snapshot. Default totals keep the original
+		// global bucket authoritative; selected identities use only key stats.
+		if err := visitKeyStats(tx, query, fromMinute, toMinute, func(minute, input int64, client, auth, provider, model string, counters Counters) {
+			s.priceKeyCounters(&counters, model, input, minute)
+			cc := clientGroups[client]
+			addCounters(&cc, counters)
+			clientGroups[client] = cc
+			ac := authGroups[auth]
+			addCounters(&ac, counters)
+			authGroups[auth] = ac
+			if filtered {
+				aggregate(minute, provider, model, counters)
+			}
+		}); err != nil {
+			return err
+		}
+		if filtered {
+			return nil
+		}
 		sb := tx.Bucket(bucketStats)
 		if sb == nil {
 			return nil
@@ -624,17 +683,7 @@ func (s *Store) Summary(query Query) (Summary, error) {
 				return fmt.Errorf("corrupt stats record")
 			}
 			priceCounters(&counters, model, s.prices)
-			addCounters(&totals, counters)
-			gk := provider + "\x00" + model
-			g := groups[gk]
-			if g == nil {
-				g = &Group{Provider: provider, Model: model}
-				groups[gk] = g
-			}
-			addCounters(&g.Counters, counters)
-			mc := minutes[minute]
-			addCounters(&mc, counters)
-			minutes[minute] = mc
+			aggregate(minute, provider, model, counters)
 		}
 		return nil
 	})
@@ -643,11 +692,13 @@ func (s *Store) Summary(query Query) (Summary, error) {
 	}
 
 	out := Summary{
-		From:   from,
-		To:     to,
-		Totals: totals,
-		Groups: sortedGroups(groups),
-		Series: buildSeries(fromMinute, int((toMinute-fromMinute)/60)+1, minutes),
+		From:        from,
+		To:          to,
+		Totals:      totals,
+		Groups:      sortedGroups(groups),
+		Series:      buildSeries(fromMinute, int((toMinute-fromMinute)/60)+1, minutes),
+		ClientKeys:  sortedKeyGroups(clientGroups),
+		Credentials: sortedKeyGroups(authGroups),
 	}
 	return out, nil
 }
@@ -880,11 +931,21 @@ func (s *Store) cleanupTx(now time.Time) error {
 				}
 			}
 		}
-		if sb := tx.Bucket(bucketStats); sb != nil {
+		for _, name := range [][]byte{bucketStats, bucketKeyStats} {
+			sb := tx.Bucket(name)
+			if sb == nil {
+				continue
+			}
 			cutoffSeconds := now.Add(-time.Duration(s.cfg.StatsRetentionDays) * 24 * time.Hour).Unix()
 			c := sb.Cursor()
 			for key, _ := c.First(); key != nil; key, _ = c.Next() {
-				minute, _, _, ok := parseStatsKey(key)
+				var minute int64
+				var ok bool
+				if bytes.Equal(name, bucketKeyStats) {
+					minute, _, _, _, _, _, ok = parseKeyStatsKey(key)
+				} else {
+					minute, _, _, ok = parseStatsKey(key)
+				}
 				if !ok {
 					if err := c.Delete(); err != nil {
 						return err
@@ -1135,6 +1196,9 @@ func (s *Store) writeBatch(usage []Request, bodies []pendingBody) error {
 			if err := addStats(sb, r); err != nil {
 				return err
 			}
+			if err := addStatsRow(tx.Bucket(bucketKeyStats), keyStatsKey(statsMinute(r.Time), r.InputTokens, r.ClientKeyID, r.AuthIndex, r.Provider, r.Model), r); err != nil {
+				return err
+			}
 			// Persist the execution RequestID -> TraceID association so a body
 			// captured under the (different) interception RequestID can later be
 			// resolved from the usage record alone.
@@ -1304,6 +1368,13 @@ func (s *Store) removeBodyBytesFrom(bodyBytes *int64, size int64) {
 
 func addStats(sb *bolt.Bucket, r Request) error {
 	key := statsKey(statsMinute(r.Time), r.Provider, r.Model)
+	return addStatsRow(sb, key, r)
+}
+
+func addStatsRow(sb *bolt.Bucket, key []byte, r Request) error {
+	if sb == nil {
+		return fmt.Errorf("missing stats bucket")
+	}
 	var counters Counters
 	if value := sb.Get(key); value != nil {
 		decoded, ok := decodeCounters(value)

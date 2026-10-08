@@ -667,3 +667,48 @@ func TestManagementValidatePatch(t *testing.T) {
 		}
 	})
 }
+
+// Identity filtering rejects ambiguous or secret-shaped input.
+func TestManagementIdentityFilters(t *testing.T) {
+	m, _ := newTestManager()
+	m.now = func() time.Time { return managementNow }
+	fingerprint := strings.Repeat("a", 64)
+	query, herr := m.parseQuery(url.Values{"client_key_id": {fingerprint}, "auth_index": {"0123456789abcdef"}}, 24*time.Hour, false, true)
+	if herr != nil || query.ClientKeyID != fingerprint || query.AuthIndex != "0123456789abcdef" {
+		t.Fatal("identity query not forwarded")
+	}
+	for _, values := range []url.Values{
+		{"client_key_id": {"short"}},
+		{"auth_index": {"fake-secret"}},
+		{"client_key_id": {strings.Repeat("A", 64)}},
+	} {
+		if _, herr := m.parseQuery(values, 24*time.Hour, false, true); herr == nil {
+			t.Fatal("accepted invalid identity filter")
+		}
+	}
+	if _, herr := m.parseQuery(url.Values{"client_key_id": {"unknown"}}, 24*time.Hour, true, false); herr != nil {
+		t.Fatal("summary identity filter rejected")
+	}
+}
+
+// A rule list is validated in order and aliases cannot disguise duplicate fields.
+func TestValidatePriceRuleList(t *testing.T) {
+	for _, body := range []string{
+		`{"price-rules":[]}`,
+		`{"price-rules":[{"model":"m","input-tokens-gt":256000,"time-range":"22:00-06:00","price":{"input":2}}]}`,
+		`{"price-rules":[{"model":"m","price":{"input":2}},{"model":"m","price":{"input":1}}]}`,
+	} {
+		if err := validatePatch(nil, []byte(body)); err != nil {
+			t.Fatalf("valid rule rejected %v", err)
+		}
+	}
+	for _, body := range []string{
+		`{"price-rules":null}`, `{"price-rules":{}}`,
+		`{"price-rules":[{"model":"m","input-tokens-gt":-1,"price":{}}]}`,
+		`{"price-rules":[{"model":"m","time-range":"08:00-08:00","price":{}}]}`,
+	} {
+		if validatePatch(nil, []byte(body)) == nil {
+			t.Fatal("invalid rule accepted")
+		}
+	}
+}

@@ -28,9 +28,10 @@ const (
 	pluginID   = "cliproxyapi-observer"
 	pluginName = "Observer"
 
-	clientKey   = "fake-client-key"
-	mgmtKey     = "fake-management-password"
-	upstreamKey = "fake-upstream-key"
+	clientKey    = "fake-client-key"
+	clientKeyTwo = "fake-client-key-two"
+	mgmtKey      = "fake-management-password"
+	upstreamKey  = "fake-upstream-key"
 
 	// modelName is the client-facing alias; upstreamModel is what the upstream
 	// sees. Keeping them different proves full model identity is preserved.
@@ -343,6 +344,7 @@ management:
 access:
   api-keys:
     - %q
+    - %q
 oauth:
   auth-dir: %q
 openai-compatibility:
@@ -362,7 +364,7 @@ plugins:
       db: %q
       flush: "1s"
       capture-bodies: %t%s
-`, port, mgmtKey, clientKey, authDir, compatProviderName, mockURL+"/v1", upstreamKey, upstreamModel, modelName, pluginsDir, pluginID, dbPath, opts.CaptureBodies, retention))
+`, port, mgmtKey, clientKey, clientKeyTwo, authDir, compatProviderName, mockURL+"/v1", upstreamKey, upstreamModel, modelName, pluginsDir, pluginID, dbPath, opts.CaptureBodies, retention))
 }
 
 // rewriteConfig rewrites the host config with new observer plugin options and

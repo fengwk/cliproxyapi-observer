@@ -227,6 +227,7 @@ func (m *Manager) serveSettings() pluginapi.ManagementResponse {
 		CompactIntervalSeconds:  int64(cfg.CompactInterval / time.Second),
 		CompactMinBytes:         cfg.CompactMinBytes,
 		Prices:                  prices,
+		PriceRules:              cfg.PriceRules,
 	})
 }
 
@@ -259,6 +260,7 @@ var allowedValidateKeys = map[string]bool{
 	"compact-interval":       true,
 	"compact-min-bytes":      true,
 	"prices":                 true,
+	"price-rules":            true,
 }
 
 func parseJSONInteger(raw []byte, min, max int64) (int64, error) {
@@ -328,7 +330,8 @@ func validatePatch(rawCopy []byte, body []byte) error {
 			return errInvalidSettingsPatch
 		}
 		rawTrimmed := bytes.TrimSpace(rawVal)
-		if len(rawTrimmed) == 0 || bytes.Equal(rawTrimmed, []byte("null")) || bytes.HasPrefix(rawTrimmed, []byte("[")) {
+		if len(rawTrimmed) == 0 || bytes.Equal(rawTrimmed, []byte("null")) ||
+			key != "price-rules" && bytes.HasPrefix(rawTrimmed, []byte("[")) {
 			return errInvalidSettingsPatch
 		}
 
@@ -387,6 +390,20 @@ func validatePatch(rawCopy []byte, body []byte) error {
 				return errInvalidSettingsPatch
 			}
 			patchMap[key] = val
+
+		case "price-rules":
+			if !bytes.HasPrefix(rawTrimmed, []byte("[")) {
+				return errInvalidSettingsPatch
+			}
+			var rules []observer.PriceRule
+			if err := json.Unmarshal(rawTrimmed, &rules); err != nil {
+				return errInvalidSettingsPatch
+			}
+			rules, err = observer.NormalizePriceRules(rules)
+			if err != nil {
+				return errInvalidSettingsPatch
+			}
+			patchMap[key] = rules
 
 		case "prices":
 			pricesDec := json.NewDecoder(bytes.NewReader(rawTrimmed))
@@ -520,6 +537,7 @@ type settingsResponse struct {
 	CompactIntervalSeconds  int64                     `json:"compact_interval_seconds"`
 	CompactMinBytes         int64                     `json:"compact_min_bytes"`
 	Prices                  map[string]observer.Price `json:"prices"`
+	PriceRules              []observer.PriceRule      `json:"price_rules"`
 }
 
 func (m *Manager) serveResource(route string) pluginapi.ManagementResponse {
@@ -607,6 +625,11 @@ func (m *Manager) parseQuery(values url.Values, maxRange time.Duration, align, w
 		To:       to,
 		Provider: strings.TrimSpace(values.Get("provider")),
 		Model:    strings.TrimSpace(values.Get("model")),
+	}
+	query.ClientKeyID = strings.TrimSpace(values.Get("client_key_id"))
+	query.AuthIndex = strings.TrimSpace(values.Get("auth_index"))
+	if !observer.ValidClientKeyFilter(query.ClientKeyID) || !observer.ValidAuthFilter(query.AuthIndex) {
+		return observer.Query{}, &httpError{status: http.StatusBadRequest, message: "invalid request identity filter"}
 	}
 	if withLimit {
 		if rawCursor := strings.TrimSpace(values.Get("cursor")); rawCursor != "" {

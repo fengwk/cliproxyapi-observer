@@ -28,6 +28,7 @@ type Config struct {
 	CompactInterval     time.Duration
 	CompactMinBytes     int64
 	Prices              map[string]Price
+	PriceRules          []PriceRule
 }
 
 // Price is expressed in USD per million tokens. Unknown accounting is unpriced.
@@ -150,8 +151,11 @@ type Query struct {
 	To       time.Time
 	Provider string
 	Model    string
-	Limit    int
-	Offset   int
+	// Identity filters apply to requests and key-dimensional preaggregated stats.
+	ClientKeyID string
+	AuthIndex   string
+	Limit       int
+	Offset      int
 }
 
 type Counters struct {
@@ -189,6 +193,8 @@ type Request struct {
 	Alias               string                `json:"alias,omitempty"`
 	Executor            string                `json:"executor"`
 	AuthType            string                `json:"auth_type,omitempty"`
+	ClientKeyID         string                `json:"client_key_id,omitempty"`
+	AuthIndex           string                `json:"auth_index,omitempty"`
 	ServiceTier         string                `json:"service_tier,omitempty"`
 	ReasoningEffort     string                `json:"reasoning_effort,omitempty"`
 	Stream              bool                  `json:"stream"`
@@ -230,12 +236,19 @@ type Point struct {
 	Counters
 }
 
+type KeyGroup struct {
+	ID string `json:"id"`
+	Counters
+}
+
 type Summary struct {
-	From   time.Time `json:"from"`
-	To     time.Time `json:"to"`
-	Totals Counters  `json:"totals"`
-	Groups []Group   `json:"groups"`
-	Series []Point   `json:"series"`
+	From        time.Time  `json:"from"`
+	To          time.Time  `json:"to"`
+	Totals      Counters   `json:"totals"`
+	Groups      []Group    `json:"groups"`
+	Series      []Point    `json:"series"`
+	ClientKeys  []KeyGroup `json:"client_keys"`
+	Credentials []KeyGroup `json:"credentials"`
 }
 
 type BodyDetail struct {

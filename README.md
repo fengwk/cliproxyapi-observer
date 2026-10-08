@@ -18,7 +18,10 @@ bbolt 数据库，并通过 CPA 管理 API 与内置中文页面提供查询。�
 - **按页查询**：请求列表按时间戳+序列号倒序，以 `offset`/`limit` 翻页，不查询精确
   总数或总页数；提供商/模型过滤只扫描选定区间。
 - **查询时定价**：按**精确、完整**的模型 ID 配置 USD/百万 token 单价（输入/输出/
-  读缓存/写缓存）。新记录只保存 token 与执行数据，查询时按当前生效价格计算历史成本。
+  读缓存/写缓存），支持有序条件规则、输入 token 阈值与每日 UTC 时间区间。
+  新记录只保存 token 与执行数据，查询时按当前生效价格计算历史成本。
+- **Key 与认证文件维度**：客户端 key 仅保存数据库专属 HMAC 指纹，上游凭据仅保存
+  CPA `auth_index`。可筛选概览、趋势、模型分组、请求及 Key 分组；认证文件显示标签与文件名。
 - **未分类 token**：无法确定语义的用量保留原始计数与权威总量，标记为 `unclassified`
   质量，并把有歧义的 TPS/成本置空，而不是按模型名猜测协议或价格。
 - **本地库**：单文件 bbolt，相对路径按 CPA 工作目录解析（默认
@@ -137,7 +140,8 @@ http://127.0.0.1:8317/v0/resource/plugins/cliproxyapi-observer/ui
 
 页面仅允许同源管理面板 iframe 嵌入，并跟随父级主题；请勿移除 CSP 或允许任意站点嵌入。
 连接时输入 CPA **管理密钥**（仅存内存、只作请求头）。页面提供周期 24h/7d/30d、
-模型/提供商过滤，概览、趋势、分组表、上一页/下一页请求表，以及需二次确认才展开的正文详情。
+模型/提供商/客户端 key/上游凭据或认证文件过滤，概览、趋势、分组表、上一页/下一页请求表，
+以及需二次确认才展开的正文详情。
 连接控件位于内容区的独立卡片，不再占用宿主右上角工具区。
 「采集设置」可编辑正文采集、保留期、容量、压缩参数与模型价格；修改只形成草稿，
 显式保存且通过校验后才写入 CPA 配置。保存会回读配置并确认已生效；
@@ -164,13 +168,13 @@ POST /v0/management/plugins/cliproxyapi-observer/validate
 非空旧 `cursor`、畸形参数或越界参数返回 400。正文缺失、过期或采集关闭时返回 404。
 `settings` 返回 `capture_bodies`、`body_retention_seconds`、
 `request_retention_seconds`、`stats_retention_days`、`max_body_bytes`、
-`max_body_storage_bytes`、`compact_interval_seconds`、`compact_min_bytes`、`prices`；
+`max_body_storage_bytes`、`compact_interval_seconds`、`compact_min_bytes`、`prices`、`price_rules`；
 `validate` 用于验证候选配置 JSON patch（支持白名单 keys），成功返回 `{"valid": true}`，
 超限 256KiB 返回 413，格式错误或与当前配置冲突返回 400；`health` 来自运行状态。
 
 验证请求体是原始 JSON patch 对象，无包装；只接受 `capture-bodies`、`request-retention`、
 `body-retention`、`stats-retention-days`、`max-body-bytes`、`max-body-storage-bytes`、
-`compact-interval`、`compact-min-bytes` 和 `prices`。验证本身不修改配置或数据库。
+`compact-interval`、`compact-min-bytes`、`prices` 和 `price-rules`。验证本身不修改配置或数据库。
 保存时将同一 patch 发送到 CPA 核心的
 `PATCH /v0/management/plugins/cliproxyapi-observer/config`，由核心浅合并、持久化并热重载，
 保留未编辑的 `enabled`、`db`、`flush` 等配置。
@@ -196,6 +200,7 @@ POST /v0/management/plugins/cliproxyapi-observer/validate
 | `compact-interval` | `15m` | 自动压缩周期，范围 `1m..24h`（始终启用，无需开关） |
 | `compact-min-bytes` | `8388608` | 触发自动压缩的最小可回收页面字节数，范围 `64KiB..8GiB` |
 | `prices` | 空 | 精确完整模型 ID 到 USD/百万 token 单价的映射 |
+| `price-rules` | 空列表 | 自上而下、首次命中的条件价格规则，未命中再查旧 `prices` 映射 |
 
 `prices` 每项包含 `input`、`output`、`cache-read`、`cache-creation`。单价必须为有限非负数，
 trim 后的模型 ID 不得重复。价格来自**当前生效配置**，不向上游查询；修改、增加或删除
@@ -203,6 +208,40 @@ trim 后的模型 ID 不得重复。价格来自**当前生效配置**，不向�
 缺少价格或记账质量不完整的请求仍为未定价；旧请求中的金额快照即使存在也不再读取。
 JSON settings 使用 `cache_read`、`cache_creation`；patch 与 YAML 同时兼容下划线和连字符，
 页面保存使用 `cache-read`、`cache-creation`。
+
+### 有序条件定价
+
+`price-rules` 最多 1000 条，每条包含完整 `model`、`price`，以及两个可选条件：
+
+- `input-tokens-gt`：单次请求的**归一化总输入（含缓存读/写）严格大于**该值，
+  取值为 `0..9007199254740991` 的整数；不包含输出 token。
+- `time-range`：请求开始时间落在每日 **UTC+0** 的 `HH:mm-HH:mm` 区间，
+  起点包含、终点不包含；支持跨午夜，例如 `22:00-06:00`。终点可为 `24:00`，
+  起点不能是 `24:00`，两个端点不能相同。UTC 没有夏令时变化。
+
+同条规则的模型和所有条件以 AND 组合；**按列表顺序选第一条匹配规则，并为整个请求
+应用该价格**，不是超出部分才加价。无条件默认价应放在该模型的条件规则之后。
+UTC+8 的窗口需要减去 8 小时再填写；请按供应商公布的实际时间换算，示例不是实时官方报价。
+
+```yaml
+price-rules:
+  - model: "example-model"
+    input-tokens-gt: 512000
+    price: {input: 3, output: 12, cache-read: 0.3, cache-creation: 3}
+  - model: "example-model"
+    input-tokens-gt: 256000
+    price: {input: 2, output: 8, cache-read: 0.2, cache-creation: 2}
+  - model: "example-model"
+    time-range: "22:00-06:00"
+    price: {input: 0.5, output: 2, cache-read: 0.05, cache-creation: 0.5}
+  - model: "example-model"
+    price: {input: 1, output: 4, cache-read: 0.1, cache-creation: 1}
+```
+
+以上示例中，大输入档位优先于夜间规则；希望“大输入且夜间”使用另一价格时，添加一条
+同时具有两个条件的规则并上移到这些规则之前。UI 提供上移、下移和紧凑删除操作；
+保存时将旧映射转换成无条件规则，持久化 `prices: {}` 和有序 `price-rules`。
+settings JSON 的条件键为 `input_tokens_gt` / `time_range`，patch 同时接受下划线和连字符。
 
 ```text
 cost_usd = (uncached_input * input_price + cache_read * cache_read_price
@@ -219,15 +258,37 @@ cost_usd = (uncached_input * input_price + cache_read * cache_read_price
 已过期且无法恢复的部分保持未定价，不猜测成本，也不从短保留期明细重建长期流量总数。
 升级有持久标记，后续重开或查询不再扫描全量请求。
 
+首次启用 Key/阶梯统计时，另在一个原子事务中将旧聚合复制到“未归属”维度，不从
+短保留期请求猜测历史 key。旧聚合没有单次输入长度；若有可能命中的输入阈值规则，
+该部分保持未定价，不擅自套用默认价。仍保留的请求明细可按自身输入长度独立计价。
+新聚合按分钟、输入长度、客户端指纹、上游索引、提供商、模型保存 token 计数，
+所以明细过期后仍支持条件重定价和 Key 筛选；不保存金额或价格快照。
+
 升级会改变统计存储格式。**升级前应停宿主并备份数据库；旧插件不支持新统计格式，
 不可直接用旧版打开升级后的库。** 回滚需恢复升级前的数据库备份。
 
 ## API key 维度与 OpenCode Provider
 
-当前只按分钟/提供商/模型聚合，**不支持按 API key 或上游凭据分组**。插件不保存
-CPA usage 回调中的 `APIKey`、`AuthID`、`AuthIndex` 或 `Source`，`auth_type` 也不是 key 标识。
-下游客户端 key 与上游凭据是不同维度；SDK 的 `Source` 可能包含明文 key 或账号信息，
-不能直接作为安全分组标签。
+下游客户端 key 与上游凭据/认证文件是两个独立维度：
+
+- `client_key_id`：数据库中随机 32 字节 secret 派生的 HMAC-SHA256（64 位小写十六进制）。
+  UI 只展示前 12 位，筛选必须使用完整指纹。CPA 下游 key 没有原生名称。
+  secret 随数据库备份、重开和物理压缩保留；不同数据库的同一 key 指纹不同。
+- `auth_index`：CPA usage 回调提供的非机密 16 位小写十六进制索引。
+  `GET /v8/management/credentials` 暴露当前凭据/认证文件的同一索引、`name` 与 `label`；
+  UI 仅保留索引与展示名称，文件显示“标签（文件名）”，相同标签的不同文件仍可区分。
+  文件或凭据被删除、名称接口不可用时，历史用量保留且退回显示索引。
+  部分 CPA 版本不在此接口列出配置产生的运行时凭据，这些凭据同样按索引展示与筛选。
+
+`summary` 和 `requests` 均接受 `client_key_id` / `auth_index`，两个条件同时填写时取交集，
+空字符串表示全部，`unknown` 表示未归属（包括旧记录）。`summary.client_keys` 和
+`summary.credentials` 分别返回 `{id, ...counters}` 分组，空 `id` 为未归属；所有分组、
+概览和趋势遵循相同筛选。请求日志默认仅保留 24h，7d/30d Key 统计从长期聚合读取。
+缓存**请求**命中率为 `cache_hits / requests`，命中指该请求的原始缓存读 token 大于零，
+不是缓存 token 占比。
+
+Observer 不保存 `APIKey`、`AuthID`、`Source`、认证文件内容或路径，也不下载认证文件。
+CPA 的文件索引基于其凭据身份；更换文件位置或身份可能产生新索引，Observer 不猜测合并。
 
 OpenCode Provider 的凭据绑定执行路径在本地 CPA v8.0.15/v8.0.20 双插件联调中，
 流式与非流式请求均进入 Observer，提供商为 `opencode-go`，模型保留
@@ -265,7 +326,9 @@ Linux/macOS 使用同目录 0600 临时数据库、约 1MiB 写事务与分配�
 
 当前没有整个 `.db` 文件的硬容量上限。正文配额只计算脱敏后的正文载荷，不包含
 请求元数据、分钟聚合、关联索引和 bbolt 页开销；元数据随请求速率与保留时长增长，
-聚合统计随活跃分钟数和提供商/模型组合数增长。保留期与自动压缩能控制常见场景中的
+聚合统计随活跃分钟数、输入长度与 Key/模型组合数增长；输入长度高度分散时，
+条件价格预聚合的行数可能接近请求数，需要按吞吐量适当缩短统计保留期。
+保留期与自动压缩能控制常见场景中的
 长期积累，但不能保证高流量下数据库始终小于某个固定大小。
 
 小磁盘可先采用以下保守配置，合入现有插件配置，不覆盖其他字段。平时关闭正文采集，

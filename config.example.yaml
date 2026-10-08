@@ -45,6 +45,16 @@ plugins:
           output: 15.0
           cache-read: 0.3
           cache-creation: 3.75
+      # Optional ordered first-match rules. These prices/times are illustrative.
+      # Total input includes cached tokens; threshold is strictly >, conditions AND.
+      # Daily time is UTC; start inclusive, end exclusive, overnight supported.
+      # price-rules:
+      #   - model: "example-model"
+      #     input-tokens-gt: 256000
+      #     time-range: "22:00-06:00"
+      #     price: {input: 2, output: 8, cache-read: 0.2, cache-creation: 2}
+      #   - model: "example-model"
+      #     price: {input: 1, output: 4, cache-read: 0.1, cache-creation: 1}
 
 # Native library location (see `make build` and the release archives):
 #   <plugins.dir>/<goos>/<goarch>/cliproxyapi-observer.so
@@ -62,6 +72,9 @@ plugins:
 #   GET /v0/management/plugins/cliproxyapi-observer/health
 #   POST /v0/management/plugins/cliproxyapi-observer/validate
 # Query parameters `from`/`to` are RFC3339 and default to the last 24 hours.
+# Both summary and requests accept client_key_id (full 64-hex fingerprint),
+# auth_index (16-hex upstream credential/file index), or unknown for legacy rows.
+# Current file names/labels come from GET /v8/management/credentials; no file download.
 # Requests use offset=0..2147483647 (default 0) and limit=1..100 (default 50);
 # the response contains items, offset, limit and has_more, not a total count.
 # Captured bodies are only available while `capture-bodies: true` and unexpired.

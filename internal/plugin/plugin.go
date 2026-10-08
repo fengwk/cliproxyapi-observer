@@ -44,6 +44,7 @@ func Metadata() pluginapi.Metadata {
 			{Name: "compact-interval", Type: pluginapi.ConfigFieldTypeString, Description: "Automatic database compaction interval, e.g. 15m (default 15m)."},
 			{Name: "compact-min-bytes", Type: pluginapi.ConfigFieldTypeInteger, Description: "Minimum reclaimable free and pending page bytes before compacting (default 8388608)."},
 			{Name: "prices", Type: pluginapi.ConfigFieldTypeObject, Description: "Exact full model id to USD-per-million-token price map (input, output, cache-read, cache-creation)."},
+			{Name: "price-rules", Type: pluginapi.ConfigFieldTypeArray, Description: "Ordered first-match model prices with input-tokens-gt and UTC daily time-range conditions."},
 		},
 	}
 }
