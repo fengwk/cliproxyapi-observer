@@ -132,26 +132,180 @@ function validateSettingsPatch(patch) {
   return require('../ui.js').validateSettingsPatch(patch);
 }
 
-function buildSummary() {
+function computeModelCost(model, uncachedInput, output, cacheRead, cacheCreation, quality, prices) {
+  if (quality !== 'complete') {
+    return null;
+  }
+  if (!prices || !Object.prototype.hasOwnProperty.call(prices, model)) {
+    return null;
+  }
+  const p = prices[model];
+  if (!p || typeof p !== 'object') {
+    return null;
+  }
+  const inputPrice = Number(p.input !== undefined ? p.input : 0);
+  const outputPrice = Number(p.output !== undefined ? p.output : 0);
+  const cacheReadPrice = Number(
+    p.cache_read !== undefined
+      ? p.cache_read
+      : (p['cache-read'] !== undefined ? p['cache-read'] : 0)
+  );
+  const cacheCreationPrice = Number(
+    p.cache_creation !== undefined
+      ? p.cache_creation
+      : (p['cache-creation'] !== undefined ? p['cache-creation'] : 0)
+  );
+
+  const cost =
+    (uncachedInput * inputPrice +
+      cacheRead * cacheReadPrice +
+      cacheCreation * cacheCreationPrice +
+      output * outputPrice) /
+    1000000.0;
+  if (!Number.isFinite(cost)) {
+    return null;
+  }
+  return cost;
+}
+
+function buildSummary(prices) {
+  const effectivePrices = prices || {};
+
+  const groupTemplates = [
+    {
+      provider: 'openai',
+      model: 'gpt-5.1-codex',
+      requests: 640,
+      failed_requests: 4,
+      input_tokens: 2400000,
+      uncached_input_tokens: 1200000,
+      output_tokens: 800000,
+      cache_read_tokens: 1200000,
+      cache_creation_tokens: 120000,
+      total_tokens: 3320000,
+      quality: 'complete',
+      complete_requests: 640
+    },
+    {
+      provider: 'anthropic',
+      model: 'claude-opus-4-1',
+      requests: 322,
+      failed_requests: 6,
+      input_tokens: 1400000,
+      uncached_input_tokens: 500000,
+      output_tokens: 300000,
+      cache_read_tokens: 900000,
+      cache_creation_tokens: 90000,
+      total_tokens: 1790000,
+      quality: 'complete',
+      complete_requests: 322
+    },
+    {
+      provider: 'unknown-vendor',
+      model: XSS_MODEL,
+      requests: 120,
+      failed_requests: 2,
+      input_tokens: 120000,
+      uncached_input_tokens: 120000,
+      output_tokens: 30000,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+      total_tokens: 150000,
+      quality: 'complete',
+      complete_requests: 120
+    },
+    {
+      provider: 'gemini',
+      model: 'gemini-3-pro',
+      requests: 152,
+      failed_requests: 0,
+      input_tokens: 648000,
+      uncached_input_tokens: 0,
+      output_tokens: 104567,
+      cache_read_tokens: 245678,
+      cache_creation_tokens: 24567,
+      total_tokens: 723451,
+      quality: 'unclassified',
+      complete_requests: 0
+    }
+  ];
+
+  const groups = [];
+  let totalCost = 0;
+  let hasAnyPriced = false;
+  let totalUnpricedRequests = 0;
+
+  for (const t of groupTemplates) {
+    const cost = computeModelCost(
+      t.model,
+      t.uncached_input_tokens,
+      t.output_tokens,
+      t.cache_read_tokens,
+      t.cache_creation_tokens,
+      t.quality,
+      effectivePrices
+    );
+
+    const isPriced = cost !== null;
+    const unpriced = isPriced ? (t.requests - t.complete_requests) : t.requests;
+    totalUnpricedRequests += unpriced;
+
+    if (isPriced) {
+      totalCost += cost;
+      hasAnyPriced = true;
+    }
+
+    const g = {
+      provider: t.provider,
+      model: t.model,
+      requests: t.requests,
+      failed_requests: t.failed_requests,
+      input_tokens: t.input_tokens,
+      output_tokens: t.output_tokens,
+      cache_read_tokens: t.cache_read_tokens,
+      cache_creation_tokens: t.cache_creation_tokens,
+      total_tokens: t.total_tokens,
+      cost_usd: isPriced ? cost : null
+    };
+    if (unpriced > 0) {
+      g.unpriced_requests = unpriced;
+    }
+    groups.push(g);
+  }
+
   const series = [];
   for (let i = 0; i < 48; i += 1) {
     const requests = 20 + Math.round(20 * Math.sin(i / 4) + (i % 5));
     const failed = i % 7 === 0 ? 2 : 0;
+    // Fixture input includes cache reads; cache creation is a separate bucket.
+    const uncachedInput = requests * (300 - 120);
+    const cacheRead = requests * 120;
+    const cacheCreation = requests * 30;
+    const output = requests * 100;
+    const seriesCost = computeModelCost(
+      'gpt-5.1-codex',
+      uncachedInput,
+      output,
+      cacheRead,
+      cacheCreation,
+      'complete',
+      effectivePrices
+    );
     series.push({
       time: new Date(BASE_TIME - (47 - i) * 30 * 60 * 1000).toISOString(),
       requests,
       failed_requests: failed,
       total_tokens: requests * 400,
       input_tokens: requests * 300,
-      output_tokens: requests * 100,
-      cache_read_tokens: requests * 120,
-      cache_creation_tokens: requests * 30,
+      output_tokens: output,
+      cache_read_tokens: cacheRead,
+      cache_creation_tokens: cacheCreation,
       latency_ns: requests * 900000000,
       latency_samples: requests,
       ttft_ns: requests * 250000000,
       ttft_samples: requests,
-      cost_usd: requests * 0.0012,
-      unpriced_requests: 0
+      cost_usd: seriesCost !== null ? seriesCost : null,
+      unpriced_requests: seriesCost !== null ? 0 : requests
     });
   }
 
@@ -172,62 +326,129 @@ function buildSummary() {
       latency_samples: 1234,
       ttft_ns: 1234 * 250000000,
       ttft_samples: 1234,
-      cost_usd: 1.2345,
-      unpriced_requests: 3
+      cost_usd: hasAnyPriced ? totalCost : null,
+      unpriced_requests: totalUnpricedRequests
     },
-    groups: [
-      { provider: 'openai', model: 'gpt-5.1-codex', requests: 640, failed_requests: 4, input_tokens: 2400000, output_tokens: 800000, cache_read_tokens: 1200000, cache_creation_tokens: 120000, total_tokens: 3320000, cost_usd: 0.8123 },
-      { provider: 'anthropic', model: 'claude-opus-4-1', requests: 322, failed_requests: 6, input_tokens: 1400000, output_tokens: 300000, cache_read_tokens: 900000, cache_creation_tokens: 90000, total_tokens: 1790000, cost_usd: 0.4021 },
-      { provider: 'unknown-vendor', model: XSS_MODEL, requests: 120, failed_requests: 2, input_tokens: 120000, output_tokens: 30000, cache_read_tokens: 0, cache_creation_tokens: 0, total_tokens: 150000, cost_usd: 0.0201 },
-      { provider: 'gemini', model: 'gemini-3-pro', requests: 152, failed_requests: 0, input_tokens: 648000, output_tokens: 104567, cache_read_tokens: 245678, cache_creation_tokens: 24567, total_tokens: 723451, cost_usd: 0, unpriced_requests: 152 }
-    ],
+    groups,
     series
   };
 }
 
-function buildRequestBody(index, captureBodies) {
+function buildRequestBody(index, captureBodies, prices) {
   const failed = index % 11 === 0;
+  const model = index === 0 ? XSS_MODEL : index % 3 === 0 ? 'claude-opus-4-1' : 'gpt-5.1-codex';
+  const quality = index % 5 === 0 ? 'unclassified' : 'complete';
+  const uncachedInput = 100 + index;
+  const output = 100 + index;
+  const cacheRead = index * 7;
+  const cacheCreation = index * 2;
+  const cost = computeModelCost(model, uncachedInput, output, cacheRead, cacheCreation, quality, prices);
   return {
     sequence: index + 1,
     request_id: index === 0 ? 'req-body-xss' : 'req-' + index,
     trace_id: 'trace-' + index,
     time: new Date(BASE_TIME - index * 60 * 1000).toISOString(),
     provider: index % 2 === 0 ? 'openai' : 'anthropic',
-    model: index === 0 ? XSS_MODEL : index % 3 === 0 ? 'claude-opus-4-1' : 'gpt-5.1-codex',
+    model,
     alias: index % 4 === 0 ? 'codex-alias' : '',
     executor: 'native',
     stream: index % 2 === 0,
     failed,
     failure_status: failed ? 500 : 0,
     input_tokens: 300 + index,
-    uncached_input_tokens: 100 + index,
-    output_tokens: 100 + index,
+    uncached_input_tokens: uncachedInput,
+    output_tokens: output,
     reasoning_tokens: 10,
-    cache_read_tokens: index * 7,
-    cache_creation_tokens: index * 2,
+    cache_read_tokens: cacheRead,
+    cache_creation_tokens: cacheCreation,
     total_tokens: 410 + index * 2,
-    accounting_quality: index % 5 === 0 ? 'unclassified' : 'complete',
+    accounting_quality: quality,
     latency_ns: (400 + index * 12) * 1000000,
     ttft_ns: (120 + index * 3) * 1000000,
     tps: index % 5 === 0 ? null : 42.5 + index,
     cache_hit: index % 3 === 0,
-    cost_usd: index % 5 === 0 ? null : 0.001 * (index + 1),
+    cost_usd: cost,
     body_available: captureBodies !== false && index === 0
   };
 }
 
-function buildRequestsPage(url, captureBodies) {
-  const cursor = url.searchParams.get('cursor') || '';
-  if (cursor === 'page-2') {
-    return {
-      items: [buildRequestBody(60, captureBodies), buildRequestBody(61, captureBodies)],
-      next_cursor: '',
-      has_more: false
-    };
+const TOTAL_FIXTURE_REQUESTS = 52;
+
+function buildRequestsPage(url, captureBodies, prices, controls) {
+  if (url.searchParams.has('cursor')) {
+    const cursor = url.searchParams.get('cursor');
+    if (cursor !== null && cursor !== '') {
+      const err = new Error('cursor is not supported; use offset and limit');
+      err.statusCode = 400;
+      throw err;
+    }
   }
-  const items = [];
-  for (let i = 0; i < 50; i += 1) items.push(buildRequestBody(i, captureBodies));
-  return { items, next_cursor: 'page-2', has_more: true };
+
+  let offset = 0;
+  if (url.searchParams.has('offset')) {
+    const rawOffset = url.searchParams.get('offset');
+    if (!/^\d+$/.test(rawOffset)) {
+      const err = new Error('invalid offset: must be a nonnegative integer');
+      err.statusCode = 400;
+      throw err;
+    }
+    offset = parseInt(rawOffset, 10);
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 2147483647) {
+      const err = new Error('offset out of range (max 2147483647)');
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+
+  let limit = 50;
+  if (url.searchParams.has('limit')) {
+    const rawLimit = url.searchParams.get('limit');
+    if (!/^\d+$/.test(rawLimit)) {
+      const err = new Error('invalid limit: must be an integer between 1 and 100');
+      err.statusCode = 400;
+      throw err;
+    }
+    limit = parseInt(rawLimit, 10);
+    if (limit < 1 || limit > 100) {
+      const err = new Error('limit out of range: must be between 1 and 100');
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+
+  let allItems;
+  if (controls && Array.isArray(controls.customRequestsItems)) {
+    allItems = controls.customRequestsItems;
+  } else {
+    allItems = [];
+    const count =
+      controls && typeof controls.totalRequestsCount === 'number'
+        ? controls.totalRequestsCount
+        : TOTAL_FIXTURE_REQUESTS;
+    for (let i = 0; i < count; i += 1) {
+      allItems.push(buildRequestBody(i, captureBodies, prices));
+    }
+  }
+
+  const providerFilter = url.searchParams.get('provider') || '';
+  const modelFilter = url.searchParams.get('model') || '';
+  let filtered = allItems;
+  if (providerFilter) {
+    filtered = filtered.filter((it) => it.provider === providerFilter);
+  }
+  if (modelFilter) {
+    filtered = filtered.filter((it) => it.model === modelFilter);
+  }
+
+  const items = filtered.slice(offset, offset + limit);
+  const hasMore = offset + items.length < filtered.length;
+
+  return {
+    items,
+    offset,
+    limit,
+    has_more: hasMore
+  };
 }
 
 function buildBodyDetail(requestId) {
@@ -342,7 +563,11 @@ function createHandlerState(options) {
     simulateReconfigureTemporary503: false,
     reconfigureTemporary503Count: 0,
     simulateEffectiveNeverUpdates: false,
-    simulateConfigReadFail: false
+    simulateConfigReadFail: false,
+    simulateRequests500: false,
+    requestsDelayMs: 0,
+    totalRequestsCount: TOTAL_FIXTURE_REQUESTS,
+    customRequestsItems: null
   };
 
   const counters = {
@@ -353,7 +578,9 @@ function createHandlerState(options) {
     configWrites: 0,
     writeFailures: 0,
     reconfigure503s: 0,
-    settingsReads: 0
+    settingsReads: 0,
+    requestsReads: 0,
+    summaryReads: 0
   };
 
   function reset() {
@@ -363,6 +590,10 @@ function createHandlerState(options) {
     controls.reconfigureTemporary503Count = 0;
     controls.simulateEffectiveNeverUpdates = false;
     controls.simulateConfigReadFail = false;
+    controls.simulateRequests500 = false;
+    controls.requestsDelayMs = 0;
+    controls.totalRequestsCount = TOTAL_FIXTURE_REQUESTS;
+    controls.customRequestsItems = null;
 
     counters.validations = 0;
     counters.validateFailures = 0;
@@ -372,6 +603,8 @@ function createHandlerState(options) {
     counters.writeFailures = 0;
     counters.reconfigure503s = 0;
     counters.settingsReads = 0;
+    counters.requestsReads = 0;
+    counters.summaryReads = 0;
   }
 
   async function handler(req, res) {
@@ -495,10 +728,23 @@ function createHandlerState(options) {
         if (req.method === 'GET') {
           switch (endpoint) {
             case 'summary':
-              return json(res, 200, buildSummary());
+              counters.summaryReads += 1;
+              return json(res, 200, buildSummary(effectiveSettings.prices));
             case 'requests': {
-              const capture = effectiveSettings.capture_bodies;
-              return json(res, 200, buildRequestsPage(url, capture));
+              counters.requestsReads += 1;
+              if (controls.simulateRequests500) {
+                return json(res, 500, { error: 'simulated requests failure' });
+              }
+              if (controls.requestsDelayMs > 0) {
+                await new Promise((r) => setTimeout(r, controls.requestsDelayMs));
+              }
+              try {
+                const capture = effectiveSettings.capture_bodies;
+                const page = buildRequestsPage(url, capture, effectiveSettings.prices, controls);
+                return json(res, 200, page);
+              } catch (err) {
+                return json(res, err.statusCode || 400, { error: err.message });
+              }
             }
             case 'settings': {
               counters.settingsReads += 1;
@@ -590,5 +836,9 @@ module.exports = {
   XSS_PROMPT,
   embedPage,
   configToSettings,
-  validateSettingsPatch
+  validateSettingsPatch,
+  computeModelCost,
+  buildRequestsPage,
+  buildSummary,
+  TOTAL_FIXTURE_REQUESTS
 };

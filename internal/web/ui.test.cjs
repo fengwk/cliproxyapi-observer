@@ -238,6 +238,13 @@ test('formatCost 明确标注未定价与极小金额', () => {
   assert.equal(ui.formatCost(2.5), '$2.5000');
 });
 
+// 历史成本由响应中的查询结果决定，不依赖前端旧价格或请求快照。
+test('历史成本文案使用当前生效价格并采纳重新查询金额', () => {
+  assert.equal(ui.buildOverview({ requests: 1, cost_usd: 1 })[6].sub, '按当前生效价格');
+  assert.equal(ui.buildRequestRows([{ cost_usd: 2 }])[0].cost, '$2.0000');
+  assert.equal(ui.buildRequestRows([{ cost_usd: null }])[0].cost, '未定价');
+});
+
 // Zero is an authoritative subtotal, not a price for unknown requests.
 test('aggregate costs distinguish all-unknown, partial and priced-zero', () => {
   for (const source of [
@@ -530,7 +537,8 @@ test('ui.js 源码不含危险 DOM / 浏览器密钥存储 API', () => {
     'new Function',
     'localStorage',
     'sessionStorage',
-    'document.cookie'
+    'document.cookie',
+    'win.confirm(', 'win.alert(', 'win.prompt('
   ];
   for (const needle of forbidden) {
     assert.equal(source.includes(needle), false, 'ui.js 不应包含 ' + needle);

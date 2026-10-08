@@ -31,6 +31,15 @@ const OUT = process.argv[2] || path.join(process.env.TMPDIR || '/tmp', 'observer
 const CHROMIUM_PATH = process.env.CHROMIUM_PATH || '/usr/bin/chromium';
 
 const results = [];
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((r) => { resolve = r; });
+  return { promise, resolve };
+};
+const ready = (page) => page.waitForFunction(
+  () => document.getElementById('conn-status').textContent.startsWith('已更新'));
+const watched = new WeakSet();
+const browserErrors = [];
 function record(name, ok, detail) {
   results.push({ name, ok, detail: detail || '' });
   const mark = ok ? 'PASS' : 'FAIL';
@@ -56,6 +65,12 @@ async function appFrame(page, origin) {
 }
 
 async function connect(frame, secret) {
+  const page = typeof frame.page === 'function' ? frame.page() : frame;
+  if (!watched.has(page)) {
+    watched.add(page);
+    page.on('dialog', () => { browserErrors.push('Forbidden native dialog'); });
+    page.on('pageerror', (error) => browserErrors.push(error.message));
+  }
   await frame.locator('#mgmt-key').fill(secret);
   await frame.locator('#connect').click();
   await frame.locator('[data-metric="requests"] .metric-value').waitFor({ timeout: 15000 });
@@ -75,18 +90,12 @@ async function reviewCases(browser, server) {
   const bodies = '**' + mock.MANAGEMENT_BASE + '/body**';
   const fresh = async () => {
     const page = await browser.newPage();
+    page.on('dialog', (d) => { throw new Error('Forbidden native browser dialog: ' + d.message()); });
     await page.goto(server.resourceURL);
     await connect(page, mock.SECRET);
     await page.waitForFunction(() => document.getElementById('conn-status').textContent.startsWith('已更新'));
     return page;
   };
-  const deferred = () => {
-    let resolve;
-    const promise = new Promise((r) => { resolve = r; });
-    return { promise, resolve };
-  };
-  const ready = (page) => page.waitForFunction(
-    () => document.getElementById('conn-status').textContent.startsWith('已更新'));
   const bodyOpen = async (page) => {
     await page.locator('[data-request-id="req-body-xss"]').click();
     await page.locator('#body-reveal').click();
@@ -94,7 +103,7 @@ async function reviewCases(browser, server) {
 
   await withStep('Review: cost subtotal and unknown group are explicit', async () => {
     const page = await fresh();
-    assert.match(await page.locator('[data-metric="cost"] .metric-sub').textContent(), /已定价小计；未定价 3 条/);
+    assert.match(await page.locator('[data-metric="cost"] .metric-sub').textContent(), /已定价小计；未定价/);
     assert.match(await page.locator('#groups-body tr').filter({ hasText: 'gemini-3-pro' }).textContent(), /未定价/);
     assert.ok(!(await page.locator('#groups-body tr').filter({ hasText: 'gemini-3-pro' }).textContent()).includes('$0.0000'));
     await page.screenshot({ path: path.join(OUT, 'review-cost-retention.png'), fullPage: true });
@@ -109,9 +118,11 @@ async function reviewCases(browser, server) {
       const url = new URL(route.request().url());
       assert.equal(Date.parse(url.searchParams.get('to')), now);
       assert.equal(Date.parse(url.searchParams.get('from')), now - 86400000);
+      assert.equal(url.searchParams.has('cursor'), false, '不得发出 cursor 参数');
+      assert.equal(url.searchParams.get('offset'), '0', '初始必须请求 offset=0');
       return route.fulfill({ json: { items: [{
         request_id: 'current', model: 'CURRENT-MINUTE', time: new Date(now - 1000).toISOString()
-      }], has_more: false, next_cursor: '' } });
+      }], offset: 0, limit: 50, has_more: false } });
     });
     await page.goto(server.resourceURL);
     await connect(page, mock.SECRET);
@@ -120,48 +131,194 @@ async function reviewCases(browser, server) {
     await page.close();
   });
 
-  await withStep('Review: refresh cancels pending cursor, resets busy and rejects old append', async () => {
+  await withStep('Review: refresh cancels pending page transition, resets to page 1 and rejects old page data', async () => {
     const page = await fresh();
     const entered = deferred();
     const release = deferred();
     const finished = deferred();
     let first = true;
     await page.route(requests, async (route) => {
-      if (new URL(route.request().url()).searchParams.has('cursor') && first) {
+      const u = new URL(route.request().url());
+      assert.equal(u.searchParams.has('cursor'), false, '不得发出 cursor 参数');
+      if (u.searchParams.get('offset') === '50' && first) {
         first = false;
         entered.resolve();
         await release.promise;
-        try { await route.fulfill({ json: { items: [{ model: 'OLD-CURSOR' }], has_more: false } }); }
-        catch (_) { /* aborted client */ }
+        try {
+          await route.fulfill({
+            json: {
+              items: [{ model: 'OLD-OFFSET-50', time: new Date().toISOString(), provider: 'p', total_tokens: 1 }],
+              offset: 50,
+              limit: 50,
+              has_more: false
+            }
+          });
+        } catch (_) { /* aborted client */ }
         finished.resolve();
       } else await route.continue();
     });
-    await page.locator('#load-more').click();
+    await page.locator('#requests-next').click();
     await entered.promise;
     await page.locator('#refresh').click();
     await ready(page);
     release.resolve();
     await finished.promise;
     assert.equal(await page.locator('#requests-body tr').count(), 50);
-    assert.equal(await page.locator('#requests-body').getByText('OLD-CURSOR').count(), 0);
-    await page.locator('#load-more').click();
-    await page.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 52);
+    assert.equal(await page.locator('#requests-body').getByText('OLD-OFFSET-50').count(), 0);
+    assert.match(await page.locator('#requests-page').textContent(), /1/);
     await page.close();
   });
 
-  await withStep('Review: request accumulation is capped at 500', async () => {
+  await withStep('Review: pagination replaces table rows and never accumulates beyond 50 rows without cursor', async () => {
     const page = await fresh();
-    let cursor = 0;
-    await page.route(requests, (route) => route.fulfill({ json: {
-      items: Array.from({ length: 50 }, (_, i) => ({ request_id: String(cursor) + '-' + i, model: 'bounded' })),
-      next_cursor: String(++cursor), has_more: true
-    } }));
-    for (let count = 100; count <= 500; count += 50) {
-      await page.locator('#load-more').click();
-      await page.waitForFunction((n) => document.querySelectorAll('#requests-body tr').length === n, count);
-    }
-    assert.equal(await page.locator('#load-more').isVisible(), false);
-    assert.match(await page.locator('#requests-note').textContent(), /最多 500/);
+    const seenOffsets = [];
+    await page.route(requests, (route) => {
+      const u = new URL(route.request().url());
+      assert.equal(u.searchParams.has('cursor'), false, '严禁包含 cursor 参数');
+      const off = parseInt(u.searchParams.get('offset') || '0', 10);
+      seenOffsets.push(off);
+      const items = Array.from({ length: 50 }, (_, i) => ({
+        request_id: 'p-' + off + '-' + i,
+        model: 'model-page-' + off,
+        time: new Date().toISOString(),
+        provider: 'openai',
+        total_tokens: 100
+      }));
+      return route.fulfill({
+        json: {
+          items,
+          offset: off,
+          limit: 50,
+          has_more: off < 150
+        }
+      });
+    });
+
+    // 初始第 1 页：50 条
+    assert.equal(await page.locator('#requests-body tr').count(), 50);
+
+    // 翻到第 2 页：仍为 50 条（替换，不累加至 100 条）
+    await page.locator('#requests-next').click();
+    await page.waitForFunction(() => {
+      const p = document.getElementById('requests-page');
+      return p && p.textContent.includes('2');
+    });
+    assert.equal(await page.locator('#requests-body tr').count(), 50, '翻页必须替换，行数不得累加为 100');
+
+    // 翻到第 3 页：仍为 50 条（不累加至 150 条）
+    await page.locator('#requests-next').click();
+    await page.waitForFunction(() => {
+      const p = document.getElementById('requests-page');
+      return p && p.textContent.includes('3');
+    });
+    assert.equal(await page.locator('#requests-body tr').count(), 50, '翻页必须替换，行数不得累加为 150');
+
+    // 翻到第 4 页（最后一页）：has_more 为 false，下一页按钮禁用
+    await page.locator('#requests-next').click();
+    await page.waitForFunction(() => {
+      const p = document.getElementById('requests-page');
+      return p && p.textContent.includes('4');
+    });
+    assert.equal(await page.locator('#requests-next').isDisabled(), true, '取尽后下一页按钮应禁用');
+    assert.equal(await page.locator('#requests-body tr').count(), 50);
+
+    await page.close();
+  });
+
+  await withStep('Review: empty page renders cleanly with navigation disabled', async () => {
+    const page = await fresh();
+    await page.route(requests, (route) => {
+      return route.fulfill({
+        json: { items: [], offset: 0, limit: 50, has_more: false }
+      });
+    });
+    await page.locator('#refresh').click();
+    await ready(page);
+    assert.equal(await page.locator('#requests-prev').isDisabled(), true);
+    assert.equal(await page.locator('#requests-next').isDisabled(), true);
+    await page.close();
+  });
+
+  await withStep('Review: filter change resets pagination to page 1', async () => {
+    const page = await fresh();
+    await page.locator('#requests-next').click();
+    await page.waitForFunction(() => {
+      const p = document.getElementById('requests-page');
+      return p && p.textContent.includes('2');
+    });
+    let requestOffsetSeen = null;
+    await page.route(requests, (route) => {
+      const u = new URL(route.request().url());
+      requestOffsetSeen = u.searchParams.get('offset');
+      return route.continue();
+    });
+    await page.locator('[data-range="7d"]').click();
+    await page.waitForFunction(() => {
+      const p = document.getElementById('requests-page');
+      return p && p.textContent.includes('1');
+    });
+    assert.equal(requestOffsetSeen, '0', '切换筛选必须重置为 offset=0');
+    assert.equal(await page.locator('#requests-prev').isDisabled(), true);
+    await page.locator('#requests-next').click();
+    await page.waitForFunction(() => document.getElementById('requests-page').textContent.startsWith('第 2 页'));
+    await page.locator('#filter-model').selectOption('gpt-5.1-codex');
+    await ready(page);
+    assert.equal(requestOffsetSeen, '0');
+    assert.equal(await page.locator('#requests-page').textContent(), '第 1 页 · 本页 34 条');
+    for (const text of await page.locator('#requests-body .model-cell').allTextContents()) assert.ok(text.includes('gpt-5.1-codex'));
+    await page.close();
+  });
+
+  await withStep('Review: pending duplicate navigation blocked and failure retains prior page', async () => {
+    const page = await fresh();
+    const originalRows = await page.locator('#requests-body').textContent();
+    const entered = deferred();
+    const release = deferred();
+    let calls = 0;
+    await page.route(requests, async (route) => {
+      const u = new URL(route.request().url());
+      if (u.searchParams.get('offset') === '50') {
+        calls++;
+        entered.resolve();
+        await release.promise;
+        return route.fulfill({ status: 500, json: { error: 'server error' } });
+      }
+      return route.continue();
+    });
+
+    await page.locator('#requests-next').click();
+    await entered.promise;
+
+    assert.equal(await page.locator('#requests-next').isDisabled(), true);
+    assert.equal(await page.locator('#requests-prev').isDisabled(), true);
+    await page.locator('#requests-next').click({ force: true }).catch(() => {});
+    assert.equal(calls, 1, '等待中不得重复发起请求');
+
+    release.resolve();
+    await page.waitForFunction(() => {
+      const btn = document.getElementById('requests-next');
+      return btn && !btn.disabled;
+    });
+
+    assert.equal(await page.locator('#requests-body tr').count(), 50, '失败必须保留原页数据');
+    assert.equal(await page.locator('#requests-body').textContent(), originalRows);
+    assert.match(await page.locator('#requests-page').textContent(), /1/, '失败必须保留原页码 1');
+    assert.equal(await page.locator('#requests-prev').isDisabled(), true);
+    assert.equal(await page.locator('#requests-next').isDisabled(), false);
+    await page.unroute(requests);
+    await page.locator('#requests-next').click();
+    await page.waitForFunction(() => document.getElementById('requests-page').textContent.startsWith('第 2 页'));
+    const lastRows = await page.locator('#requests-body').textContent();
+    await page.route(requests, (route) => route.fulfill({ status: 500, json: {} }));
+    await page.locator('#requests-prev').click();
+    await page.waitForFunction(() => !document.getElementById('requests-prev').disabled);
+    assert.equal(await page.locator('#requests-body').textContent(), lastRows);
+    assert.equal(await page.locator('#requests-page').textContent(), '第 2 页 · 本页 2 条');
+    assert.equal(await page.locator('#requests-next').isDisabled(), true);
+    await page.unroute(requests);
+    await page.locator('#requests-prev').click();
+    await page.waitForFunction(() => document.getElementById('requests-page').textContent.startsWith('第 1 页'));
+    assert.equal(await page.locator('#requests-body').textContent(), originalRows);
     await page.close();
   });
 
@@ -295,27 +452,56 @@ async function main() {
 
       await withStep('嵌入：实时主题切换（白→深→浅）', async () => {
         await page.evaluate(() => window.__setTheme('white'));
-        await page.waitForTimeout(120);
+        await frame.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'white');
+
         await page.evaluate(() => window.__setTheme('dark'));
-        await page.waitForTimeout(120);
+        await frame.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'dark');
+
         await page.evaluate(() => window.__setTheme(''));
-        await page.waitForTimeout(200);
+        await frame.waitForFunction(() => !document.documentElement.getAttribute('data-theme'));
+
         const theme = await frame.evaluate(() => document.documentElement.getAttribute('data-theme'));
         assert.equal(theme, null);
         await shot(page, 'embedded-live-switch');
         return 'MutationObserver 同步生效';
       });
 
-      await withStep('分页：加载更多使用游标并追加', async () => {
+      await withStep('分页：上一页/下一页、当前页码与 50 条替换（无累加无游标）', async () => {
+        const bounds = [];
+        await page.route('**' + mock.MANAGEMENT_BASE + '/requests**', (route) => {
+          const url = new URL(route.request().url());
+          assert.equal(url.searchParams.has('cursor'), false);
+          bounds.push([url.searchParams.get('from'), url.searchParams.get('to')]);
+          return route.continue();
+        });
         const before = await frame.locator('#requests-body tr').count();
-        assert.equal(before, 50);
-        assert.equal(await frame.locator('#load-more').isVisible(), true, '仍有下一页时应显示加载更多');
-        await frame.locator('#load-more').click();
-        await frame.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 52);
-        const note = await frame.locator('#requests-note').textContent();
-        assert.match(note, /52/);
-        assert.equal(await frame.locator('#load-more').isVisible(), false, '取尽后隐藏加载更多');
-        return '50 → 52 条';
+        assert.equal(before, 50, '第一页应显示 50 条');
+        assert.equal(await frame.locator('#requests-prev').isDisabled(), true, '第一页时上一页按钮禁用');
+        assert.equal(await frame.locator('#requests-next').isDisabled(), false, '仍有下一页时下一页按钮可用');
+        assert.match(await frame.locator('#requests-page').textContent(), /1/, '应显示第 1 页');
+
+        // 点击下一页
+        await frame.locator('#requests-next').click();
+        await frame.waitForFunction(() => {
+          const p = document.getElementById('requests-page');
+          return p && p.textContent.includes('2');
+        });
+        const page2Count = await frame.locator('#requests-body tr').count();
+        assert.equal(page2Count, 2, '第二页替换为 2 条（不累加）');
+        assert.equal(await frame.locator('#requests-prev').isDisabled(), false, '第二页时上一页按钮可用');
+        assert.equal(await frame.locator('#requests-next').isDisabled(), true, '最后一页时下一页按钮禁用');
+
+        // 回到上一页（roundtrip）
+        await frame.locator('#requests-prev').click();
+        await frame.waitForFunction(() => {
+          const p = document.getElementById('requests-page');
+          return p && p.textContent.includes('1');
+        });
+        assert.equal(await frame.locator('#requests-body tr').count(), 50, '回到第一页恢复 50 条');
+        assert.equal(await frame.locator('#requests-prev').isDisabled(), true);
+        assert.deepEqual(bounds[0], bounds[1], '往返页必须保持同一个查询窗口');
+        await page.unroute('**' + mock.MANAGEMENT_BASE + '/requests**');
+        return '第 1 页 (50 条) ↔ 第 2 页 (2 条)';
       });
 
       // ---------------- XSS ----------------
@@ -338,7 +524,7 @@ async function main() {
 
       await withStep('请求体：列表刷新不触发读取', async () => {
         await frame.locator('#refresh').click();
-        await frame.waitForTimeout(400);
+        await ready(frame);
         assert.equal(bodyFetches, 0, '列表刷新期间不得请求请求体');
         return 'body 请求数 0';
       });
@@ -365,7 +551,7 @@ async function main() {
 
       await withStep('请求体：关闭弹窗清空内容', async () => {
         await frame.locator('#body-close').click();
-        await frame.waitForTimeout(150);
+        await frame.locator('#body-dialog').waitFor({ state: 'hidden' });
         const content = await frame.locator('#body-content').textContent();
         assert.equal(content.trim(), '', '关闭后必须清空');
         return '内容已清空';
@@ -375,6 +561,9 @@ async function main() {
       await withStep('筛选切换：旧响应不得覆盖新结果', async () => {
         let armed = false;
         let calls = 0;
+        const call1Entered = deferred();
+        const call1Release = deferred();
+        const call2Finished = deferred();
         await page.route('**' + mock.MANAGEMENT_BASE + '/requests**', async (route) => {
           if (!armed) {
             await route.continue();
@@ -387,20 +576,26 @@ async function main() {
               ? { request_id: 'stale', model: 'STALE-OLD', provider: 'p', time: '2026-01-02T11:00:00Z', total_tokens: 1 }
               : { request_id: 'fresh', model: 'FRESH-NEW', provider: 'p', time: '2026-01-02T11:00:00Z', total_tokens: 1 }
           ];
-          if (call === 1) await new Promise((r) => setTimeout(r, 900));
+          if (call === 1) {
+            call1Entered.resolve();
+            await call1Release.promise;
+          }
           try {
-            await route.fulfill({ json: { items, next_cursor: '', has_more: false } });
+            await route.fulfill({ json: { items, offset: 0, limit: 50, has_more: false } });
           } catch (err) {
             /* 请求可能已被客户端 abort */
           }
+          if (call === 2) call2Finished.resolve();
         });
 
         armed = true;
         calls = 0;
         await frame.locator('[data-range="7d"]').click();
-        await page.waitForTimeout(80);
+        await call1Entered.promise;
         await frame.locator('[data-range="24h"]').click();
-        await page.waitForTimeout(1400);
+        await call2Finished.promise;
+        call1Release.resolve();
+        await ready(frame);
 
         const models = await frame.locator('#requests-body .model-cell').allTextContents();
         assert.ok(!models.some((m) => m.includes('STALE-OLD')), '过期响应必须被丢弃');
@@ -429,7 +624,7 @@ async function main() {
           await route.continue();
         });
         await frame.locator('#refresh').click();
-        await frame.waitForTimeout(600);
+        await ready(frame);
         assert.equal(seen, 'Bearer ' + mock.SECRET);
         return 'Authorization: Bearer <已隐藏>';
       });
@@ -437,7 +632,7 @@ async function main() {
       await withStep('390px：窄屏无横向溢出', async () => {
         await page.setViewportSize({ width: 390, height: 844 });
         await page.evaluate(() => window.__setTheme('dark'));
-        await page.waitForTimeout(300);
+        await frame.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'dark');
         const overflow = await frame.evaluate(
           () => document.documentElement.scrollWidth - document.documentElement.clientWidth
         );
@@ -490,6 +685,34 @@ async function main() {
         return 'CPA auto-white';
       });
       await lightContext.close();
+
+      // 独立打开：三套主题在 1280 与 390 视图截图
+      for (const width of [1280, 390]) {
+        for (const theme of ['', 'white', 'dark']) {
+          await withStep('独立打开截图：' + (theme || 'light') + ' ' + width + 'px', async () => {
+            const ctx = await browser.newContext({
+              viewport: { width, height: 900 },
+              colorScheme: theme === 'dark' ? 'dark' : 'light'
+            });
+            const p = await ctx.newPage();
+            p.on('dialog', (d) => { throw new Error('Forbidden native dialog: ' + d.message()); });
+            await p.goto(server.resourceURL, { waitUntil: 'load' });
+            await connect(p, mock.SECRET);
+            if (theme) {
+              await p.evaluate((t) => document.documentElement.setAttribute('data-theme', t), theme);
+            } else {
+              await p.evaluate(() => document.documentElement.removeAttribute('data-theme'));
+            }
+            await p.waitForFunction(
+              (expected) => (document.documentElement.getAttribute('data-theme') || '') === expected,
+              theme || ''
+            );
+            await shot(p, 'standalone-' + (theme || 'light') + '-' + width);
+            await ctx.close();
+            return 'standalone-' + (theme || 'light') + '-' + width + '.png';
+          });
+        }
+      }
     }
 
     // ---------------- 捕获关闭 ----------------
@@ -516,6 +739,7 @@ async function main() {
     await serverOff.close();
   }
 
+  if (browserErrors.length) record('Browser console/runtime errors', false, browserErrors.join('; '));
   fs.writeFileSync(path.join(OUT, 'results.json'), JSON.stringify(results, null, 2));
   const failed = results.filter((r) => !r.ok);
   console.log('\n结果：' + (results.length - failed.length) + '/' + results.length + ' 通过');

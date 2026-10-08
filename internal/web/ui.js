@@ -16,7 +16,6 @@
   };
   var DEFAULT_RANGE = '24h';
   var EXACT_ACCOUNTING = 'complete';
-  var MAX_REQUEST_ITEMS = 500;
 
   // 主题令牌白名单：仅同步这些视觉变量，绝不读取父级凭据 / DOM 内容。
   var THEME_TOKENS = [
@@ -286,7 +285,7 @@
         sub: hasData
           ? (unpriced > 0
               ? (unpriced < requests ? '已定价小计；' : '') + '未定价 ' + formatInt(unpriced) + ' 条'
-              : (cost === null ? '缺少价格配置' : '按已记录价格'))
+              : (cost === null ? '缺少价格配置' : '按当前生效价格'))
           : '',
         warn: hasData && (unpriced > 0 || cost === null)
       }
@@ -1063,7 +1062,9 @@
       groupsNote: doc.getElementById('groups-note'),
       requestsBody: doc.getElementById('requests-body'),
       requestsNote: doc.getElementById('requests-note'),
-      loadMore: doc.getElementById('load-more'),
+      requestsPrev: doc.getElementById('requests-prev'),
+      requestsNext: doc.getElementById('requests-next'),
+      requestsPage: doc.getElementById('requests-page'),
       settingsBody: doc.getElementById('settings-body'),
       save: doc.getElementById('settings-save'),
       revert: doc.getElementById('settings-revert'),
@@ -1093,11 +1094,14 @@
       range: DEFAULT_RANGE,
       provider: '',
       model: '',
-      cursor: '',
+      offset: 0,
       items: [],
       hasMore: false,
-      loadingMore: false,
+      loadingPage: false,
+      refreshing: false,
       bounds: null,
+      requestProvider: '',
+      requestModel: '',
       series: [],
       providers: {},
       models: {}
@@ -1115,8 +1119,62 @@
     var saving = false;
     var dirty = false;
     var editor = null;
+    var confirmation = doc.getElementById('confirmation-dialog');
+    var confirmationResolve = null;
+    var confirmationFocus = null;
+
+    function positionConfirmation() {
+      confirmation.style.removeProperty('top');
+      confirmation.style.removeProperty('margin');
+      // A tall same-origin iframe may be scrolled behind host chrome. Read only
+      // frame/viewport geometry, never parent content or credentials.
+      try {
+        if (!win.frameElement || win.parent === win) return;
+        var frame = win.frameElement.getBoundingClientRect();
+        var start = Math.max(0, -frame.top);
+        var end = Math.min(win.innerHeight, win.parent.innerHeight - frame.top);
+        var height = confirmation.getBoundingClientRect().height;
+        if (end - start < height) return;
+        confirmation.style.margin = '0 auto';
+        confirmation.style.top = (start + (end - start - height) / 2) + 'px';
+      } catch (_) { /* Cross-origin hosts keep browser-native centering. */ }
+    }
+
+    // A single asynchronous modal; cancellation never enters validation or writes.
+    function finishConfirmation(approved) {
+      if (!confirmationResolve) return;
+      var resolve = confirmationResolve;
+      confirmationResolve = null;
+      if (confirmation.open) confirmation.close();
+      if (confirmationFocus && confirmationFocus.isConnected) confirmationFocus.focus();
+      confirmationFocus = null;
+      resolve(approved);
+    }
+
+    function askConfirmation(title, description) {
+      if (confirmationResolve) return Promise.resolve(false);
+      setText(doc.getElementById('confirmation-title'), title);
+      setText(doc.getElementById('confirmation-desc'), description);
+      confirmationFocus = doc.activeElement;
+      return new Promise(function (resolve) {
+        confirmationResolve = resolve;
+        confirmation.showModal();
+        positionConfirmation();
+        doc.getElementById('confirmation-cancel').focus({ preventScroll: true });
+      });
+    }
+    doc.getElementById('confirmation-confirm').addEventListener('click', function () { finishConfirmation(true); });
+    doc.getElementById('confirmation-cancel').addEventListener('click', function () { finishConfirmation(false); });
+    confirmation.addEventListener('cancel', function (event) { event.preventDefault(); finishConfirmation(false); });
+    confirmation.addEventListener('close', function () { if (!confirmation.open) finishConfirmation(false); });
+    confirmation.addEventListener('click', function (event) {
+      var rect = confirmation.getBoundingClientRect();
+      if (event.target === confirmation && (event.clientX < rect.left || event.clientX > rect.right ||
+          event.clientY < rect.top || event.clientY > rect.bottom)) finishConfirmation(false);
+    });
 
     function editorActions() {
+      pageActions();
       if (els.save) els.save.disabled = !state.connected || !editor || !dirty || saving;
       if (els.revert) els.revert.disabled = !state.connected || saving;
       if (els.settingsBody.querySelectorAll) {
@@ -1169,12 +1227,13 @@
       moreGate.invalidate();
       if (moreAbort) moreAbort.abort();
       moreAbort = null;
-      state.loadingMore = false;
-      els.loadMore.disabled = false;
+      state.loadingPage = false;
+      pageActions();
     }
 
     function disconnect() {
       connectionGate.invalidate();
+      finishConfirmation(false);
       if (saveAbort) saveAbort.abort();
       saveAbort = null;
       if (saveTimer) win.clearTimeout(saveTimer);
@@ -1188,7 +1247,8 @@
       clearBodyViewer();
       closeBody();
       els.refresh.disabled = true;
-      els.loadMore.hidden = true;
+      state.refreshing = false;
+      pageActions();
       editorActions();
     }
 
@@ -1268,27 +1328,32 @@
       }
     }
 
-    function applyRequestsPage(page, append) {
+    function pageActions() {
+      var pending = !state.connected || state.loadingPage || state.refreshing || saving;
+      els.requestsPrev.disabled = pending || state.offset === 0;
+      els.requestsNext.disabled = pending || !state.hasMore || state.offset > 2147483647 - REQUEST_PAGE_LIMIT;
+    }
+
+    function applyRequestsPage(page, offset) {
       var p = page && typeof page === 'object' ? page : {};
       var items = Array.isArray(p.items) ? p.items : [];
-      state.items = (append ? state.items.concat(items) : items).slice(0, MAX_REQUEST_ITEMS);
-      state.cursor = typeof p.next_cursor === 'string' ? p.next_cursor : '';
-      state.hasMore = p.has_more === true && !!state.cursor && state.items.length < MAX_REQUEST_ITEMS;
+      state.items = items.slice(0, REQUEST_PAGE_LIMIT);
+      state.offset = offset;
+      state.hasMore = p.has_more === true;
       renderRequestsTable(doc, els.requestsBody, state.items, openBody);
       updateRequestsNote();
-      els.loadMore.hidden = !state.hasMore;
-      els.loadMore.disabled = false;
+      pageActions();
     }
 
     function updateRequestsNote() {
-      setText(els.requestsNote, '已加载 ' + state.items.length + ' 条（最多 ' + MAX_REQUEST_ITEMS +
-        ' 条）；请求明细仅保留 ' + formatDuration(state.retention) + '，统计按所选时间范围展示');
+      setText(els.requestsPage, '第 ' + (Math.floor(state.offset / REQUEST_PAGE_LIMIT) + 1) + ' 页 · 本页 ' + state.items.length + ' 条');
+      setText(els.requestsNote, '请求明细仅保留 ' + formatDuration(state.retention) + '，统计按所选时间范围展示');
     }
 
-    function applySettings(settings) {
+    function applySettings(settings, preserveStatus) {
       if (!dirty && !saving) {
         editor = renderSettings(doc, els.settingsBody, settings, markDirty);
-        setText(els.settingsStatus, '已加载生效设置');
+        if (!preserveStatus) setText(els.settingsStatus, '已加载生效设置');
       }
       editorActions();
       state.retention = normalizeSettings(settings).requestRetentionSeconds;
@@ -1306,7 +1371,7 @@
         '（健康快照 ' + formatTime(new Date()) + '；加载失败时可能过期）');
     }
 
-    function refreshAll() {
+    function refreshAll(preserveSettingsStatus) {
       if (!state.connected || saving) return;
       abortQuery();
       abortMore();
@@ -1314,10 +1379,8 @@
       queryAbort = controller;
       var token = queryGate.begin();
       var bounds = rangeBounds(state.range, Date.now());
-      state.bounds = bounds;
-      state.cursor = '';
-      state.hasMore = false;
-      els.loadMore.hidden = true;
+      state.refreshing = true;
+      pageActions();
       setText(els.rangeLabel, '范围 ' + formatTime(bounds.from) + ' ~ ' + formatTime(bounds.to));
       setStatus('加载中…', '');
 
@@ -1325,7 +1388,7 @@
       var signal = controller ? controller.signal : undefined;
       var tasks = [
         fetchJson('summary', common, signal).then(function (d) { return { kind: 'summary', data: d }; }),
-        fetchJson('requests', assign({}, common, { limit: REQUEST_PAGE_LIMIT }), signal).then(function (d) { return { kind: 'requests', data: d }; }),
+        fetchJson('requests', assign({}, common, { offset: 0, limit: REQUEST_PAGE_LIMIT }), signal).then(function (d) { return { kind: 'requests', data: d }; }),
         fetchJson('settings', null, signal).then(function (d) { return { kind: 'settings', data: d }; }),
         fetchJson('health', null, signal).then(function (d) { return { kind: 'health', data: d }; })
       ];
@@ -1336,25 +1399,35 @@
           var byKind = {};
           for (var i = 0; i < results.length; i++) byKind[results[i].kind] = results[i].data;
           applySummary(byKind.summary);
-          applyRequestsPage(byKind.requests, false);
-          applySettings(byKind.settings);
+          state.bounds = bounds;
+          state.requestProvider = common.provider;
+          state.requestModel = common.model;
+          state.refreshing = false;
+          applyRequestsPage(byKind.requests, 0);
+          applySettings(byKind.settings, preserveSettingsStatus);
           setStatus('已更新 ' + formatTime(new Date().toISOString()), 'ok');
           applyHealth(byKind.health);
         })
         .catch(function (err) {
           if (isAbortError(err) || !queryGate.current(token)) return;
           if (err && err.auth) { handleAuthFailure(err); return; }
+          state.refreshing = false;
+          pageActions();
+          if (state.bounds) setText(els.rangeLabel, '范围 ' + formatTime(state.bounds.from) + ' ~ ' + formatTime(state.bounds.to));
           setStatus('加载失败：' + ((err && err.message) || '未知错误'), 'error');
         });
     }
 
-    function saveSettings() {
-      if (!state.connected || !editor || saving) return;
+    async function saveSettings() {
+      if (!state.connected || !editor || saving || confirmationResolve) return;
+      var approvalToken = connectionGate.begin();
+      if (!await askConfirmation('确认保存设置', '捕获请求体可能保存提示词、代码等敏感内容；缩短保留时间会在清理后永久删除旧数据，无法恢复。历史请求与统计将按当前生效价格重新计算。')) return;
+      if (!state.connected || !connectionGate.current(approvalToken)) return;
       var patch;
       try { patch = editor.read(); }
       catch (err) { setText(els.settingsStatus, '未保存：' + err.message); return; }
-      if (!win.confirm('确认保存？捕获请求体可能保存提示词、代码等敏感内容；缩短保留时间会在清理后永久删除旧数据，无法恢复。价格只影响新请求。')) return;
       abortQuery(); queryGate.invalidate();
+      state.refreshing = false; abortMore();
       var token = connectionGate.begin();
       var controller = newController();
       saveAbort = controller;
@@ -1420,6 +1493,7 @@
           setText(els.settingsStatus, '保存成功：宿主持久配置与生效设置已确认');
           win.clearTimeout(saveTimer); saveTimer = null;
           saveAbort = null;
+          refreshAll(true);
         })
         .catch(function (err) {
           if (!connectionGate.current(token) || isAbortError(err)) return;
@@ -1430,11 +1504,14 @@
         });
     }
 
-    function reloadSettings() {
-      if (!state.connected || saving) return;
-      if (dirty && !win.confirm('放弃未保存草稿并重新加载宿主设置？')) return;
+    async function reloadSettings() {
+      if (!state.connected || saving || confirmationResolve) return;
+      var approvalToken = connectionGate.begin();
+      if (dirty && !await askConfirmation('放弃未保存草稿', '放弃未保存草稿并重新加载宿主设置？')) return;
+      if (!state.connected || !connectionGate.current(approvalToken)) return;
       var token = connectionGate.begin();
       abortQuery(); queryGate.invalidate();
+      state.refreshing = false; abortMore();
       saving = true; editorActions();
       saveAbort = newController();
       var signal = saveAbort ? saveAbort.signal : undefined;
@@ -1468,35 +1545,37 @@
         });
     }
 
-    function loadMore() {
-      if (!state.connected || state.loadingMore || !state.hasMore || !state.cursor || !state.bounds) return;
-      state.loadingMore = true;
-      els.loadMore.disabled = true;
+    function navigatePage(offset) {
+      if (!state.connected || saving || state.refreshing || state.loadingPage || !state.bounds ||
+          offset < 0 || offset > 2147483647 || (offset > state.offset && !state.hasMore)) return;
+      state.loadingPage = true;
+      pageActions();
       var token = moreGate.begin();
       var controller = newController();
       moreAbort = controller;
       var params = {
         from: state.bounds.from,
         to: state.bounds.to,
-        provider: state.provider,
-        model: state.model,
+        provider: state.requestProvider,
+        model: state.requestModel,
         limit: REQUEST_PAGE_LIMIT,
-        cursor: state.cursor
+        offset: offset
       };
       fetchJson('requests', params, controller ? controller.signal : undefined)
         .then(function (page) {
           if (!state.connected || !moreGate.current(token)) return;
-          applyRequestsPage(page, true);
+          applyRequestsPage(page, offset);
+          setStatus('已更新 ' + formatTime(new Date().toISOString()), 'ok');
         })
         .catch(function (err) {
           if (isAbortError(err) || !moreGate.current(token)) return;
           if (err && err.auth) { handleAuthFailure(err); return; }
-          setStatus('加载更多失败：' + ((err && err.message) || '未知错误'), 'error');
+          setStatus('翻页失败：' + ((err && err.message) || '未知错误'), 'error');
         })
         .then(function () {
           if (!moreGate.current(token)) return;
-          state.loadingMore = false;
-          els.loadMore.disabled = false;
+          state.loadingPage = false;
+          pageActions();
         });
     }
 
@@ -1609,10 +1688,9 @@
     }
 
     function closeBody() {
+      clearBodyViewer();
       if (els.dialog.open && typeof els.dialog.close === 'function') {
-        els.dialog.close(); // 触发 close 事件 → clearBodyViewer
-      } else {
-        clearBodyViewer();
+        els.dialog.close();
       }
     }
 
@@ -1630,6 +1708,12 @@
       }
       state.key = key;
       state.connected = true;
+      state.offset = 0;
+      state.items = [];
+      state.bounds = null;
+      state.hasMore = false;
+      renderRequestsTable(doc, els.requestsBody, [], openBody);
+      updateRequestsNote();
       dirty = false; editor = null;
       clearChildren(els.settingsBody);
       setText(els.settingsStatus, '正在加载新连接设置…');
@@ -1644,10 +1728,11 @@
     if (els.save) els.save.addEventListener('click', saveSettings);
     if (els.revert) els.revert.addEventListener('click', reloadSettings);
     els.refresh.addEventListener('click', function () { refreshAll(); });
-    els.loadMore.addEventListener('click', loadMore);
+    els.requestsPrev.addEventListener('click', function () { navigatePage(state.offset - REQUEST_PAGE_LIMIT); });
+    els.requestsNext.addEventListener('click', function () { navigatePage(state.offset + REQUEST_PAGE_LIMIT); });
     els.bodyReveal.addEventListener('click', revealBody);
     els.bodyClose.addEventListener('click', closeBody);
-    els.dialog.addEventListener('close', clearBodyViewer);
+    els.dialog.addEventListener('close', function () { if (!els.dialog.open) clearBodyViewer(); });
     els.dialog.addEventListener('cancel', clearBodyViewer);
 
     var segButtons = doc.querySelectorAll ? doc.querySelectorAll('.seg-btn') : [];
@@ -1675,6 +1760,7 @@
 
     var resizeTimer = null;
     win.addEventListener('resize', function () {
+      if (confirmation.open) positionConfirmation();
       if (resizeTimer) win.clearTimeout(resizeTimer);
       resizeTimer = win.setTimeout(function () {
         if (state.connected) renderChart(els.chart, state.series || []);
@@ -1703,7 +1789,6 @@
     RANGE_MS: RANGE_MS,
     DEFAULT_RANGE: DEFAULT_RANGE,
     REQUEST_PAGE_LIMIT: REQUEST_PAGE_LIMIT,
-    MAX_REQUEST_ITEMS: MAX_REQUEST_ITEMS,
     validateBodyDetail: validateBodyDetail,
     deriveApiBase: deriveApiBase,
     coreApiBase: coreApiBase,
