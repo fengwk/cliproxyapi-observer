@@ -1,61 +1,54 @@
 package observer
 
 import (
-	"encoding/base64"
 	"errors"
 	"math"
 	"testing"
 	"time"
 )
 
-func TestDecodeCursorRejectsMalformed(t *testing.T) {
-	cases := []string{
-		"not-base64!!",
-		base64.RawURLEncoding.EncodeToString([]byte("short")),
-		base64.RawURLEncoding.EncodeToString(make([]byte, 24)),
-		"",
-	}
-	for _, cursor := range cases {
-		if cursor == "" {
-			continue
-		}
-		if _, _, err := decodeCursor(cursor); !errors.Is(err, ErrInvalidCursor) {
-			t.Errorf("decodeCursor(%q) err = %v, want ErrInvalidCursor", cursor, err)
-		}
-	}
-}
-
-func TestCursorRoundTripIncludingEpoch(t *testing.T) {
-	for _, at := range []time.Time{time.Unix(0, 0).UTC(), time.Unix(1_700_000_000, 123456789).UTC()} {
-		got, seq, err := decodeCursor(encodeCursor(at, 42))
-		if err != nil {
-			t.Fatalf("decodeCursor: %v", err)
-		}
-		if got.UnixNano() != at.UnixNano() || seq != 42 {
-			t.Errorf("round trip = %v/%d, want %v/42", got, seq, at)
-		}
-	}
-}
-
-func TestRequestsCursorWithExtremeTimestampIsSafe(t *testing.T) {
+// TestRequestsOffsetBounds verifies rejection of negative and overflow offset values,
+// as well as safe handling of the maximum supported offset boundary math.MaxInt32.
+func TestRequestsOffsetBounds(t *testing.T) {
 	s := openTestStore(t, nil)
 	seedRequests(t, s, 5, func(int) string { return "openai" })
-	future := encodeCursor(time.Unix(0, math.MaxInt64).UTC(), 0)
-	page, err := s.Requests(Query{Cursor: future})
+
+	for _, badOffset := range []int{-1, -100, math.MinInt32} {
+		if _, err := s.Requests(Query{Offset: badOffset}); !errors.Is(err, ErrInvalidQuery) {
+			t.Errorf("Offset %d: err = %v, want ErrInvalidQuery", badOffset, err)
+		}
+	}
+
+	// Offset at math.MaxInt32 is valid and beyond the end of data.
+	page, err := s.Requests(Query{Offset: math.MaxInt32})
+	if err != nil {
+		t.Fatalf("Requests(Offset=MaxInt32): %v", err)
+	}
+	if len(page.Items) != 0 || page.HasMore || page.Offset != math.MaxInt32 {
+		t.Errorf("expected empty page at MaxInt32: %+v", page)
+	}
+}
+
+// TestRequestsOffsetBeyondEnd verifies that offsets at or beyond total matching records
+// return an empty page with has_more=false without errors.
+func TestRequestsOffsetBeyondEnd(t *testing.T) {
+	s := openTestStore(t, nil)
+	seedRequests(t, s, 5, func(int) string { return "openai" })
+
+	page, err := s.Requests(Query{Offset: 10, Limit: 5})
 	if err != nil {
 		t.Fatalf("Requests: %v", err)
 	}
-	if len(page.Items) != 5 {
-		t.Errorf("far-future cursor should return every older record, got %d", len(page.Items))
+	if len(page.Items) != 0 || page.HasMore || page.Offset != 10 {
+		t.Errorf("expected empty page beyond end: %+v", page)
 	}
-	// A cursor at the epoch is older than everything, so nothing older remains.
-	epoch := encodeCursor(time.Unix(0, 0).UTC(), 0)
-	page, err = s.Requests(Query{Cursor: epoch})
+
+	page, err = s.Requests(Query{Offset: 5, Limit: 5})
 	if err != nil {
 		t.Fatalf("Requests: %v", err)
 	}
-	if len(page.Items) != 0 || page.HasMore {
-		t.Errorf("epoch cursor should yield an empty page: %+v", page)
+	if len(page.Items) != 0 || page.HasMore || page.Offset != 5 {
+		t.Errorf("expected empty page exactly at end: %+v", page)
 	}
 }
 

@@ -140,7 +140,7 @@ func allRequests(t *testing.T, s *Store) []Request {
 		if !page.HasMore {
 			break
 		}
-		query.Cursor = page.NextCursor
+		query.Offset += len(page.Items)
 	}
 	return out
 }

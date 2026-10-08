@@ -269,7 +269,7 @@ func TestDrainReturnsFirstBatchError(t *testing.T) {
 		if i == writeBatchSize-1 {
 			id = strings.Repeat("x", bolt.MaxKeySize+1)
 		}
-		s.usageCh <- NormalizeUsage(usageRecord(id, "openai", "gpt-5", at, simpleUsage(1, 1)), nil)
+		s.usageCh <- NormalizeUsage(usageRecord(id, "openai", "gpt-5", at, simpleUsage(1, 1)))
 	}
 	var usage []Request
 	var bodies []pendingBody

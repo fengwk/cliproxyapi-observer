@@ -56,8 +56,20 @@ func TestCostForRejectsNonFinite(t *testing.T) {
 		RequestedAt: time.Unix(100, 0).UTC(),
 		Detail:      pluginapi.UsageDetail{InputTokens: 1_000_000_000_000_000_000},
 	}
-	r := NormalizeUsage(record, map[string]Price{"m": {Input: 1e300}})
+	r := NormalizeUsage(record)
 	if r.CostUSD != nil {
-		t.Errorf("cost = %v, want nil for non-finite product", *r.CostUSD)
+		t.Fatalf("NormalizeUsage must never compute cost, got %v", *r.CostUSD)
+	}
+
+	// RequestCost must reject non-finite price/token product
+	if cost := RequestCost(r, map[string]Price{"m": {Input: 1e300}}); cost != nil {
+		t.Errorf("RequestCost = %v, want nil for non-finite product", *cost)
+	}
+	// RequestCost must also reject non-finite price values (+Inf, NaN)
+	if cost := RequestCost(r, map[string]Price{"m": {Input: math.Inf(1)}}); cost != nil {
+		t.Errorf("RequestCost = %v, want nil for +Inf price", *cost)
+	}
+	if cost := RequestCost(r, map[string]Price{"m": {Input: math.NaN()}}); cost != nil {
+		t.Errorf("RequestCost = %v, want nil for NaN price", *cost)
 	}
 }

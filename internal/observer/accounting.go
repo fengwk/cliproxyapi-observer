@@ -12,9 +12,9 @@ const millionTokens = 1_000_000.0
 
 // NormalizeUsage converts a host usage record into the persisted canonical
 // request accounting. Normalization runs exactly once, at record time, so the
-// stored quality/TPS/cost reflect the prices snapshot configured when the
-// observation was captured. Raw counters are always preserved in RawUsage.
-func NormalizeUsage(record pluginapi.UsageRecord, prices map[string]Price) Request {
+// stored quality/TPS are independent of prices. Raw counters are always
+// preserved in RawUsage; monetary costs are derived only at query time.
+func NormalizeUsage(record pluginapi.UsageRecord) Request {
 	detail := usage.Detail{
 		InputTokens:         record.Detail.InputTokens,
 		OutputTokens:        record.Detail.OutputTokens,
@@ -77,7 +77,6 @@ func NormalizeUsage(record pluginapi.UsageRecord, prices map[string]Price) Reque
 	}
 	req.GenerationNS = generationNS(req.LatencyNS, req.TTFTNS)
 	req.TPS = tpsFor(breakdown, req.GenerationNS)
-	req.CostUSD = costFor(breakdown, req.Model, prices)
 	return req
 }
 
@@ -110,20 +109,38 @@ func tpsFor(breakdown usage.TokenBreakdown, genNS int64) *float64 {
 	return &v
 }
 
-// costFor prices complete accounting only, using the exact full model id and
-// the mutually exclusive buckets. Ambiguous or unpriced requests return nil.
-func costFor(breakdown usage.TokenBreakdown, model string, prices map[string]Price) *float64 {
-	if breakdown.Quality != usage.TokenAccountingQualityComplete {
+// RequestCost ignores any legacy stored cost and prices the normalized,
+// mutually exclusive buckets using the current exact full model identity.
+func RequestCost(r Request, prices map[string]Price) *float64 {
+	if !completeTokens(r) {
 		return nil
 	}
+	return tokenCost(uint64(r.UncachedInputTokens), uint64(r.CacheReadTokens),
+		uint64(r.CacheCreationTokens), uint64(r.OutputTokens), r.Model, prices)
+}
+
+func completeTokens(r Request) bool {
+	return r.AccountingQuality == string(usage.TokenAccountingQualityComplete) &&
+		r.UncachedInputTokens >= 0 && r.CacheReadTokens >= 0 &&
+		r.CacheCreationTokens >= 0 && r.OutputTokens >= 0 &&
+		r.InputTokens >= r.CacheReadTokens &&
+		r.InputTokens-r.CacheReadTokens >= r.CacheCreationTokens &&
+		r.InputTokens-r.CacheReadTokens-r.CacheCreationTokens == r.UncachedInputTokens &&
+		r.ReasoningTokens >= 0 && r.ReasoningTokens <= r.OutputTokens
+}
+
+func tokenCost(uncached, read, write, output uint64, model string, prices map[string]Price) *float64 {
 	price, ok := prices[model]
 	if !ok {
 		return nil
 	}
-	cost := (float64(breakdown.Input.UncachedTokens)*price.Input +
-		float64(breakdown.Input.CacheReadTokens)*price.CacheRead +
-		float64(breakdown.Input.CacheWriteTokens)*price.CacheCreation +
-		float64(breakdown.Output.TotalTokens)*price.Output) / millionTokens
+	for _, p := range []float64{price.Input, price.CacheRead, price.CacheCreation, price.Output} {
+		if p < 0 || math.IsNaN(p) || math.IsInf(p, 0) {
+			return nil
+		}
+	}
+	cost := (float64(uncached)*price.Input + float64(read)*price.CacheRead +
+		float64(write)*price.CacheCreation + float64(output)*price.Output) / millionTokens
 	if math.IsNaN(cost) || math.IsInf(cost, 0) {
 		// A pathological price/token product must not poison summaries.
 		return nil

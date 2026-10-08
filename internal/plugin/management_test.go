@@ -241,7 +241,7 @@ func TestSummaryFractionalMinuteQueryBounds(t *testing.T) {
 	}
 }
 
-func TestRequestsLimitCursorAndValidation(t *testing.T) {
+func TestRequestsLimitOffsetAndValidation(t *testing.T) {
 	opener := &fakeOpener{cfg: observerConfigFixture()}
 	m := registeredManager(t, opener)
 
@@ -250,20 +250,41 @@ func TestRequestsLimitCursorAndValidation(t *testing.T) {
 		t.Fatalf("requests status = %d", resp.StatusCode)
 	}
 	query, _ := opener.last().lastQuery()
-	if query.Limit != defaultRequestLimit {
-		t.Errorf("default limit = %d, want %d", query.Limit, defaultRequestLimit)
+	if query.Limit != defaultRequestLimit || query.Offset != 0 {
+		t.Errorf("default limit/offset = %d/%d, want %d/0", query.Limit, query.Offset, defaultRequestLimit)
 	}
 
-	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/requests", url.Values{"limit": {"100"}, "cursor": {"abc"}}); resp.StatusCode != http.StatusOK {
-		t.Errorf("limit 100 status = %d", resp.StatusCode)
+	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/requests", url.Values{"limit": {"100"}, "offset": {"50"}}); resp.StatusCode != http.StatusOK {
+		t.Errorf("limit 100 offset 50 status = %d", resp.StatusCode)
 	}
 	query, _ = opener.last().lastQuery()
-	if query.Cursor != "abc" || query.Limit != 100 {
-		t.Errorf("cursor/limit not forwarded: %+v", query)
+	if query.Offset != 50 || query.Limit != 100 {
+		t.Errorf("offset/limit not forwarded: %+v", query)
 	}
-	for _, bad := range []string{"0", "101", "abc"} {
+	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/requests", url.Values{"offset": {"2147483647"}}); resp.StatusCode != http.StatusOK {
+		t.Errorf("max offset status = %d", resp.StatusCode)
+	}
+	query, _ = opener.last().lastQuery()
+	if query.Offset != 2147483647 {
+		t.Errorf("max offset not forwarded: %+v", query)
+	}
+
+	for _, bad := range []string{"0", "101", "abc", "-1"} {
 		if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/requests", url.Values{"limit": {bad}}); resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("limit %q status = %d, want 400", bad, resp.StatusCode)
+		}
+	}
+
+	for _, bad := range []string{"-1", "2147483648", "99999999999999999999999999", "abc", "1.5", "1e2", "", " 10 "} {
+		if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/requests", url.Values{"offset": {bad}}); resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("offset %q status = %d, want 400", bad, resp.StatusCode)
+		}
+	}
+
+	// Reject nonempty legacy cursor instead of silently resetting to page one.
+	for _, legacy := range []string{"abc", "eyJhIjoxfQ", "123"} {
+		if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/requests", url.Values{"cursor": {legacy}}); resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("legacy cursor %q status = %d, want 400", legacy, resp.StatusCode)
 		}
 	}
 
@@ -282,11 +303,11 @@ func TestRequestsLimitCursorAndValidation(t *testing.T) {
 		t.Errorf("400d requests status = %d, want 400", resp.StatusCode)
 	}
 
-	// Only cursor/query validation failures are 400; storage failures must not
+	// Only query validation failures are 400; storage failures must not
 	// be masked as bad requests.
-	opener.last().requestsErr = observer.ErrInvalidCursor
-	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/requests", url.Values{"cursor": {"bad"}}); resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("bad cursor status = %d, want 400", resp.StatusCode)
+	opener.last().requestsErr = observer.ErrInvalidQuery
+	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/requests", nil); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("invalid query status = %d, want 400", resp.StatusCode)
 	}
 	opener.last().requestsErr = observer.ErrClosed
 	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/requests", nil); resp.StatusCode != http.StatusServiceUnavailable {

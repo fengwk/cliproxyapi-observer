@@ -4,6 +4,7 @@ package integration
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -141,9 +142,10 @@ type observedRequest struct {
 
 // requestPage mirrors the observer RequestPage wire shape.
 type requestPage struct {
-	Items      []observedRequest `json:"items"`
-	NextCursor string            `json:"next_cursor"`
-	HasMore    bool              `json:"has_more"`
+	Items   []observedRequest `json:"items"`
+	Offset  int               `json:"offset"`
+	Limit   int               `json:"limit"`
+	HasMore bool              `json:"has_more"`
 }
 
 // summaryView mirrors the observer Summary wire shape.
@@ -946,5 +948,379 @@ func TestCorePatchRoundTripObserverConfig(t *testing.T) {
 	}
 	if flushVal, _ := pluginCfg["flush"].(string); flushVal != "1s" {
 		t.Errorf("flush setting was not preserved: %v", pluginCfg["flush"])
+	}
+}
+
+func approxEqual(a, b, tol float64) bool {
+	diff := a - b
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= tol
+}
+
+func (h *harness) fetchCurrentSummary(t *testing.T) (summaryView, error) {
+	t.Helper()
+	status, _, body := h.managementRequest(t, http.MethodGet, "/v0/management/plugins/"+pluginID+"/summary")
+	if status != http.StatusOK {
+		return summaryView{}, fmt.Errorf("summary status %d body %s", status, truncate(body, 200))
+	}
+	var s summaryView
+	if err := json.Unmarshal(body, &s); err != nil {
+		return summaryView{}, fmt.Errorf("unmarshal summary: %w", err)
+	}
+	return s, nil
+}
+
+// TestQueryTimePricingAcrossConfigPatchAndRestart drives an observed request without configured
+// prices, validates it remains unpriced, then PATCHes prices to verify query-time pricing on the
+// same historical request and summary, updates prices again to verify dynamic recalculation, and
+// restarts the host to ensure persisted token counts continue pricing under effective config.
+func TestQueryTimePricingAcrossConfigPatchAndRestart(t *testing.T) {
+	h := newHarness(t)
+
+	// Step 1: Record a request with no prices configured.
+	page := h.sendAndObserve(t, 25*time.Second, anyObservedRequest)
+	if len(page.Items) == 0 {
+		t.Fatalf("expected at least 1 observed request")
+	}
+	target := page.Items[0]
+	targetID := target.RequestID
+	if targetID == "" {
+		t.Fatalf("observed request has empty request_id")
+	}
+	if target.CostUSD != nil {
+		t.Fatalf("unpriced request reported cost: %v, want nil", *target.CostUSD)
+	}
+
+	initialSummary := h.fetchSummary(t)
+	if initialSummary.Totals.Requests == 0 {
+		t.Fatalf("summary reported 0 requests")
+	}
+	if initialSummary.Totals.UnpricedRequests == 0 {
+		t.Errorf("summary unpriced_requests = %d, want > 0", initialSummary.Totals.UnpricedRequests)
+	}
+	if initialSummary.Totals.CostUSD != 0 {
+		t.Errorf("summary cost_usd = %v, want 0 for unpriced requests", initialSummary.Totals.CostUSD)
+	}
+
+	// Calculate prices:
+	// fixture prompt=10 tokens (uncached=6, cached=4), completion=5 tokens.
+	// Formula: (uncached * input + cached * cache_read + cache_write * cache_creation + completion * output) / 1,000,000
+	const (
+		// Price map 1
+		p1Input     = 2.5
+		p1Output    = 10.0
+		p1CacheRead = 1.25
+		p1CacheGen  = 2.5
+
+		// Price map 2 (double)
+		p2Input     = 5.0
+		p2Output    = 20.0
+		p2CacheRead = 2.5
+		p2CacheGen  = 5.0
+	)
+	wantCost1 := (6.0*p1Input + 4.0*p1CacheRead + 0.0*p1CacheGen + 5.0*p1Output) / 1_000_000.0 // 0.000070
+	wantCost2 := (6.0*p2Input + 4.0*p2CacheRead + 0.0*p2CacheGen + 5.0*p2Output) / 1_000_000.0 // 0.000140
+
+	patchPrice := func(in, out, cr, cg float64) {
+		patchPayload := fmt.Sprintf(`{
+			"prices": {
+				%q: {"input": %f, "output": %f, "cache_read": %f, "cache_creation": %f},
+				%q: {"input": %f, "output": %f, "cache_read": %f, "cache_creation": %f}
+			}
+		}`, modelName, in, out, cr, cg, upstreamModel, in, out, cr, cg)
+
+		status, _, body, err := h.rawRequestWithHeaders(
+			http.MethodPatch,
+			"/v0/management/plugins/"+pluginID+"/config",
+			[]byte(patchPayload),
+			map[string]string{
+				"Authorization": "Bearer " + mgmtKey,
+				"Content-Type":  "application/json",
+			},
+		)
+		if err != nil {
+			t.Fatalf("PATCH config error: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("PATCH config status = %d, body = %s", status, truncate(body, 300))
+		}
+	}
+
+	// Step 2: PATCH prices (map 1) and verify the SAME historical request and summary reflect current price.
+	patchPrice(p1Input, p1Output, p1CacheRead, p1CacheGen)
+
+	deadline := time.Now().Add(15 * time.Second)
+	var matchedRequest bool
+	var matchedSummary bool
+	var lastReqCost *float64
+	var lastSumCost float64
+	var lastUnpriced uint64
+
+	for time.Now().Before(deadline) {
+		reqs := h.fetchRequests(t)
+		for _, it := range reqs.Items {
+			if it.RequestID == targetID {
+				lastReqCost = it.CostUSD
+				if it.CostUSD != nil && approxEqual(*it.CostUSD, wantCost1, 1e-9) {
+					matchedRequest = true
+				}
+				break
+			}
+		}
+
+		s, err := h.fetchCurrentSummary(t)
+		if err == nil {
+			lastSumCost = s.Totals.CostUSD
+			lastUnpriced = s.Totals.UnpricedRequests
+			wantTotal := float64(s.Totals.Requests) * wantCost1
+			if approxEqual(s.Totals.CostUSD, wantTotal, 1e-9) && s.Totals.UnpricedRequests == 0 {
+				matchedSummary = true
+			}
+		}
+
+		if matchedRequest && matchedSummary {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if !matchedRequest {
+		t.Fatalf("request %s did not reflect price 1 (%v) at query-time; last cost = %v", targetID, wantCost1, lastReqCost)
+	}
+	if !matchedSummary {
+		t.Fatalf("summary did not reflect price 1 (%v) at query-time; last cost = %v, unpriced = %d", wantCost1, lastSumCost, lastUnpriced)
+	}
+
+	// Step 3: Modify prices (map 2) and verify dynamic update on the same request and summary.
+	patchPrice(p2Input, p2Output, p2CacheRead, p2CacheGen)
+
+	deadline = time.Now().Add(15 * time.Second)
+	matchedRequest = false
+	matchedSummary = false
+
+	for time.Now().Before(deadline) {
+		reqs := h.fetchRequests(t)
+		for _, it := range reqs.Items {
+			if it.RequestID == targetID {
+				lastReqCost = it.CostUSD
+				if it.CostUSD != nil && approxEqual(*it.CostUSD, wantCost2, 1e-9) {
+					matchedRequest = true
+				}
+				break
+			}
+		}
+
+		s, err := h.fetchCurrentSummary(t)
+		if err == nil {
+			lastSumCost = s.Totals.CostUSD
+			lastUnpriced = s.Totals.UnpricedRequests
+			wantTotal := float64(s.Totals.Requests) * wantCost2
+			if approxEqual(s.Totals.CostUSD, wantTotal, 1e-9) && s.Totals.UnpricedRequests == 0 {
+				matchedSummary = true
+			}
+		}
+
+		if matchedRequest && matchedSummary {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if !matchedRequest {
+		t.Fatalf("request %s did not reflect updated price 2 (%v); last cost = %v", targetID, wantCost2, lastReqCost)
+	}
+	if !matchedSummary {
+		t.Fatalf("summary did not reflect updated price 2 (%v); last cost = %v, unpriced = %d", wantCost2, lastSumCost, lastUnpriced)
+	}
+
+	// Step 4: Reboot host preserving updated config and database, then verify request and aggregate.
+	restarted, err := h.restartPreservingConfig(t)
+	if err != nil {
+		t.Fatalf("reboot host failed: %v", err)
+	}
+
+	deadline = time.Now().Add(15 * time.Second)
+	matchedRequest = false
+	matchedSummary = false
+
+	for time.Now().Before(deadline) {
+		reqs := restarted.fetchRequests(t)
+		for _, it := range reqs.Items {
+			if it.RequestID == targetID {
+				lastReqCost = it.CostUSD
+				if it.CostUSD != nil && approxEqual(*it.CostUSD, wantCost2, 1e-9) {
+					matchedRequest = true
+				}
+				break
+			}
+		}
+
+		s, err := restarted.fetchCurrentSummary(t)
+		if err == nil {
+			lastSumCost = s.Totals.CostUSD
+			lastUnpriced = s.Totals.UnpricedRequests
+			wantTotal := float64(s.Totals.Requests) * wantCost2
+			if approxEqual(s.Totals.CostUSD, wantTotal, 1e-9) && s.Totals.UnpricedRequests == 0 {
+				matchedSummary = true
+			}
+		}
+
+		if matchedRequest && matchedSummary {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if !matchedRequest {
+		t.Fatalf("after reboot, request %s did not reflect price (%v); last cost = %v", targetID, wantCost2, lastReqCost)
+	}
+	if !matchedSummary {
+		t.Fatalf("after reboot, summary did not reflect aggregate cost (%v); last cost = %v, unpriced = %d", wantCost2, lastSumCost, lastUnpriced)
+	}
+}
+
+// TestRequestPaginationOffsetLimitAndLegacyCursorValidation validates:
+// 1. Rejection of nonempty legacy cursor with 400.
+// 2. Rejection of invalid offsets (negative, non-numeric, overflow, empty) with 400.
+// 3. Offset/limit navigation controls (page 1, next page, previous page return).
+func TestRequestPaginationOffsetLimitAndLegacyCursorValidation(t *testing.T) {
+	h := newHarness(t)
+	h.mock.allowAnyPrompt()
+
+	// 1. Validation of nonempty legacy cursor returns 400.
+	cursorCases := []string{
+		"legacy-cursor",
+		"eyJ0cyI6MTIzNDU2fQ==",
+		"1",
+	}
+	for _, c := range cursorCases {
+		status, _, body := h.managementRequest(t, http.MethodGet, "/v0/management/plugins/"+pluginID+"/requests?cursor="+url.QueryEscape(c))
+		if status != http.StatusBadRequest {
+			t.Errorf("cursor=%q status = %d, want 400; body = %s", c, status, truncate(body, 200))
+		}
+	}
+
+	// 2. Validation of invalid offset returns 400.
+	invalidOffsetCases := []struct {
+		name  string
+		query string
+	}{
+		{"negative offset", "?offset=-1"},
+		{"alpha offset", "?offset=abc"},
+		{"overflow offset", "?offset=2147483648"},
+		{"empty offset", "?offset="},
+		{"float offset", "?offset=1.5"},
+	}
+	for _, tc := range invalidOffsetCases {
+		status, _, body := h.managementRequest(t, http.MethodGet, "/v0/management/plugins/"+pluginID+"/requests"+tc.query)
+		if status != http.StatusBadRequest {
+			t.Errorf("%s status = %d, want 400; body = %s", tc.name, status, truncate(body, 200))
+		}
+	}
+
+	// 3. Record multiple requests to test pagination controls (page 1 -> next page -> return).
+	// Warm up observer and record first request.
+	h.sendAndObserve(t, 25*time.Second, anyObservedRequest)
+
+	// Drive additional distinct requests.
+	prompts := []string{"paging-req-2", "paging-req-3"}
+	for _, prompt := range prompts {
+		time.Sleep(20 * time.Millisecond)
+		status, body := h.clientRequest(t, http.MethodPost, "/v1/chat/completions", chatBodyWithPrompt(false, prompt))
+		if status != http.StatusOK {
+			t.Fatalf("client chat status %d body %s", status, truncate(body, 200))
+		}
+	}
+
+	// Poll until at least 3 requests are observed.
+	deadline := time.Now().Add(25 * time.Second)
+	var allObserved requestPage
+	for time.Now().Before(deadline) {
+		status, _, body := h.managementRequest(t, http.MethodGet, "/v0/management/plugins/"+pluginID+"/requests?limit=50&offset=0")
+		if status == http.StatusOK {
+			var p requestPage
+			if err := json.Unmarshal(body, &p); err == nil && len(p.Items) >= 3 {
+				allObserved = p
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if len(allObserved.Items) < 3 {
+		t.Fatalf("expected at least 3 observed requests, got %d", len(allObserved.Items))
+	}
+
+	allIDs := make([]string, len(allObserved.Items))
+	for i, item := range allObserved.Items {
+		allIDs[i] = item.RequestID
+	}
+
+	// Page 1: offset=0, limit=2
+	status, _, body := h.managementRequest(t, http.MethodGet, "/v0/management/plugins/"+pluginID+"/requests?offset=0&limit=2")
+	if status != http.StatusOK {
+		t.Fatalf("page 1 status = %d, want 200; body = %s", status, truncate(body, 200))
+	}
+	var page1 requestPage
+	if err := json.Unmarshal(body, &page1); err != nil {
+		t.Fatalf("unmarshal page 1: %v", err)
+	}
+	if page1.Offset != 0 {
+		t.Errorf("page 1 offset = %d, want 0", page1.Offset)
+	}
+	if page1.Limit != 2 {
+		t.Errorf("page 1 limit = %d, want 2", page1.Limit)
+	}
+	if len(page1.Items) != 2 {
+		t.Fatalf("page 1 len = %d, want 2", len(page1.Items))
+	}
+	if !page1.HasMore {
+		t.Errorf("page 1 has_more = false, want true")
+	}
+	if page1.Items[0].RequestID != allIDs[0] || page1.Items[1].RequestID != allIDs[1] {
+		t.Errorf("page 1 items mismatch: got [%s, %s], want [%s, %s]",
+			page1.Items[0].RequestID, page1.Items[1].RequestID, allIDs[0], allIDs[1])
+	}
+
+	// Page 2 (Next page): offset=2, limit=2
+	status, _, body = h.managementRequest(t, http.MethodGet, "/v0/management/plugins/"+pluginID+"/requests?offset=2&limit=2")
+	if status != http.StatusOK {
+		t.Fatalf("page 2 status = %d, want 200; body = %s", status, truncate(body, 200))
+	}
+	var page2 requestPage
+	if err := json.Unmarshal(body, &page2); err != nil {
+		t.Fatalf("unmarshal page 2: %v", err)
+	}
+	if page2.Offset != 2 {
+		t.Errorf("page 2 offset = %d, want 2", page2.Offset)
+	}
+	if page2.Limit != 2 {
+		t.Errorf("page 2 limit = %d, want 2", page2.Limit)
+	}
+	if len(page2.Items) < 1 {
+		t.Fatalf("page 2 len = %d, want at least 1", len(page2.Items))
+	}
+	if page2.Items[0].RequestID != allIDs[2] {
+		t.Errorf("page 2 item[0] mismatch: got %s, want %s", page2.Items[0].RequestID, allIDs[2])
+	}
+
+	// Return (Previous page): offset=0, limit=2
+	status, _, body = h.managementRequest(t, http.MethodGet, "/v0/management/plugins/"+pluginID+"/requests?offset=0&limit=2")
+	if status != http.StatusOK {
+		t.Fatalf("return page 1 status = %d, want 200; body = %s", status, truncate(body, 200))
+	}
+	var pageBack requestPage
+	if err := json.Unmarshal(body, &pageBack); err != nil {
+		t.Fatalf("unmarshal return page: %v", err)
+	}
+	if pageBack.Offset != 0 {
+		t.Errorf("return page offset = %d, want 0", pageBack.Offset)
+	}
+	if len(pageBack.Items) != 2 {
+		t.Fatalf("return page len = %d, want 2", len(pageBack.Items))
+	}
+	if pageBack.Items[0].RequestID != page1.Items[0].RequestID || pageBack.Items[1].RequestID != page1.Items[1].RequestID {
+		t.Errorf("return page items differed from original page 1")
 	}
 }

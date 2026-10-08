@@ -574,3 +574,70 @@ func truncate(data []byte, limit int) string {
 	}
 	return string(data[:limit]) + "...(truncated)"
 }
+
+// restartPreservingConfig stops the current host, updates the port in the
+// existing config.yaml to avoid collisions, and restarts a fresh host process
+// against the preserved config file and database.
+func (h *harness) restartPreservingConfig(t *testing.T) (*harness, error) {
+	t.Helper()
+	h.Stop()
+
+	newPort, err := freePort()
+	if err != nil {
+		return nil, fmt.Errorf("freePort: %w", err)
+	}
+	configPath := filepath.Join(h.dir, "config.yaml")
+	cfgBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("read config %s: %w", configPath, err)
+	}
+	oldPortPattern := fmt.Sprintf("port: %d", h.port)
+	newPortPattern := fmt.Sprintf("port: %d", newPort)
+	if !bytes.Contains(cfgBytes, []byte(oldPortPattern)) {
+		return nil, fmt.Errorf("config does not contain %s", oldPortPattern)
+	}
+	cfgBytes = bytes.Replace(cfgBytes, []byte(oldPortPattern), []byte(newPortPattern), 1)
+	if err := os.WriteFile(configPath, cfgBytes, 0o600); err != nil {
+		return nil, fmt.Errorf("write config %s: %w", configPath, err)
+	}
+
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", newPort)
+	restarted := &harness{
+		t:       t,
+		cpaBin:  h.cpaBin,
+		dir:     h.dir,
+		authDir: h.authDir,
+		dbPath:  h.dbPath,
+		port:    newPort,
+		baseURL: baseURL,
+		opts:    h.opts,
+		mock:    h.mock,
+		stdout:  &lockedBuffer{},
+		stderr:  &lockedBuffer{},
+		done:    make(chan struct{}),
+	}
+
+	cmd := exec.Command(h.cpaBin, "--config", configPath)
+	cmd.Dir = h.dir
+	cmd.Env = hostEnv(h.dir)
+	cmd.Stdout = restarted.stdout
+	cmd.Stderr = restarted.stderr
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("exec %s: %w", h.cpaBin, err)
+	}
+	restarted.cmd = cmd
+	go func() {
+		waitErr := cmd.Wait()
+		restarted.mu.Lock()
+		restarted.waitErr = waitErr
+		restarted.mu.Unlock()
+		close(restarted.done)
+	}()
+
+	if err := restarted.awaitReady(15 * time.Second); err != nil {
+		restarted.Stop()
+		return nil, fmt.Errorf("%w\n--- host stdout ---\n%s\n--- host stderr ---\n%s", err, restarted.stdout.String(), restarted.stderr.String())
+	}
+	t.Cleanup(restarted.Stop)
+	return restarted, nil
+}

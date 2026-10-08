@@ -2,7 +2,6 @@ package observer
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"math"
@@ -13,8 +12,6 @@ import (
 var (
 	// ErrClosed is returned once the store has been closed.
 	ErrClosed = errors.New("observer store closed")
-	// ErrInvalidCursor marks a malformed or unverifiable pagination cursor.
-	ErrInvalidCursor = errors.New("invalid cursor")
 	// ErrInvalidQuery marks an incoherent query range.
 	ErrInvalidQuery = errors.New("invalid query")
 )
@@ -35,19 +32,6 @@ func requestKeyTime(key []byte) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return time.Unix(0, int64(binary.BigEndian.Uint64(key))).UTC(), true
-}
-
-func encodeCursor(t time.Time, seq uint64) string {
-	return base64.RawURLEncoding.EncodeToString(encodeRequestKey(t, seq))
-}
-
-func decodeCursor(raw string) (time.Time, uint64, error) {
-	decoded, err := base64.RawURLEncoding.DecodeString(raw)
-	if err != nil || len(decoded) != requestKeyLen {
-		return time.Time{}, 0, ErrInvalidCursor
-	}
-	return time.Unix(0, int64(binary.BigEndian.Uint64(decoded))).UTC(),
-		binary.BigEndian.Uint64(decoded[8:]), nil
 }
 
 // Stats keys are minute(8) + provider + 0x00 + model. The fixed minute prefix
@@ -78,13 +62,17 @@ func statsMinute(t time.Time) int64 {
 	return t.Truncate(time.Minute).Unix()
 }
 
-// Counter records use a fixed 15x8 byte layout (14 uint64 + one float64) so
-// aggregation never needs JSON decoding.
-const countersSize = 15 * 8
+// Version 1: a version byte, 13 original usage counters and five billable
+// counters. No price, monetary cost or price-dependent unpriced count.
+const (
+	legacyCountersSize = 15 * 8
+	countersSize       = 1 + 18*8
+)
 
 func encodeCounters(c Counters) []byte {
 	b := make([]byte, countersSize)
-	put := func(i int, v uint64) { binary.BigEndian.PutUint64(b[i*8:], v) }
+	b[0] = 1
+	put := func(i int, v uint64) { binary.BigEndian.PutUint64(b[1+i*8:], v) }
 	put(0, c.Requests)
 	put(1, c.FailedRequests)
 	put(2, c.InputTokens)
@@ -98,17 +86,24 @@ func encodeCounters(c Counters) []byte {
 	put(10, c.LatencySamples)
 	put(11, c.TTFTNS)
 	put(12, c.TTFTSamples)
-	put(13, c.UnpricedRequests)
-	binary.BigEndian.PutUint64(b[14*8:], math.Float64bits(c.CostUSD))
+	put(13, c.completeRequests)
+	put(14, c.billableInput)
+	put(15, c.billableRead)
+	put(16, c.billableWrite)
+	put(17, c.billableOutput)
 	return b
 }
 
 func decodeCounters(b []byte) (Counters, bool) {
-	if len(b) != countersSize {
+	legacy := len(b) == legacyCountersSize
+	if !legacy && (len(b) != countersSize || b[0] != 1) {
 		return Counters{}, false
 	}
+	if !legacy {
+		b = b[1:]
+	}
 	get := func(i int) uint64 { return binary.BigEndian.Uint64(b[i*8:]) }
-	return Counters{
+	c := Counters{
 		Requests:            get(0),
 		FailedRequests:      get(1),
 		InputTokens:         get(2),
@@ -122,9 +117,17 @@ func decodeCounters(b []byte) (Counters, bool) {
 		LatencySamples:      get(10),
 		TTFTNS:              get(11),
 		TTFTSamples:         get(12),
-		UnpricedRequests:    get(13),
-		CostUSD:             math.Float64frombits(get(14)),
-	}, true
+	}
+	if legacy {
+		c.UnpricedRequests = get(13)
+		return c, c.UnpricedRequests <= c.Requests
+	}
+	c.completeRequests = get(13)
+	c.billableInput = get(14)
+	c.billableRead = get(15)
+	c.billableWrite = get(16)
+	c.billableOutput = get(17)
+	return c, c.completeRequests <= c.Requests
 }
 
 func addRequestCounters(c *Counters, r Request) {
@@ -154,10 +157,28 @@ func addRequestCounters(c *Counters, r Request) {
 		c.TTFTNS = addSat(c.TTFTNS, uint64(r.TTFTNS))
 		c.TTFTSamples = addSat(c.TTFTSamples, 1)
 	}
-	if r.CostUSD != nil {
-		c.CostUSD = addCostSat(c.CostUSD, *r.CostUSD)
-	} else {
-		c.UnpricedRequests = addSat(c.UnpricedRequests, 1)
+	addBillable(c, r)
+}
+
+func addBillable(c *Counters, r Request) {
+	if completeTokens(r) {
+		c.completeRequests = addSat(c.completeRequests, 1)
+		c.billableInput = addSat(c.billableInput, uint64(r.UncachedInputTokens))
+		c.billableRead = addSat(c.billableRead, uint64(r.CacheReadTokens))
+		c.billableWrite = addSat(c.billableWrite, uint64(r.CacheCreationTokens))
+		c.billableOutput = addSat(c.billableOutput, uint64(r.OutputTokens))
+	}
+}
+
+func priceCounters(c *Counters, model string, prices map[string]Price) {
+	c.CostUSD = 0
+	c.UnpricedRequests = c.Requests
+	if c.completeRequests == 0 || c.completeRequests > c.Requests {
+		return
+	}
+	if cost := tokenCost(c.billableInput, c.billableRead, c.billableWrite, c.billableOutput, model, prices); cost != nil {
+		c.CostUSD = *cost
+		c.UnpricedRequests = c.Requests - c.completeRequests
 	}
 }
 
@@ -177,6 +198,11 @@ func addCounters(dst *Counters, src Counters) {
 	dst.TTFTSamples = addSat(dst.TTFTSamples, src.TTFTSamples)
 	dst.CostUSD = addCostSat(dst.CostUSD, src.CostUSD)
 	dst.UnpricedRequests = addSat(dst.UnpricedRequests, src.UnpricedRequests)
+	dst.completeRequests = addSat(dst.completeRequests, src.completeRequests)
+	dst.billableInput = addSat(dst.billableInput, src.billableInput)
+	dst.billableRead = addSat(dst.billableRead, src.billableRead)
+	dst.billableWrite = addSat(dst.billableWrite, src.billableWrite)
+	dst.billableOutput = addSat(dst.billableOutput, src.billableOutput)
 }
 
 // addSat adds two uint64 counters, saturating at MaxUint64 instead of wrapping.

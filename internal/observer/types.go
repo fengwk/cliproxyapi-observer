@@ -151,7 +151,7 @@ type Query struct {
 	Provider string
 	Model    string
 	Limit    int
-	Cursor   string
+	Offset   int
 }
 
 type Counters struct {
@@ -170,6 +170,13 @@ type Counters struct {
 	TTFTSamples         uint64  `json:"ttft_samples"`
 	CostUSD             float64 `json:"cost_usd"`
 	UnpricedRequests    uint64  `json:"unpriced_requests"`
+	// Only these complete-accounting partitions are billable. They are stored,
+	// never exposed, and must not include ambiguous raw display counters.
+	completeRequests uint64
+	billableInput    uint64
+	billableRead     uint64
+	billableWrite    uint64
+	billableOutput   uint64
 }
 
 type Request struct {
@@ -206,9 +213,10 @@ type Request struct {
 }
 
 type RequestPage struct {
-	Items      []Request `json:"items"`
-	NextCursor string    `json:"next_cursor"`
-	HasMore    bool      `json:"has_more"`
+	Items   []Request `json:"items"`
+	Offset  int       `json:"offset"`
+	Limit   int       `json:"limit"`
+	HasMore bool      `json:"has_more"`
 }
 
 type Group struct {

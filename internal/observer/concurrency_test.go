@@ -114,7 +114,7 @@ func TestConcurrentSubmitCaptureFlushRead(t *testing.T) {
 				if !page.HasMore {
 					break
 				}
-				query.Cursor = page.NextCursor
+				query.Offset += len(page.Items)
 			}
 			if int64(total) != accepted.Load() {
 				t.Fatalf("stored %d records but %d were accepted", total, accepted.Load())

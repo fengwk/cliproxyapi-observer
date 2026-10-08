@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -59,7 +60,7 @@ func managementRegistration() managementRegistrationResponse {
 	return managementRegistrationResponse{
 		Routes: []pluginapi.ManagementRoute{
 			{Method: http.MethodGet, Path: summaryRoute, Description: "Aggregated observation summary for the selected period."},
-			{Method: http.MethodGet, Path: requestsRoute, Description: "Cursor-paginated observed request metadata."},
+			{Method: http.MethodGet, Path: requestsRoute, Description: "Offset-paginated observed request metadata."},
 			{Method: http.MethodGet, Path: bodyRoute, Description: "One captured request body by request_id."},
 			{Method: http.MethodGet, Path: settingsRoute, Description: "Effective capture and retention settings."},
 			{Method: http.MethodGet, Path: healthRoute, Description: "Writer and drop counters."},
@@ -608,6 +609,9 @@ func (m *Manager) parseQuery(values url.Values, maxRange time.Duration, align, w
 		Model:    strings.TrimSpace(values.Get("model")),
 	}
 	if withLimit {
+		if rawCursor := strings.TrimSpace(values.Get("cursor")); rawCursor != "" {
+			return observer.Query{}, &httpError{status: http.StatusBadRequest, message: "legacy cursor is not supported"}
+		}
 		limit := defaultRequestLimit
 		if raw := strings.TrimSpace(values.Get("limit")); raw != "" {
 			parsed, errLimit := strconv.Atoi(raw)
@@ -617,7 +621,25 @@ func (m *Manager) parseQuery(values url.Values, maxRange time.Duration, align, w
 			limit = parsed
 		}
 		query.Limit = limit
-		query.Cursor = strings.TrimSpace(values.Get("cursor"))
+
+		offset := 0
+		if values.Has("offset") {
+			rawOffset := values.Get("offset")
+			if rawOffset == "" {
+				return observer.Query{}, &httpError{status: http.StatusBadRequest, message: "offset must be a non-negative integer"}
+			}
+			for _, ch := range rawOffset {
+				if ch < '0' || ch > '9' {
+					return observer.Query{}, &httpError{status: http.StatusBadRequest, message: "offset must be a non-negative integer"}
+				}
+			}
+			parsedOffset, errOffset := strconv.ParseInt(rawOffset, 10, 64)
+			if errOffset != nil || parsedOffset < 0 || parsedOffset > math.MaxInt32 {
+				return observer.Query{}, &httpError{status: http.StatusBadRequest, message: "offset must be between 0 and 2147483647"}
+			}
+			offset = int(parsedOffset)
+		}
+		query.Offset = offset
 	}
 	return query, nil
 }
@@ -642,7 +664,7 @@ func alignUp(t time.Time) time.Time {
 // 503/500 instead of being masked as bad requests.
 func managementStoreError(err error) pluginapi.ManagementResponse {
 	switch {
-	case errors.Is(err, observer.ErrInvalidCursor), errors.Is(err, observer.ErrInvalidQuery):
+	case errors.Is(err, observer.ErrInvalidQuery):
 		return managementError(http.StatusBadRequest, "invalid request query")
 	case errors.Is(err, observer.ErrClosed):
 		return managementError(http.StatusServiceUnavailable, "observer unavailable")

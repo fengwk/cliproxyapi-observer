@@ -20,9 +20,10 @@ func TestNormalizeUsageKnownSubsetAccounting(t *testing.T) {
 			InputTokens: 100, OutputTokens: 50, ReasoningTokens: 20, CacheReadTokens: 30,
 		},
 	}
-	r := NormalizeUsage(record, map[string]Price{
-		"gpt-5": {Input: 1, Output: 2, CacheRead: 0.5},
-	})
+	r := NormalizeUsage(record)
+	if r.CostUSD != nil {
+		t.Fatalf("NormalizeUsage must never compute cost, got %v", *r.CostUSD)
+	}
 	if r.AccountingQuality != string(usage.TokenAccountingQualityComplete) {
 		t.Fatalf("quality = %q", r.AccountingQuality)
 	}
@@ -39,8 +40,12 @@ func TestNormalizeUsageKnownSubsetAccounting(t *testing.T) {
 	if !r.CacheHit {
 		t.Errorf("cache hit not detected")
 	}
-	if r.CostUSD == nil || !approx(*r.CostUSD, 185.0/1_000_000) {
-		t.Errorf("cost = %v, want 0.000185", r.CostUSD)
+	prices := map[string]Price{
+		"gpt-5": {Input: 1, Output: 2, CacheRead: 0.5},
+	}
+	cost := RequestCost(r, prices)
+	if cost == nil || !approx(*cost, 185.0/1_000_000) {
+		t.Errorf("cost = %v, want 0.000185", cost)
 	}
 	if r.TPS == nil || !approx(*r.TPS, 50.0) {
 		t.Errorf("tps = %v, want 50", r.TPS)
@@ -63,7 +68,10 @@ func TestNormalizeUsageClaudeReadWriteIndependent(t *testing.T) {
 			CachedTokens: 70, OutputTokens: 200, ReasoningTokens: 100,
 		},
 	}
-	r := NormalizeUsage(record, nil)
+	r := NormalizeUsage(record)
+	if r.CostUSD != nil {
+		t.Fatalf("NormalizeUsage must never compute cost, got %v", *r.CostUSD)
+	}
 	if r.AccountingQuality != string(usage.TokenAccountingQualityComplete) {
 		t.Fatalf("quality = %q", r.AccountingQuality)
 	}
@@ -82,6 +90,14 @@ func TestNormalizeUsageClaudeReadWriteIndependent(t *testing.T) {
 	if r.TotalTokens != 470 {
 		t.Errorf("total = %d, want 470", r.TotalTokens)
 	}
+	prices := map[string]Price{
+		"claude-sonnet-4-5": {Input: 3, Output: 15, CacheRead: 0.3, CacheCreation: 3.75},
+	}
+	cost := RequestCost(r, prices)
+	wantCost := (100.0*3.0 + 50.0*0.3 + 20.0*3.75 + 300.0*15.0) / 1_000_000
+	if cost == nil || !approx(*cost, wantCost) {
+		t.Errorf("RequestCost = %v, want %v", cost, wantCost)
+	}
 }
 
 func TestNormalizeUsageGeminiSeparateReasoning(t *testing.T) {
@@ -92,7 +108,10 @@ func TestNormalizeUsageGeminiSeparateReasoning(t *testing.T) {
 			InputTokens: 100, CacheReadTokens: 40, OutputTokens: 50, ReasoningTokens: 20,
 		},
 	}
-	r := NormalizeUsage(record, nil)
+	r := NormalizeUsage(record)
+	if r.CostUSD != nil {
+		t.Fatalf("NormalizeUsage must never compute cost, got %v", *r.CostUSD)
+	}
 	if r.AccountingQuality != string(usage.TokenAccountingQualityComplete) {
 		t.Fatalf("quality = %q (want complete distinct reasoning)", r.AccountingQuality)
 	}
@@ -103,6 +122,14 @@ func TestNormalizeUsageGeminiSeparateReasoning(t *testing.T) {
 	// Reasoning is distinct and additive to non-reasoning output.
 	if r.ReasoningTokens != 20 || r.OutputTokens != 70 {
 		t.Errorf("output = %d reasoning = %d, want 70/20", r.OutputTokens, r.ReasoningTokens)
+	}
+	prices := map[string]Price{
+		"gemini-2.5-pro": {Input: 1.25, Output: 5.0, CacheRead: 0.3},
+	}
+	cost := RequestCost(r, prices)
+	wantCost := (60.0*1.25 + 40.0*0.3 + 70.0*5.0) / 1_000_000
+	if cost == nil || !approx(*cost, wantCost) {
+		t.Errorf("RequestCost = %v, want %v", cost, wantCost)
 	}
 }
 
@@ -115,7 +142,10 @@ func TestNormalizeUsageUnknownSemanticsExposesRawPositiveCounters(t *testing.T) 
 			CacheReadTokens: 7, CacheCreationTokens: 3,
 		},
 	}
-	r := NormalizeUsage(record, map[string]Price{"unknown-model": {Input: 1, Output: 1}})
+	r := NormalizeUsage(record)
+	if r.CostUSD != nil {
+		t.Fatalf("NormalizeUsage must never compute cost, got %v", *r.CostUSD)
+	}
 	if r.AccountingQuality != string(usage.TokenAccountingQualityUnclassified) {
 		t.Fatalf("quality = %q, want unclassified", r.AccountingQuality)
 	}
@@ -139,11 +169,12 @@ func TestNormalizeUsageUnknownSemanticsExposesRawPositiveCounters(t *testing.T) 
 	if r.RawUsage.InputTokens != 100 || r.RawUsage.OutputTokens != 50 {
 		t.Errorf("raw counters not preserved: %+v", r.RawUsage)
 	}
-	if r.CostUSD != nil {
-		t.Errorf("unclassified cost must be nil, got %v", *r.CostUSD)
-	}
 	if r.TPS != nil {
 		t.Errorf("unclassified tps must be nil, got %v", *r.TPS)
+	}
+	// Unclassified accounting must yield nil cost even if price is provided.
+	if cost := RequestCost(r, map[string]Price{"unknown-model": {Input: 1, Output: 1}}); cost != nil {
+		t.Errorf("unclassified cost must be nil, got %v", *cost)
 	}
 }
 
@@ -156,7 +187,10 @@ func TestNormalizeUsageCacheHitUsesExplicitReadOnly(t *testing.T) {
 			InputTokens: 10, OutputTokens: 5, CachedTokens: 40, CacheCreationTokens: 4,
 		},
 	}
-	r := NormalizeUsage(record, nil)
+	r := NormalizeUsage(record)
+	if r.CostUSD != nil {
+		t.Fatalf("NormalizeUsage must never compute cost, got %v", *r.CostUSD)
+	}
 	if r.CacheHit {
 		t.Errorf("legacy CachedTokens/creation must not set CacheHit: %+v", r)
 	}
@@ -168,12 +202,15 @@ func TestNormalizeUsageUnpricedModelHasNoCost(t *testing.T) {
 		RequestedAt: time.Unix(5000, 0).UTC(),
 		Detail:      pluginapi.UsageDetail{InputTokens: 10, OutputTokens: 10},
 	}
-	r := NormalizeUsage(record, map[string]Price{})
+	r := NormalizeUsage(record)
+	if r.CostUSD != nil {
+		t.Fatalf("NormalizeUsage must never compute cost, got %v", *r.CostUSD)
+	}
 	if r.AccountingQuality != string(usage.TokenAccountingQualityComplete) {
 		t.Fatalf("quality = %q", r.AccountingQuality)
 	}
-	if r.CostUSD != nil {
-		t.Errorf("cost must be nil without a configured price")
+	if cost := RequestCost(r, map[string]Price{}); cost != nil {
+		t.Errorf("cost must be nil without a configured price, got %v", *cost)
 	}
 }
 
@@ -192,17 +229,181 @@ func TestNormalizeUsagePreservesManyModelIdentities(t *testing.T) {
 			RequestedAt: time.Unix(int64(10000+i), 0).UTC(),
 			Detail:      pluginapi.UsageDetail{InputTokens: 1000, OutputTokens: 0},
 		}
-		r := NormalizeUsage(record, prices)
+		r := NormalizeUsage(record)
+		if r.CostUSD != nil {
+			t.Fatalf("NormalizeUsage must never compute cost, got %v", *r.CostUSD)
+		}
 		if r.Model != model {
 			t.Fatalf("model identity changed: %q != %q", r.Model, model)
 		}
-		if r.CostUSD == nil {
-			t.Fatalf("model %q not priced", model)
+		cost := RequestCost(r, prices)
+		if cost == nil {
+			t.Fatalf("model %q not priced by RequestCost", model)
 		}
 		want := float64(i) * 1000 / 1_000_000
-		if !approx(*r.CostUSD, want) {
-			t.Fatalf("model %q cost = %v, want %v", model, *r.CostUSD, want)
+		if !approx(*cost, want) {
+			t.Fatalf("model %q cost = %v, want %v", model, *cost, want)
 		}
+	}
+}
+
+// TestRequestCostCachedHeavyCodexReasoningAndAliases tests cached-heavy codex gpt-6.1-sol
+// (670000 input, 669600 cache, 54 output), alias mismatch exact id, and ensures output reasoning
+// is not double-counted.
+func TestRequestCostCachedHeavyCodexReasoningAndAliases(t *testing.T) {
+	record := pluginapi.UsageRecord{
+		RequestID:   "codex-sol-1",
+		Provider:    "codex",
+		Model:       "gpt-6.1-sol",
+		Alias:       "gpt-6.1",
+		RequestedAt: time.Unix(6000, 0).UTC(),
+		Detail: pluginapi.UsageDetail{
+			InputTokens:     670000,
+			CacheReadTokens: 669600,
+			OutputTokens:    54,
+			ReasoningTokens: 20, // output already contains reasoning tokens; must not double-count
+		},
+	}
+	r := NormalizeUsage(record)
+	// NormalizeUsage must never compute cost
+	if r.CostUSD != nil {
+		t.Fatalf("NormalizeUsage must never compute cost, got %v", *r.CostUSD)
+	}
+
+	if r.AccountingQuality != string(usage.TokenAccountingQualityComplete) {
+		t.Fatalf("quality = %q, want complete", r.AccountingQuality)
+	}
+	// Under codex subset accounting:
+	// InputTokens: 670000, CacheReadTokens: 669600, UncachedInputTokens: 670000 - 669600 = 400
+	// OutputTokens: 54, ReasoningTokens: 20
+	// TotalTokens: 670000 + 54 = 670054
+	if r.InputTokens != 670000 || r.CacheReadTokens != 669600 || r.UncachedInputTokens != 400 {
+		t.Fatalf("input breakdown mismatch: %+v", r)
+	}
+	if r.OutputTokens != 54 || r.ReasoningTokens != 20 {
+		t.Fatalf("output breakdown mismatch: %+v", r)
+	}
+	if r.TotalTokens != 670054 {
+		t.Fatalf("total = %d, want 670054", r.TotalTokens)
+	}
+	if !r.CacheHit {
+		t.Fatalf("CacheHit = false, want true")
+	}
+
+	// Price.Input / Output / CacheRead / CacheCreation per-million.
+	// Output includes reasoning tokens (20); reasoning must not be double counted.
+	prices := map[string]Price{
+		"gpt-6.1-sol": {
+			Input:         2.50,
+			Output:        10.00,
+			CacheRead:     0.25,
+			CacheCreation: 1.25,
+		},
+	}
+	cost := RequestCost(r, prices)
+	if cost == nil {
+		t.Fatalf("RequestCost returned nil for model %q", r.Model)
+	}
+	// (400 * 2.50 + 669600 * 0.25 + 0 * 1.25 + 54 * 10.00) / 1_000_000
+	// = (1000 + 167400 + 0 + 540) / 1_000_000 = 168940 / 1_000_000 = 0.16894
+	wantCost := (400.0*2.50 + 669600.0*0.25 + 54.0*10.00) / 1_000_000
+	if !approx(*cost, wantCost) {
+		t.Fatalf("RequestCost = %v, want %v", *cost, wantCost)
+	}
+	// Verify that reasoning tokens are not double-counted (e.g. 54 + 20)
+	doubleCountCost := (400.0*2.50 + 669600.0*0.25 + (54.0+20.0)*10.00) / 1_000_000
+	if approx(*cost, doubleCountCost) {
+		t.Fatalf("RequestCost double-counted reasoning tokens: %v", *cost)
+	}
+
+	// Alias mismatch exact id:
+	// 1. When prices only contains the alias "gpt-6.1", RequestCost must return nil because it queries exact r.Model.
+	aliasOnlyPrices := map[string]Price{
+		"gpt-6.1": {Input: 2.50, Output: 10.00, CacheRead: 0.25, CacheCreation: 1.25},
+	}
+	if aliasCost := RequestCost(r, aliasOnlyPrices); aliasCost != nil {
+		t.Errorf("RequestCost with alias-only price must return nil, got %v", *aliasCost)
+	}
+
+	// 2. When both exact id and alias are configured with different prices, exact id must be used.
+	bothPrices := map[string]Price{
+		"gpt-6.1-sol": {Input: 2.50, Output: 10.00, CacheRead: 0.25, CacheCreation: 1.25},
+		"gpt-6.1":     {Input: 99.0, Output: 99.0, CacheRead: 99.0, CacheCreation: 99.0},
+	}
+	exactCost := RequestCost(r, bothPrices)
+	if exactCost == nil || !approx(*exactCost, wantCost) {
+		t.Errorf("RequestCost must use exact model id instead of alias, got %v, want %v", exactCost, wantCost)
+	}
+}
+
+// TestRequestCostSpecialPrices tests NaN/Inf/zero/missing price behavior across all Price fields.
+func TestRequestCostSpecialPrices(t *testing.T) {
+	record := pluginapi.UsageRecord{
+		RequestID: "s1", Provider: "openai", Model: "gpt-6.1-sol",
+		Detail: pluginapi.UsageDetail{
+			InputTokens: 670000, CacheReadTokens: 669600, OutputTokens: 54, ReasoningTokens: 20,
+		},
+	}
+	r := NormalizeUsage(record)
+	if r.CostUSD != nil {
+		t.Fatalf("NormalizeUsage must never compute cost, got %v", *r.CostUSD)
+	}
+
+	// Zero price: valid finite numbers, must yield 0.0 (not nil)
+	zeroPrices := map[string]Price{
+		"gpt-6.1-sol": {Input: 0, Output: 0, CacheRead: 0, CacheCreation: 0},
+	}
+	zeroCost := RequestCost(r, zeroPrices)
+	if zeroCost == nil {
+		t.Fatalf("RequestCost with zero price returned nil, want 0.0")
+	}
+	if *zeroCost != 0.0 {
+		t.Errorf("RequestCost with zero price = %v, want 0.0", *zeroCost)
+	}
+
+	// Missing price: not configured in map, should return nil
+	missingPrices := map[string]Price{
+		"other-model": {Input: 1, Output: 1},
+	}
+	if cost := RequestCost(r, missingPrices); cost != nil {
+		t.Errorf("RequestCost for missing model price must be nil, got %v", *cost)
+	}
+	if cost := RequestCost(r, map[string]Price{}); cost != nil {
+		t.Errorf("RequestCost for empty prices map must be nil, got %v", *cost)
+	}
+	if cost := RequestCost(r, nil); cost != nil {
+		t.Errorf("RequestCost for nil prices map must be nil, got %v", *cost)
+	}
+
+	// NaN, Inf (+Inf, -Inf), and negative prices across all fields: Input, Output, CacheRead, CacheCreation
+	badPrices := []struct {
+		name  string
+		price Price
+	}{
+		{"NaN Input", Price{Input: math.NaN(), Output: 1, CacheRead: 1, CacheCreation: 1}},
+		{"NaN Output", Price{Input: 1, Output: math.NaN(), CacheRead: 1, CacheCreation: 1}},
+		{"NaN CacheRead", Price{Input: 1, Output: 1, CacheRead: math.NaN(), CacheCreation: 1}},
+		{"NaN CacheCreation", Price{Input: 1, Output: 1, CacheRead: 1, CacheCreation: math.NaN()}},
+		{"+Inf Input", Price{Input: math.Inf(1), Output: 1, CacheRead: 1, CacheCreation: 1}},
+		{"+Inf Output", Price{Input: 1, Output: math.Inf(1), CacheRead: 1, CacheCreation: 1}},
+		{"+Inf CacheRead", Price{Input: 1, Output: 1, CacheRead: math.Inf(1), CacheCreation: 1}},
+		{"+Inf CacheCreation", Price{Input: 1, Output: 1, CacheRead: 1, CacheCreation: math.Inf(1)}},
+		{"-Inf Input", Price{Input: math.Inf(-1), Output: 1, CacheRead: 1, CacheCreation: 1}},
+		{"-Inf Output", Price{Input: 1, Output: math.Inf(-1), CacheRead: 1, CacheCreation: 1}},
+		{"-Inf CacheRead", Price{Input: 1, Output: 1, CacheRead: math.Inf(-1), CacheCreation: 1}},
+		{"-Inf CacheCreation", Price{Input: 1, Output: 1, CacheRead: 1, CacheCreation: math.Inf(-1)}},
+		{"Negative Input", Price{Input: -0.1, Output: 1, CacheRead: 1, CacheCreation: 1}},
+		{"Negative Output", Price{Input: 1, Output: -0.1, CacheRead: 1, CacheCreation: 1}},
+		{"Negative CacheRead", Price{Input: 1, Output: 1, CacheRead: -0.1, CacheCreation: 1}},
+		{"Negative CacheCreation", Price{Input: 1, Output: 1, CacheRead: 1, CacheCreation: -0.1}},
+	}
+	for _, tc := range badPrices {
+		t.Run(tc.name, func(t *testing.T) {
+			prices := map[string]Price{"gpt-6.1-sol": tc.price}
+			if cost := RequestCost(r, prices); cost != nil {
+				t.Errorf("RequestCost for %s must be nil, got %v", tc.name, *cost)
+			}
+		})
 	}
 }
 

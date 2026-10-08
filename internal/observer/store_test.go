@@ -1,12 +1,14 @@
 package observer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestStoreSubmitFlushRead(t *testing.T) {
@@ -34,7 +36,7 @@ func TestStoreSubmitFlushRead(t *testing.T) {
 	if item.AccountingQuality != "complete" {
 		t.Errorf("quality = %q", item.AccountingQuality)
 	}
-	if page.HasMore || page.NextCursor != "" {
+	if page.HasMore || page.Offset != 0 {
 		t.Errorf("unexpected paging state: %+v", page)
 	}
 }
@@ -50,7 +52,9 @@ func TestSubmitUsageRejectsEmptyRequestID(t *testing.T) {
 	}
 }
 
-func TestHistoricalCostSnapshotSurvivesReopen(t *testing.T) {
+// Historical requests are repriced on read using the currently effective
+// exact-model price map; nothing monetary is stored.
+func TestHistoricalCostRepricedOnReopen(t *testing.T) {
 	cfg := testConfig(t, func(c *Config) {
 		c.Prices = map[string]Price{"gpt-5": {Input: 10, Output: 10}}
 	})
@@ -63,6 +67,8 @@ func TestHistoricalCostSnapshotSurvivesReopen(t *testing.T) {
 		t.Fatalf("submit rejected")
 	}
 	flushAll(t, s)
+	// The raw disk record must not carry a derived cost.
+	assertNoStoredCost(t, s, at)
 	page, _ := s.Requests(Query{})
 	if len(page.Items) != 1 || page.Items[0].CostUSD == nil {
 		t.Fatalf("no priced request: %+v", page.Items)
@@ -72,7 +78,7 @@ func TestHistoricalCostSnapshotSurvivesReopen(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// Reopen with completely different prices: the stored cost must not move.
+	// Reopen with completely different prices: the request is repriced.
 	cfg2 := cfg
 	cfg2.Prices = map[string]Price{"gpt-5": {Input: 0.0001, Output: 0.0001}}
 	s2, err := Open(cfg2)
@@ -87,8 +93,35 @@ func TestHistoricalCostSnapshotSurvivesReopen(t *testing.T) {
 	if len(page2.Items) != 1 || page2.Items[0].CostUSD == nil {
 		t.Fatalf("record lost on reopen: %+v", page2.Items)
 	}
-	if *page2.Items[0].CostUSD != original {
-		t.Errorf("historical cost changed: %v -> %v", original, *page2.Items[0].CostUSD)
+	if *page2.Items[0].CostUSD == original {
+		t.Errorf("cost not repriced on reopen: %v", *page2.Items[0].CostUSD)
+	}
+	if want := 1000 * 0.0001 / 1_000_000; !approx(*page2.Items[0].CostUSD, want) {
+		t.Errorf("repriced cost = %v, want %v", *page2.Items[0].CostUSD, want)
+	}
+}
+
+// assertNoStoredCost scans the raw request JSON to prove no monetary field was
+// persisted for the newest record at `at`.
+func assertNoStoredCost(t *testing.T, s *Store, at time.Time) {
+	t.Helper()
+	err := s.view(func(tx *bolt.Tx) error {
+		rb := tx.Bucket(bucketRequests)
+		c := rb.Cursor()
+		for k, v := c.Last(); k != nil; k, v = c.Prev() {
+			ts, ok := requestKeyTime(k)
+			if !ok || !ts.Equal(at) {
+				continue
+			}
+			if bytes.Contains(v, []byte("cost_usd")) {
+				t.Fatalf("raw request JSON persisted cost: %s", v)
+			}
+			return nil
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scan raw request: %v", err)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -174,6 +175,10 @@ func openStore(config Config, cleanupPeriod time.Duration) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.migrateStats(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := s.loadBodyBytes(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -267,7 +272,7 @@ func (s *Store) SubmitUsage(record pluginapi.UsageRecord) bool {
 		s.droppedUsage.Add(1)
 		return false
 	}
-	req := NormalizeUsage(record, s.prices)
+	req := NormalizeUsage(record)
 
 	s.enqueueMu.RLock()
 	defer s.enqueueMu.RUnlock()
@@ -423,9 +428,13 @@ func (s *Store) Status() Status {
 	}
 }
 
-// Requests returns a newest-first cursor page. Provider/model filters narrow
+// Requests returns a newest-first offset page. Provider/model filters narrow
 // the scanned range without any exact total scan.
 func (s *Store) Requests(query Query) (RequestPage, error) {
+	if query.Offset < 0 || query.Offset > math.MaxInt32 {
+		return RequestPage{}, ErrInvalidQuery
+	}
+
 	now := s.now()
 	to := query.To
 	if to.IsZero() {
@@ -441,9 +450,6 @@ func (s *Store) Requests(query Query) (RequestPage, error) {
 	if retainedFrom := now.Add(-s.cfg.RequestRetention); from.Before(retainedFrom) {
 		from = retainedFrom
 	}
-	if !from.Before(to) {
-		return RequestPage{Items: []Request{}}, nil
-	}
 
 	limit := query.Limit
 	if limit <= 0 {
@@ -453,24 +459,25 @@ func (s *Store) Requests(query Query) (RequestPage, error) {
 		limit = maxPageLimit
 	}
 
-	var cursorKey []byte
-	if query.Cursor != "" {
-		ts, seq, err := decodeCursor(query.Cursor)
-		if err != nil {
-			return RequestPage{}, err
-		}
-		cursorKey = encodeRequestKey(ts, seq)
+	page := RequestPage{
+		Items:  []Request{},
+		Offset: query.Offset,
+		Limit:  limit,
 	}
 
-	page := RequestPage{Items: []Request{}}
+	if !from.Before(to) {
+		return page, nil
+	}
+
 	err := s.view(func(tx *bolt.Tx) error {
 		rb := tx.Bucket(bucketRequests)
 		if rb == nil {
 			return nil
 		}
 		c := rb.Cursor()
-		key, value := seekReverse(c, cursorKey, to)
+		key, value := seekReverse(c, to)
 		filtered := query.Provider != "" || query.Model != ""
+		skipped := 0
 		for ; key != nil; key, value = c.Prev() {
 			ts, ok := requestKeyTime(key)
 			if !ok {
@@ -482,10 +489,25 @@ func (s *Store) Requests(query Query) (RequestPage, error) {
 			if ts.Before(from) {
 				break
 			}
-			if !filtered && len(page.Items) >= limit {
+
+			if !filtered {
+				if skipped < query.Offset {
+					skipped++
+					continue
+				}
+				if len(page.Items) < limit {
+					var r Request
+					if err := json.Unmarshal(value, &r); err != nil {
+						continue
+					}
+					r.CostUSD = RequestCost(r, s.prices)
+					page.Items = append(page.Items, r)
+					continue
+				}
 				page.HasMore = true
 				break
 			}
+
 			var r Request
 			if err := json.Unmarshal(value, &r); err != nil {
 				continue
@@ -493,11 +515,17 @@ func (s *Store) Requests(query Query) (RequestPage, error) {
 			if !matchesQuery(r, query) {
 				continue
 			}
-			if len(page.Items) >= limit {
-				page.HasMore = true
-				break
+			if skipped < query.Offset {
+				skipped++
+				continue
 			}
-			page.Items = append(page.Items, r)
+			if len(page.Items) < limit {
+				r.CostUSD = RequestCost(r, s.prices)
+				page.Items = append(page.Items, r)
+				continue
+			}
+			page.HasMore = true
+			break
 		}
 		s.attachBodyAvailability(tx, page.Items, now)
 		return nil
@@ -505,27 +533,11 @@ func (s *Store) Requests(query Query) (RequestPage, error) {
 	if err != nil {
 		return RequestPage{}, err
 	}
-	if page.HasMore && len(page.Items) > 0 {
-		last := page.Items[len(page.Items)-1]
-		page.NextCursor = encodeCursor(last.Time, last.Sequence)
-	}
 	return page, nil
 }
 
-// seekReverse positions the cursor on the newest key strictly older than the
-// cursor key (when paging) or strictly older than `to` (first page).
-func seekReverse(c *bolt.Cursor, cursorKey []byte, to time.Time) ([]byte, []byte) {
-	if cursorKey != nil {
-		key, value := c.Seek(cursorKey)
-		if key == nil {
-			key, value = c.Last()
-			if key != nil && bytes.Equal(key, cursorKey) {
-				key, value = c.Prev()
-			}
-			return key, value
-		}
-		return c.Prev()
-	}
+// seekReverse positions the cursor on the newest key strictly older than `to`.
+func seekReverse(c *bolt.Cursor, to time.Time) ([]byte, []byte) {
 	key, _ := c.Seek(encodeRequestKey(to, 0))
 	if key == nil {
 		return c.Last()
@@ -609,8 +621,9 @@ func (s *Store) Summary(query Query) (Summary, error) {
 			}
 			counters, ok := decodeCounters(value)
 			if !ok {
-				continue
+				return fmt.Errorf("corrupt stats record")
 			}
+			priceCounters(&counters, model, s.prices)
 			addCounters(&totals, counters)
 			gk := provider + "\x00" + model
 			g := groups[gk]
@@ -1108,7 +1121,11 @@ func (s *Store) writeBatch(usage []Request, bodies []pendingBody) error {
 			}
 			r.Sequence = seq
 			r.BodyAvailable = false
-			value, err := json.Marshal(r)
+			// Shadow the derived API field only for disk serialization.
+			value, err := json.Marshal(struct {
+				Request
+				CostUSD *float64 `json:"cost_usd,omitempty"`
+			}{Request: r})
 			if err != nil {
 				return err
 			}
