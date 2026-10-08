@@ -7,6 +7,14 @@
  *  - CPA 插件资源路由（/v0/resource/plugins/cliproxyapi-observer/...）——公开、带 CSP。
  *  - CPA 管理 API（/v0/management/plugins/cliproxyapi-observer/...）——要求 Bearer 密钥。
  *  - 一个模拟 management-center 的嵌入宿主页（/embed），用于验证 data-theme 跟随。
+ *  - 配置管理与校验：
+ *      - POST /validate：认证接收 raw patch 并使用 ui.js 纯函数校验
+ *      - GET /config & PATCH /config：仅限 v0 路径（保留反向代理前缀支持）
+ *      - GET /settings：由 config 转换而来，含 compact_interval_seconds、compact_min_bytes
+ *  - 故障注入控制与计数（可用于单测断言）：
+ *      - /__mock/control、/__mock/counters、/__mock/reset 及 startServer 导出的 controls/counters 对象
+ *      - 支持模拟 validate failure, write failure, reconfigure temporary 503,
+ *        effective never updates, config read fail
  *
  * 仅用于本地验证：绑定 127.0.0.1、使用假密钥与假数据，从不接触任何真实 CPA 或上游。
  */
@@ -20,8 +28,17 @@ const RESOURCE_BASE = '/v0/resource/plugins/' + PLUGIN_ID;
 const MANAGEMENT_BASE = '/v0/management/plugins/' + PLUGIN_ID;
 const SECRET = 'observer-test-secret';
 
-const ASSET_CSP =
-  "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'self'";
+function loadCspPolicy() {
+  const goPath = path.resolve(__dirname, '../../plugin/management.go');
+  const content = fs.readFileSync(goPath, 'utf8');
+  const match = content.match(/cspPolicy\s*=\s*"([^"]+)"/);
+  if (!match || !match[1]) {
+    throw new Error('Could not find cspPolicy in ' + goPath);
+  }
+  return match[1];
+}
+
+const ASSET_CSP = loadCspPolicy();
 
 const XSS_MODEL = '<img src=x onerror="window.__observerXss=1">';
 const XSS_PROMPT = '<script>window.__observerXss=1</script>';
@@ -30,6 +47,89 @@ const BASE_TIME = Date.UTC(2026, 0, 2, 12, 0, 0);
 
 function asset(name) {
   return fs.readFileSync(path.join(__dirname, '..', name));
+}
+
+function parseDurationSeconds(val, defaultSec) {
+  if (typeof val === 'number' && Number.isFinite(val)) return Math.floor(val);
+  if (typeof val !== 'string') return defaultSec;
+  const s = val.trim();
+  if (!s || !/^(\d+(?:\.\d+)?(s|m|h))+$/i.test(s)) return defaultSec;
+  let total = 0;
+  const re = /(\d+(?:\.\d+)?)(s|m|h)/gi;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    const n = parseFloat(m[1]);
+    const unit = m[2].toLowerCase();
+    if (unit === 'h') total += n * 3600;
+    else if (unit === 'm') total += n * 60;
+    else if (unit === 's') total += n;
+  }
+  return Math.round(total);
+}
+
+function createDefaultConfig(options) {
+  const captureBodies =
+    options && options.captureBodies !== undefined ? Boolean(options.captureBodies) : true;
+  return {
+    enabled: true,
+    store: { fixture: 'preserve-me' },
+    db: 'data/cliproxyapi-observer.db',
+    'stats-retention-days': 365,
+    'request-retention': '24h',
+    'body-retention': '24h',
+    'capture-bodies': captureBodies,
+    'max-body-bytes': 1048576,
+    'max-body-storage-bytes': 268435456,
+    flush: '1s',
+    'compact-interval': '900s',
+    'compact-min-bytes': 8388608,
+    prices: {
+      'gpt-5.1-codex': {
+        input: 1.25,
+        output: 5.0,
+        'cache-read': 0.3125,
+        'cache-creation': 1.25
+      }
+    }
+  };
+}
+
+function configToSettings(cfg) {
+  const captureBodies =
+    cfg['capture-bodies'] !== undefined ? Boolean(cfg['capture-bodies']) : Boolean(cfg.capture_bodies);
+  const bodyRetentionSeconds = parseDurationSeconds(cfg['body-retention'] || cfg.body_retention, 86400);
+  const requestRetentionSeconds = parseDurationSeconds(cfg['request-retention'] || cfg.request_retention, 86400);
+  const statsRetentionDays = Number(cfg['stats-retention-days'] || cfg.stats_retention_days || 365);
+  const maxBodyBytes = Number(cfg['max-body-bytes'] || cfg.max_body_bytes || 1048576);
+  const maxBodyStorageBytes = Number(cfg['max-body-storage-bytes'] || cfg.max_body_storage_bytes || 268435456);
+
+  const compactIntervalSeconds = Number(
+    cfg.compact_interval_seconds !== undefined
+      ? cfg.compact_interval_seconds
+      : parseDurationSeconds(cfg['compact-interval'] || cfg.compact_interval, 900)
+  );
+  const compactMinBytes = Number(
+    cfg.compact_min_bytes !== undefined ? cfg.compact_min_bytes : cfg['compact-min-bytes'] || 8388608
+  );
+
+  return {
+    capture_bodies: captureBodies,
+    body_retention_seconds: bodyRetentionSeconds,
+    request_retention_seconds: requestRetentionSeconds,
+    stats_retention_days: statsRetentionDays,
+    max_body_bytes: maxBodyBytes,
+    max_body_storage_bytes: maxBodyStorageBytes,
+    compact_interval_seconds: compactIntervalSeconds,
+    compact_min_bytes: compactMinBytes,
+    prices: Object.fromEntries(Object.entries(cfg.prices || {}).map(([id, p]) => [id, {
+      input: p.input, output: p.output,
+      cache_read: p['cache-read'], cache_creation: p['cache-creation']
+    }]))
+  };
+}
+
+function validateSettingsPatch(patch) {
+  return require('../ui.js').validateSettingsPatch(patch);
 }
 
 function buildSummary() {
@@ -183,6 +283,7 @@ function embedPage() {
       body { font-family: system-ui, sans-serif; margin: 0; background: #faf9f5; color: #2d2a26; }
       .host-bar { display: flex; gap: 8px; align-items: center; padding: 10px 14px; border-bottom: 1px solid #e3e1db; }
       iframe { display: block; width: 100%; height: 1500px; border: 0; }
+      .host-overlay { position: fixed; top: 52px; right: 0; width: 170px; height: 52px; background: #ddd8ce; color: #2d2a26; z-index: 20; padding: 12px; }
     </style>
   </head>
   <body>
@@ -193,6 +294,7 @@ function embedPage() {
       <button type="button" data-theme-value="dark">深色</button>
     </div>
     <iframe id="frame" src="${RESOURCE_BASE}/ui" title="Observer"></iframe>
+    <div class="host-overlay" data-testid="host-overlay">CPA 宿主工具</div>
     <script>
       function setTheme(value) {
         if (value) document.documentElement.setAttribute('data-theme', value);
@@ -209,73 +311,252 @@ function embedPage() {
 </html>`;
 }
 
-function createHandler(options) {
-  const captureBodies = options.captureBodies !== false;
-  return function handler(req, res) {
-    const url = new URL(req.url, 'http://127.0.0.1');
-    const pathname = url.pathname;
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const text = Buffer.concat(chunks).toString('utf8').trim();
+      if (!text) return resolve({});
+      try {
+        resolve(JSON.parse(text));
+      } catch (err) {
+        reject(new Error('Invalid JSON: ' + err.message));
+      }
+    });
+    req.on('error', reject);
+  });
+}
 
-    if (req.method === 'GET' && pathname === '/embed') {
-      const page = Buffer.from(embedPage(), 'utf8');
-      res.writeHead(200, {
-        'Content-Type': 'text/html; charset=utf-8',
-        'Cache-Control': 'no-store',
-        'X-Content-Type-Options': 'nosniff',
-        'Content-Length': page.length
-      });
-      res.end(page);
-      return;
-    }
+function createHandlerState(options) {
+  const opts = options || {};
+  let currentConfig = createDefaultConfig(opts);
+  if (opts.config && typeof opts.config === 'object') {
+    Object.assign(currentConfig, opts.config);
+  }
+  let effectiveSettings = configToSettings(currentConfig);
 
-    if (req.method === 'GET' && pathname.startsWith(RESOURCE_BASE + '/')) {
-      const name = pathname.slice(RESOURCE_BASE.length + 1);
-      if (name === 'ui' || name === 'ui.html') return assetResponse(res, 'ui.html', 'text/html; charset=utf-8');
-      if (name === 'ui.js') return assetResponse(res, 'ui.js', 'text/javascript; charset=utf-8');
-      if (name === 'ui.css') return assetResponse(res, 'ui.css', 'text/css; charset=utf-8');
-      res.writeHead(404).end();
-      return;
-    }
+  const controls = {
+    simulateValidateFailure: false,
+    simulateWriteFailure: false,
+    simulateReconfigureTemporary503: false,
+    reconfigureTemporary503Count: 0,
+    simulateEffectiveNeverUpdates: false,
+    simulateConfigReadFail: false
+  };
 
-    if (req.method === 'GET' && pathname.startsWith(MANAGEMENT_BASE + '/')) {
-      const auth = req.headers.authorization || '';
-      if (auth !== 'Bearer ' + SECRET) {
-        json(res, 403, { error: 'unauthorized' });
+  const counters = {
+    validations: 0,
+    validateFailures: 0,
+    configReads: 0,
+    readFailures: 0,
+    configWrites: 0,
+    writeFailures: 0,
+    reconfigure503s: 0,
+    settingsReads: 0
+  };
+
+  function reset() {
+    controls.simulateValidateFailure = false;
+    controls.simulateWriteFailure = false;
+    controls.simulateReconfigureTemporary503 = false;
+    controls.reconfigureTemporary503Count = 0;
+    controls.simulateEffectiveNeverUpdates = false;
+    controls.simulateConfigReadFail = false;
+
+    counters.validations = 0;
+    counters.validateFailures = 0;
+    counters.configReads = 0;
+    counters.readFailures = 0;
+    counters.configWrites = 0;
+    counters.writeFailures = 0;
+    counters.reconfigure503s = 0;
+    counters.settingsReads = 0;
+  }
+
+  async function handler(req, res) {
+    try {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      const pathname = url.pathname;
+
+      // 1. Mock Control 接口
+      if (pathname === '/__mock/control') {
+        if (req.method === 'POST') {
+          const body = await readJsonBody(req);
+          Object.assign(controls, body);
+          return json(res, 200, { ok: true, controls });
+        }
+        return json(res, 200, controls);
+      }
+
+      if (pathname === '/__mock/counters') {
+        return json(res, 200, counters);
+      }
+
+      if (pathname === '/__mock/reset') {
+        reset();
+        currentConfig = createDefaultConfig(opts);
+        effectiveSettings = configToSettings(currentConfig);
+        return json(res, 200, { ok: true, controls, counters });
+      }
+
+      // 2. 模拟宿主页
+      if (req.method === 'GET' && pathname === '/embed') {
+        const page = Buffer.from(embedPage(), 'utf8');
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Length': page.length
+        });
+        res.end(page);
         return;
       }
-      const endpoint = pathname.slice(MANAGEMENT_BASE.length + 1);
-      switch (endpoint) {
-        case 'summary':
-          return json(res, 200, buildSummary());
-        case 'requests':
-          return json(res, 200, buildRequestsPage(url, captureBodies));
-        case 'settings':
-          return json(res, 200, {
-            capture_bodies: captureBodies,
-            body_retention_seconds: 86400,
-            request_retention_seconds: 86400,
-            stats_retention_days: 365,
-            max_body_bytes: 1048576,
-            max_body_storage_bytes: 268435456
-          });
-        case 'health':
-          return json(res, 200, { dropped_usage: 3, dropped_bodies: 0, write_errors: 1, queued: 0 });
-        case 'body': {
-          const requestId = url.searchParams.get('request_id') || '';
-          if (!captureBodies || !requestId) return json(res, 404, { error: 'not found' });
-          return json(res, 200, buildBodyDetail(requestId));
-        }
-        default:
-          return json(res, 404, { error: 'not found' });
-      }
-    }
 
-    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('not found');
+      // 3. 静态资源路由（支持 reverse proxy）
+      const matchResource = pathname.match(/^(?:.*\/)?v(?:0|8)\/resource\/plugins\/cliproxyapi-observer\/(.*)$/);
+      if (req.method === 'GET' && matchResource) {
+        const name = matchResource[1];
+        if (name === 'ui' || name === 'ui.html') return assetResponse(res, 'ui.html', 'text/html; charset=utf-8');
+        if (name === 'ui.js') return assetResponse(res, 'ui.js', 'text/javascript; charset=utf-8');
+        if (name === 'ui.css') return assetResponse(res, 'ui.css', 'text/css; charset=utf-8');
+        res.writeHead(404).end();
+        return;
+      }
+
+      // 4. 管理 API 路由（支持 reverse proxy）
+      const matchMgmt = pathname.match(/^(?:.*\/)?(v[0-9]+)\/management\/plugins\/cliproxyapi-observer(?:\/(.*))?$/);
+      if (matchMgmt) {
+        const version = matchMgmt[1];
+        const endpoint = matchMgmt[2] || '';
+
+        // 认证校验
+        const auth = req.headers.authorization || '';
+        if (auth !== 'Bearer ' + SECRET) {
+          return json(res, 403, { error: 'unauthorized' });
+        }
+
+        // POST /validate
+        if (endpoint === 'validate') {
+          if (req.method !== 'POST') {
+            return json(res, 405, { error: 'method not allowed' });
+          }
+          counters.validations += 1;
+          if (controls.simulateValidateFailure) {
+            counters.validateFailures += 1;
+            return json(res, 400, { error: 'simulated validate failure' });
+          }
+          try {
+            const patch = await readJsonBody(req);
+            validateSettingsPatch(Object.assign(require('../ui.js').settingsToPatch(effectiveSettings), patch));
+            return json(res, 200, { valid: true });
+          } catch (err) {
+            counters.validateFailures += 1;
+            return json(res, 400, { error: err.message });
+          }
+        }
+
+        // GET/PATCH /config ONLY v0 路径（保留 reverse proxy）
+        if (endpoint === 'config') {
+          if (version !== 'v0') {
+            return json(res, 404, { error: 'not found' });
+          }
+          if (req.method === 'GET') {
+            counters.configReads += 1;
+            if (controls.simulateConfigReadFail) {
+              counters.readFailures += 1;
+              return json(res, 500, { error: 'simulated config read failure' });
+            }
+            return json(res, 200, currentConfig);
+          }
+          if (req.method === 'PATCH') {
+            counters.configWrites += 1;
+            if (controls.simulateWriteFailure) {
+              counters.writeFailures += 1;
+              return json(res, 500, { error: 'simulated write failure' });
+            }
+            try {
+              const patch = await readJsonBody(req);
+              validateSettingsPatch(Object.assign(require('../ui.js').settingsToPatch(effectiveSettings), patch));
+              Object.assign(currentConfig, patch);
+              if (!controls.simulateEffectiveNeverUpdates) {
+                effectiveSettings = configToSettings(currentConfig);
+              }
+              return json(res, 200, { status: 'ok' });
+            } catch (err) {
+              counters.writeFailures += 1;
+              return json(res, 400, { error: err.message });
+            }
+          }
+          return json(res, 405, { error: 'method not allowed' });
+        }
+
+        // 已有 GET 接口
+        if (req.method === 'GET') {
+          switch (endpoint) {
+            case 'summary':
+              return json(res, 200, buildSummary());
+            case 'requests': {
+              const capture = effectiveSettings.capture_bodies;
+              return json(res, 200, buildRequestsPage(url, capture));
+            }
+            case 'settings': {
+              counters.settingsReads += 1;
+              if (controls.simulateReconfigureTemporary503 || controls.reconfigureTemporary503Count > 0) {
+                if (controls.reconfigureTemporary503Count > 0) controls.reconfigureTemporary503Count -= 1;
+                counters.reconfigure503s += 1;
+                return json(res, 503, { error: 'simulated temporary 503 reconfiguring' });
+              }
+              return json(res, 200, effectiveSettings);
+            }
+            case 'health':
+              return json(res, 200, {
+                dropped_usage: 3, dropped_bodies: 0, write_errors: 1, queued: 0,
+                database_bytes: 33554432, reclaimable_bytes: 8388608,
+                compactions: 2, compaction_errors: 1, last_compaction_unix: BASE_TIME / 1000,
+                last_compaction_reclaimed_bytes: 4194304
+              });
+            case 'body': {
+              const capture = effectiveSettings.capture_bodies;
+              const requestId = url.searchParams.get('request_id') || '';
+              if (!capture || !requestId) return json(res, 404, { error: 'not found' });
+              return json(res, 200, buildBodyDetail(requestId));
+            }
+            default:
+              return json(res, 404, { error: 'not found' });
+          }
+        }
+      }
+
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('not found');
+    } catch (unexpected) {
+      json(res, 500, { error: unexpected && unexpected.message ? unexpected.message : 'server error' });
+    }
+  }
+
+  return {
+    handler,
+    controls,
+    counters,
+    reset,
+    getConfig: () => currentConfig,
+    setConfig: (cfg) => {
+      currentConfig = cfg;
+      if (!controls.simulateEffectiveNeverUpdates) effectiveSettings = configToSettings(cfg);
+    },
+    getSettings: () => effectiveSettings
   };
 }
 
+function createHandler(options) {
+  const state = createHandlerState(options);
+  return state.handler;
+}
+
 function startServer(options) {
-  const server = http.createServer(createHandler(options || {}));
+  const state = createHandlerState(options);
+  const server = http.createServer(state.handler);
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       const port = server.address().port;
@@ -285,6 +566,12 @@ function startServer(options) {
         origin: 'http://127.0.0.1:' + port,
         resourceURL: 'http://127.0.0.1:' + port + RESOURCE_BASE + '/ui',
         embedURL: 'http://127.0.0.1:' + port + '/embed',
+        controls: state.controls,
+        counters: state.counters,
+        reset: state.reset,
+        getConfig: state.getConfig,
+        setConfig: state.setConfig,
+        getSettings: state.getSettings,
         close: () => new Promise((done) => server.close(done))
       });
     });
@@ -293,11 +580,15 @@ function startServer(options) {
 
 module.exports = {
   startServer,
+  createHandler,
   SECRET,
   PLUGIN_ID,
   RESOURCE_BASE,
   MANAGEMENT_BASE,
+  ASSET_CSP,
   XSS_MODEL,
   XSS_PROMPT,
-  embedPage
+  embedPage,
+  configToSettings,
+  validateSettingsPatch
 };
