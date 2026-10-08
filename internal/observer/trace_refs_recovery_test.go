@@ -90,6 +90,7 @@ func liveBoltUpdate(t *testing.T, s *Store, fn func(*bolt.Tx) error) {
 	}
 }
 
+// Reopen repairs legacy/stale counts without exposing live ambiguous captures.
 func TestTraceRefs_RebuildLegacyAndStale(t *testing.T) {
 	t.Run("legacy_rebuild_and_orphan_cleanup", func(t *testing.T) {
 		cfg := testConfig(t, func(c *Config) { c.CaptureBodies = true })
@@ -196,6 +197,7 @@ func TestTraceRefs_RebuildLegacyAndStale(t *testing.T) {
 	})
 }
 
+// Failed reconstruction rolls back its bucket changes and releases the file lock.
 func TestTraceRefs_MalformedMetadataOpenErrorRollback(t *testing.T) {
 	cfg := testConfig(t, func(c *Config) { c.CaptureBodies = true })
 	s, err := Open(cfg)
@@ -238,6 +240,7 @@ func TestTraceRefs_MalformedMetadataOpenErrorRollback(t *testing.T) {
 	}
 }
 
+// Invalid deletion counts must not partially remove blobs, indexes or byte totals.
 func TestTraceRefs_DeletionRollback(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -293,6 +296,7 @@ func TestTraceRefs_DeletionRollback(t *testing.T) {
 	}
 }
 
+// Duplicates keep one reference; invalid counts roll back the whole new capture.
 func TestTraceRefs_InsertionRollbackAndDuplicate(t *testing.T) {
 	t.Run("duplicate_no_increment", func(t *testing.T) {
 		s := openTestStore(t, func(c *Config) { c.CaptureBodies = true })
@@ -360,6 +364,7 @@ func TestTraceRefs_InsertionRollbackAndDuplicate(t *testing.T) {
 	}
 }
 
+// A real compaction preserves references, ambiguity and the request sequence.
 func TestTraceRefs_AutoCompactionAndReopen(t *testing.T) {
 	clk := &clock{t: time.Now()}
 	cfg := compactConfig(t)

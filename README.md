@@ -2,7 +2,7 @@
 
 CLIProxyAPI (CPA) 的原生观测插件。独立仓库、独立动态库，**不修改、不 fork CPA 核心**。
 插件展示名为 **Observer**，稳定 ID 为 `cliproxyapi-observer`，版本由
-`internal/plugin.Version` 注入，仓库自带发布版本 `0.1.0`。
+`internal/plugin.Version` 注入；正式构建从发布 tag 解析版本，开发构建附带提交标识。
 
 插件只做一件事：在请求生命周期中**只读观测**，把用量与（可选的）请求正文写入本地
 bbolt 数据库，并通过 CPA 管理 API 与内置中文页面提供查询。它不代理上游、不改写
@@ -52,6 +52,9 @@ bbolt 数据库，并通过 CPA 管理 API 与内置中文页面提供查询。�
   淘汰，不需要等待新请求。
 - **内容与元数据分离**：正文单独存桶，绝不进入请求记录或聚合记录；正文关联
   `request_id` 与 `trace_id`。
+- **关联索引回收**：最后一条关联正文过期或被淘汰时，同时删除 trace 映射与引用计数。
+  有多个正文的 trace 保持不可判定，不会在部分正文删除后任意关联剩余正文；启动时
+  重建引用计数并清理旧库中的无主映射。
 - **脱敏**：对敏感 JSON 字段名（`authorization`、`api_key`、`api-key`、`password`、
   `secret`、`access_token`、`refresh_token`，大小写不敏感）做脱敏，正常 prompt/代码
   字符串保留。不保存请求头、认证对象、`Failure.Body` 或响应内容。
@@ -211,6 +214,36 @@ Linux/macOS 使用同目录 0600 临时数据库、约 1MiB 写事务与分配�
 `health` 增加缓存的 `database_bytes`、`reclaimable_bytes`、`compactions`、
 `compaction_errors`、`last_compaction_unix`（Unix 秒，未发生时为 0）和
 `last_compaction_reclaimed_bytes`。这些状态查询不进行磁盘 I/O。
+
+### 小磁盘 VPS 的容量边界
+
+当前没有整个 `.db` 文件的硬容量上限。正文配额只计算脱敏后的正文载荷，不包含
+请求元数据、分钟聚合、关联索引和 bbolt 页开销；元数据随请求速率与保留时长增长，
+聚合统计随活跃分钟数和提供商/模型组合数增长。保留期与自动压缩能控制常见场景中的
+长期积累，但不能保证高流量下数据库始终小于某个固定大小。
+
+小磁盘可先采用以下保守配置，合入现有插件配置，不覆盖其他字段。平时关闭正文采集，
+临时开启后也只保留 1h、最多 16 MiB 的有效正文：
+
+```yaml
+plugins:
+  configs:
+    cliproxyapi-observer:
+      capture-bodies: false
+      request-retention: "8h"
+      stats-retention-days: 30
+      body-retention: "1h"
+      max-body-bytes: 262144
+      max-body-storage-bytes: 16777216
+      compact-interval: "5m"
+      compact-min-bytes: 2097152
+```
+
+压缩过程中原库与新副本同时存在，应预留至少接近当前库大小的额外磁盘空间，
+不要等磁盘耗尽再指望压缩。空间不足时保留原库并报告压缩错误，观测写入也可能丢弃。
+需要严格磁盘上界时，还需独立文件系统或目录配额作为最后防线，并接受配额耗尽后
+无法继续采集。Docker 必须挂载**整个数据目录**，不能只挂单个数据库文件，
+否则无法安全执行同目录原子替换。
 
 ## 验证
 
