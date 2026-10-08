@@ -135,3 +135,27 @@ func TestCSSThemesAndNoExternalImports(t *testing.T) {
 		t.Fatal("ui.css must not reference external resources")
 	}
 }
+
+// Native scrollbars and form controls must follow the selected document theme.
+func TestCSSNativeColorSchemes(t *testing.T) {
+	css, _, _ := Asset("ui.css")
+	for _, tc := range []struct {
+		selector string
+		scheme   string
+	}{
+		{":root", "light"},
+		{"[data-theme='white']", "light"},
+		{"[data-theme='dark']", "dark"},
+	} {
+		t.Run(tc.selector, func(t *testing.T) {
+			block := regexp.MustCompile(regexp.QuoteMeta(tc.selector) + `\s*\{([^}]+)\}`).FindStringSubmatch(string(css))
+			if len(block) != 2 {
+				t.Fatalf("missing theme selector %q", tc.selector)
+			}
+			property := regexp.MustCompile(`\bcolor-scheme\s*:\s*` + tc.scheme + `\s*;`)
+			if !property.MatchString(block[1]) {
+				t.Fatalf("%s must declare color-scheme: %s", tc.selector, tc.scheme)
+			}
+		})
+	}
+}

@@ -7,6 +7,8 @@
  */
 
 :root {
+  color-scheme: light;
+
   --bg-secondary: #faf9f5;
   --bg-primary: #f0eee8;
   --bg-tertiary: #e9e6df;
@@ -58,6 +60,7 @@
 }
 
 [data-theme='white'] {
+  color-scheme: light;
   --bg-secondary: #ffffff;
   --bg-primary: #ffffff;
   --bg-tertiary: #f6f6f6;
@@ -91,6 +94,7 @@
 }
 
 [data-theme='dark'] {
+  color-scheme: dark;
   --bg-secondary: #151412;
   --bg-primary: #1d1b18;
   --bg-tertiary: #262320;

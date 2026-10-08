@@ -60,6 +60,7 @@ node --test internal/web/ui.test.cjs internal/web/browser/mock-server.test.cjs
 | 场景 | 断言 |
 | --- | --- |
 | 嵌入宿主浅色/纯白/深色 | iframe 内 `data-theme` 跟随父级，`--bg-secondary` 与 CPA 主题一致 |
+| 原生滚动条与控件主题 | 根元素、表格滚动区、弹窗与 select 的 `color-scheme` 为浅色 `light` / 深色 `dark`；覆盖嵌入、独立打开、宽窄屏与实时主题切换 |
 | 实时主题切换 | 父级切换 `data-theme` 后 iframe 立即同步（MutationObserver） |
 | 390px 窄屏 | 无横向溢出，表格内部滚动，次要列隐藏 |
 | 独立打开截图 | 3 主题（light/white/dark）在 1280px 与 390px 下独立渲染与截图输出 |

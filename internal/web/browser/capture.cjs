@@ -55,6 +55,17 @@ async function withStep(name, fn) {
   }
 }
 
+async function checkColorScheme(frame, theme) {
+  const styles = await frame.evaluate(() => Array.from(
+    document.querySelectorAll(':root, body, .table-scroll, dialog.dialog, .dialog-body, select'),
+    (el) => ({ tag: el.tagName, scheme: getComputedStyle(el).colorScheme })
+  ));
+  const expected = theme === 'dark' ? 'dark' : 'light';
+  for (const style of styles) {
+    assert.equal(style.scheme, expected, style.tag + ' native color-scheme');
+  }
+}
+
 async function appFrame(page, origin) {
   await page.waitForFunction(
     (prefix) => Array.from(document.querySelectorAll('iframe')).some((f) => f.src.startsWith(prefix)),
@@ -396,6 +407,7 @@ async function main() {
   const serverOff = await mock.startServer({ captureBodies: false });
   const browser = await chromium.launch({
     executablePath: CHROMIUM_PATH,
+    ignoreDefaultArgs: ['--hide-scrollbars'],
     args: ['--no-sandbox', '--disable-dev-shm-usage']
   });
 
@@ -426,6 +438,7 @@ async function main() {
         const bg = await frame.evaluate(() =>
           getComputedStyle(document.documentElement).getPropertyValue('--bg-secondary').trim()
         );
+        await checkColorScheme(frame, '');
         await shot(page, 'embedded-light');
         return 'bg-secondary=' + bg;
       });
@@ -436,6 +449,7 @@ async function main() {
           const f = document.getElementById('frame');
           return f && f.contentDocument && f.contentDocument.documentElement.getAttribute('data-theme') === 'white';
         });
+        await checkColorScheme(frame, 'white');
         await shot(page, 'embedded-white');
         return 'data-theme=white';
       });
@@ -446,6 +460,7 @@ async function main() {
           const f = document.getElementById('frame');
           return f && f.contentDocument && f.contentDocument.documentElement.getAttribute('data-theme') === 'dark';
         });
+        await checkColorScheme(frame, 'dark');
         await shot(page, 'embedded-dark');
         return 'data-theme=dark';
       });
@@ -453,12 +468,15 @@ async function main() {
       await withStep('嵌入：实时主题切换（白→深→浅）', async () => {
         await page.evaluate(() => window.__setTheme('white'));
         await frame.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'white');
+        await checkColorScheme(frame, 'white');
 
         await page.evaluate(() => window.__setTheme('dark'));
         await frame.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'dark');
+        await checkColorScheme(frame, 'dark');
 
         await page.evaluate(() => window.__setTheme(''));
         await frame.waitForFunction(() => !document.documentElement.getAttribute('data-theme'));
+        await checkColorScheme(frame, '');
 
         const theme = await frame.evaluate(() => document.documentElement.getAttribute('data-theme'));
         assert.equal(theme, null);
@@ -637,6 +655,7 @@ async function main() {
           () => document.documentElement.scrollWidth - document.documentElement.clientWidth
         );
         assert.ok(overflow <= 1, '页面横向溢出 ' + overflow + 'px');
+        await checkColorScheme(frame, 'dark');
         await shot(page, 'embedded-dark-390');
         return 'overflow=' + overflow;
       });
@@ -649,6 +668,7 @@ async function main() {
           const overflow = await frame.evaluate(
             () => document.documentElement.scrollWidth - document.documentElement.clientWidth);
           assert.ok(overflow <= 1);
+          await checkColorScheme(frame, theme);
           await shot(page, 'embedded-' + (theme || 'light') + '-390');
         });
       }
@@ -668,6 +688,7 @@ async function main() {
         await connect(page, mock.SECRET);
         const theme = await page.evaluate(() => document.documentElement.getAttribute('data-theme'));
         assert.equal(theme, 'dark');
+        await checkColorScheme(page, 'dark');
         await page.screenshot({ path: path.join(OUT, 'standalone-system-dark.png'), fullPage: true });
         return 'data-theme=dark';
       });
@@ -682,6 +703,7 @@ async function main() {
       await withStep('独立打开：系统浅色回退', async () => {
         const theme = await lightPage.evaluate(() => document.documentElement.getAttribute('data-theme'));
         assert.equal(theme, 'white');
+        await checkColorScheme(lightPage, 'white');
         return 'CPA auto-white';
       });
       await lightContext.close();
@@ -707,7 +729,9 @@ async function main() {
               (expected) => (document.documentElement.getAttribute('data-theme') || '') === expected,
               theme || ''
             );
+            await checkColorScheme(p, theme);
             await shot(p, 'standalone-' + (theme || 'light') + '-' + width);
+            await p.screenshot({ path: path.join(OUT, 'standalone-' + (theme || 'light') + '-' + width + '-viewport.png') });
             await ctx.close();
             return 'standalone-' + (theme || 'light') + '-' + width + '.png';
           });
