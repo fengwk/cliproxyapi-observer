@@ -174,9 +174,7 @@ textarea {
 /* ---------- 顶栏 ---------- */
 
 .topbar {
-  position: sticky;
-  top: 0;
-  z-index: 10;
+  min-height: 64px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -239,7 +237,7 @@ textarea {
 .conn-status {
   font-size: 12px;
   color: var(--text-secondary);
-  max-width: 260px;
+  overflow-wrap: anywhere;
 }
 
 .conn-status.is-error {
@@ -321,6 +319,86 @@ main {
   padding: 14px 16px 32px;
   max-width: 1180px;
   margin: 0 auto;
+}
+
+.connection-status {
+  margin-top: 10px;
+}
+
+.connection .conn {
+  justify-content: flex-start;
+}
+
+.settings-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+}
+
+.setting-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.setting-capture {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.setting-capture input {
+  order: -1;
+  flex: none;
+  margin: 0;
+}
+
+.settings input:not([type='checkbox']), .settings select {
+  padding: 7px 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+}
+
+.price-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 2fr) repeat(4, minmax(85px, 1fr)) auto;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.price-row input {
+  width: 100%;
+  min-width: 0;
+}
+
+.price-row label {
+  min-width: 0;
+  font-size: 12px;
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+#settings-status {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .price-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .price-row label:first-child {
+    grid-column: 1 / -1;
+  }
 }
 
 .card {
@@ -609,30 +687,6 @@ td.num.warn {
 }
 
 /* ---------- 设置 ---------- */
-
-.settings-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 10px 18px;
-}
-
-.settings-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.settings-item dt {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.settings-item dd {
-  margin: 0;
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
 
 .settings-note {
   margin-top: 12px;

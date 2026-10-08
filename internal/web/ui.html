@@ -20,31 +20,35 @@
         <span class="brand-title">Observer 观测台</span>
         <span class="brand-sub">CLIProxyAPI 插件</span>
       </div>
-      <div class="conn">
-        <label class="sr-only" for="mgmt-key">管理密钥</label>
-        <input
-          id="mgmt-key"
-          type="password"
-          autocomplete="off"
-          spellcheck="false"
-          placeholder="管理密钥"
-          data-testid="mgmt-key"
-        />
-        <button id="connect" class="btn btn-primary" type="button" data-testid="connect">连接</button>
-        <button id="refresh" class="btn btn-secondary" type="button" data-testid="refresh" disabled>
-          刷新
-        </button>
-        <span
-          id="conn-status"
-          class="conn-status"
-          role="status"
-          aria-live="polite"
-          data-testid="conn-status"
-        ></span>
-      </div>
     </header>
 
     <main>
+      <section class="card connection" aria-label="管理连接">
+        <div class="conn">
+          <label class="sr-only" for="mgmt-key">管理密钥</label>
+          <input
+            id="mgmt-key"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="管理密钥"
+            data-testid="mgmt-key"
+          />
+          <button id="connect" class="btn btn-primary" type="button" data-testid="connect">连接</button>
+          <button id="refresh" class="btn btn-secondary" type="button" data-testid="refresh" disabled>
+            刷新
+          </button>
+        </div>
+        <div class="connection-status">
+          <span
+            id="conn-status"
+            class="conn-status"
+            role="status"
+            aria-live="polite"
+            data-testid="conn-status"
+          ></span>
+        </div>
+      </section>
       <section class="toolbar card" aria-label="筛选条件">
         <div class="seg" role="group" aria-label="时间范围">
           <button class="seg-btn is-active" type="button" data-range="24h">24 小时</button>
@@ -148,6 +152,14 @@
         <div id="settings-body" class="settings" data-testid="settings-body">
           <p class="muted">连接后显示。</p>
         </div>
+        <p class="settings-note">请求体捕获是显式选择：可能将提示词、代码等敏感内容写入磁盘。缩短保留时间会在清理后永久删除旧数据，无法恢复。只有点击保存才会应用。</p>
+        <p class="settings-note">模型价格仅用于新请求的价格快照，不会重新定价历史请求。压缩每隔默认 15 分钟检查，仅可回收空间达到阈值且占比 ≥25% 时缩小数据库；需要临时磁盘空间，失败保留原文件并重试，不是磁盘擦除。</p>
+        <div class="settings-actions">
+          <button id="settings-save" type="button" class="btn btn-primary" disabled>保存设置</button>
+          <button id="settings-revert" type="button" class="btn btn-secondary" disabled>重新加载 / 放弃草稿</button>
+          <span id="settings-status" role="status" aria-live="polite">连接后可编辑</span>
+        </div>
+        <p id="disk-status" class="settings-note" role="status"></p>
       </section>
     </main>
 

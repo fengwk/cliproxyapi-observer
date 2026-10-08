@@ -497,7 +497,7 @@ test('设置渲染在捕获关闭时给出解释文案', () => {
   ui.renderSettings(doc, container, { capture_bodies: false, stats_retention_days: 365 });
   const text = collectText(container).join(' ');
   assert.match(text, /请求体捕获已关闭/);
-  assert.match(text, /capture-bodies: true/);
+  assert.match(text, /保存前不会捕获新请求体/);
 
   const doc2 = new FakeDocument();
   const container2 = doc2.createElement('div');
@@ -510,8 +510,9 @@ test('设置渲染在捕获关闭时给出解释文案', () => {
   });
   const text2 = collectText(container2).join(' ');
   assert.match(text2, /请求体捕获已开启/);
-  assert.match(text2, /1 天/);
-  assert.match(text2, /1\.0 MB/);
+  assert.equal(findNodes(container2, (n) => n.id === 'setting-body-retention')[0].value, '1');
+  assert.equal(findNodes(container2, (n) => n.id === 'unit-body-retention')[0].value, 'd');
+  assert.equal(findNodes(container2, (n) => n.id === 'setting-max-body-bytes')[0].value, '1');
 });
 
 // ---------------------------------------------------------------------------
@@ -551,4 +552,81 @@ test('ui.css 覆盖三套主题令牌', () => {
   assert.match(css, /\[data-theme='dark'\]/);
   assert.match(css, /--bg-secondary:\s*#faf9f5/);
   assert.equal(/@import|https?:\/\//i.test(css), false, 'CSS 不得引入外部资源');
+});
+
+// 保存只允许同源 v0 核心配置路由；版本转换不能削弱路径防线。
+test('config URLs use only v0 while preserving proxy prefix', () => {
+  assert.equal(ui.coreApiBase(ui.deriveApiBase('/proxy/v8/resource/plugins/cliproxyapi-observer/ui')),
+    '/proxy/v0/management/plugins/cliproxyapi-observer');
+  for (const value of ['//evil/v8/management/plugins/cliproxyapi-observer',
+    '/proxy/../v8/management/plugins/cliproxyapi-observer', '/%2e/v8/management/plugins/cliproxyapi-observer',
+    'https://evil/v0/management/plugins/cliproxyapi-observer']) assert.equal(ui.coreApiBase(value), '');
+});
+
+const effectiveSettings = {
+  capture_bodies: false, request_retention_seconds: 86400, body_retention_seconds: 86400,
+  stats_retention_days: 365, max_body_bytes: 1048576, max_body_storage_bytes: 268435456,
+  compact_interval_seconds: 900, compact_min_bytes: 8388608, prices: {}
+};
+
+test('settings patch includes only editable keys and exact conversions', () => {
+  const patch = ui.settingsToPatch(effectiveSettings);
+  assert.equal(ui.validateSettingsPatch(patch), patch);
+  assert.equal(ui.durationSeconds('1.5', 'h'), 5400);
+  assert.equal(ui.durationSeconds('0.1', 'm'), 6);
+  assert.throws(() => ui.durationSeconds('0.001', 'm'));
+  assert.equal(patch['request-retention'], '86400s');
+  assert.equal(patch['compact-interval'], '900s');
+  assert.deepEqual(Object.keys(patch).sort(), ['body-retention', 'capture-bodies', 'compact-interval',
+    'compact-min-bytes', 'max-body-bytes', 'max-body-storage-bytes', 'prices',
+    'request-retention', 'stats-retention-days'].sort());
+});
+
+test('all server bounds reject invalid drafts without silently clamping', () => {
+  const patch = ui.settingsToPatch(effectiveSettings);
+  for (const [key, value] of [
+    ['request-retention', '59s'], ['request-retention', '2592001s'],
+    ['body-retention', '86401s'], ['body-retention', '59s'],
+    ['stats-retention-days', 0], ['stats-retention-days', 3651], ['stats-retention-days', 1.5],
+    ['max-body-bytes', 0], ['max-body-bytes', 67108865],
+    ['max-body-storage-bytes', 8589934593], ['max-body-storage-bytes', 1],
+    ['compact-interval', '59s'], ['compact-interval', '86401s'],
+    ['compact-min-bytes', 65535], ['compact-min-bytes', 8589934593], ['db', 'unexpected']
+  ]) assert.throws(() => ui.validateSettingsPatch({ ...patch, [key]: value }), key + ':' + value);
+  ui.validateSettingsPatch({
+    ...patch, 'request-retention': '2592000s', 'body-retention': '60s',
+    'stats-retention-days': 3650, 'max-body-bytes': 1, 'max-body-storage-bytes': 8589934592,
+    'compact-interval': '86400s', 'compact-min-bytes': 65536
+  });
+});
+
+test('prices reject blank normalized duplicate IDs and nonfinite or negative values', () => {
+  const patch = ui.settingsToPatch(effectiveSettings);
+  const valid = { input: 0, output: 1.2, 'cache-read': 0, 'cache-creation': 0 };
+  for (const prices of [
+    { ' ': valid }, { m: valid, ' m ': valid },
+    { m: { ...valid, input: -1 } }, { m: { ...valid, input: Infinity } },
+    { m: { ...valid, input: NaN } }, { m: { ...valid, input: '' } }
+  ]) assert.throws(() => ui.validateSettingsPatch({ ...patch, prices }));
+  ui.validateSettingsPatch({ ...patch, prices: { '<script>literal</script>': valid } });
+  assert.equal(ui.patchesMatch(patch, { ...patch, 'request-retention': '24h' }), true);
+  assert.equal(ui.patchesMatch(patch, { ...patch, 'capture-bodies': true }), false);
+});
+
+test('editable prices stay text-only and controls create a draft, never auto-save', () => {
+  const doc = new FakeDocument(), container = doc.createElement('div');
+  let edits = 0;
+  const id = '<img onerror="evil" src=x>';
+  const editor = ui.renderSettings(doc, container, {
+    ...effectiveSettings, prices: { [id]: { input: 1, output: 2, cache_read: 3, cache_creation: 4 } }
+  }, () => edits++);
+  assert.equal(edits, 0);
+  assert.equal(editor.read().prices[id]['cache-read'], 3);
+  assert.equal(findNodes(container, (n) => n.tagName === 'img').length, 0);
+  const capture = findNodes(container, (n) => n.id === 'setting-capture-bodies')[0];
+  capture.checked = true; capture.dispatch('input');
+  assert.equal(edits, 1);
+  assert.equal(editor.read()['capture-bodies'], true);
+  findNodes(container, (n) => n.tagName === 'button' && n.textContent === '删除')[0].dispatch('click');
+  assert.equal(Object.keys(editor.read().prices).length, 0);
 });

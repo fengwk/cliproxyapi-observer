@@ -364,8 +364,112 @@
       requestRetentionSeconds: Number(s.request_retention_seconds),
       statsRetentionDays: Number(s.stats_retention_days),
       maxBodyBytes: Number(s.max_body_bytes),
-      maxBodyStorageBytes: Number(s.max_body_storage_bytes)
+      maxBodyStorageBytes: Number(s.max_body_storage_bytes),
+      compactIntervalSeconds: Number(s.compact_interval_seconds === undefined ? 900 : s.compact_interval_seconds),
+      compactMinBytes: Number(s.compact_min_bytes === undefined ? 8388608 : s.compact_min_bytes),
+      prices: s.prices || {}
     };
+  }
+
+  // Only the version segment changes; never accept another origin or unsafe path.
+  function coreApiBase(base) {
+    if (!safePath(toStr(base))) return '';
+    return /\/v(?:0|8)\/management\/plugins\/cliproxyapi-observer$/.test(base)
+      ? base.replace(/\/v(?:0|8)(\/management\/plugins\/cliproxyapi-observer)$/, '/v0$1') : '';
+  }
+
+  var MIB = 1048576;
+  var SETTING_FIELDS = [
+    ['request-retention', '请求记录保留（默认 24 小时）', 'duration', 60, 2592000, 'requestRetentionSeconds'],
+    ['body-retention', '请求体保留（最多 24 小时）', 'duration', 60, 86400, 'bodyRetentionSeconds'],
+    ['stats-retention-days', '聚合统计保留（天）', 'integer', 1, 3650, 'statsRetentionDays'],
+    ['max-body-bytes', '单条请求体上限（MiB）', 'bytes', 1, 64 * MIB, 'maxBodyBytes'],
+    ['max-body-storage-bytes', '请求体总存储上限（MiB）', 'bytes', 1, 8192 * MIB, 'maxBodyStorageBytes'],
+    ['compact-interval', '压缩检查间隔', 'duration', 60, 86400, 'compactIntervalSeconds'],
+    ['compact-min-bytes', '最小可回收空间（MiB）', 'bytes', 65536, 8192 * MIB, 'compactMinBytes']
+  ];
+  var PRICE_KEYS = ['input', 'output', 'cache-read', 'cache-creation'];
+
+  function boundedNumber(value, min, max, label, integer) {
+    if (toStr(value).trim() === '') throw new Error(label + '不能为空');
+    var n = Number(value);
+    if (!isFinite(n) || n < min || n > max || (integer && !Number.isSafeInteger(n))) {
+      throw new Error(label + '必须在 ' + min + ' 至 ' + max + ' 之间' + (integer ? '且转换后为整数' : ''));
+    }
+    return n;
+  }
+
+  function durationSeconds(value, unit) {
+    var scale = { s: 1, m: 60, h: 3600, d: 86400 }[unit];
+    if (!scale) throw new Error('无效的时长单位');
+    return boundedNumber(boundedNumber(value, 0, 2592000, '时长', false) * scale, 0, 2592000, '时长（秒）', true);
+  }
+
+  function settingsToPatch(raw) {
+    var s = normalizeSettings(raw);
+    var patch = { 'capture-bodies': s.captureBodies, prices: Object.create(null) };
+    SETTING_FIELDS.forEach(function (field) {
+      patch[field[0]] = field[2] === 'duration' ? s[field[5]] + 's' : s[field[5]];
+    });
+    Object.keys(s.prices).forEach(function (id) {
+      var price = s.prices[id] || {};
+      patch.prices[id] = {
+        input: price.input, output: price.output,
+        'cache-read': price.cache_read === undefined ? (price['cache-read'] || 0) : price.cache_read,
+        'cache-creation': price.cache_creation === undefined ? (price['cache-creation'] || 0) : price.cache_creation
+      };
+    });
+    return patch;
+  }
+
+  function validateSettingsPatch(patch) {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('设置必须是对象');
+    var allowed = ['capture-bodies', 'prices'].concat(SETTING_FIELDS.map(function (f) { return f[0]; }));
+    Object.keys(patch).forEach(function (key) { if (allowed.indexOf(key) < 0) throw new Error('不支持的设置字段'); });
+    if (typeof patch['capture-bodies'] !== 'boolean') throw new Error('捕获开关无效');
+    SETTING_FIELDS.forEach(function (f) {
+      var value = patch[f[0]];
+      if (f[2] === 'duration') {
+        var match = /^(\d+(?:\.\d+)?)(s|m|h)$/.exec(toStr(value));
+        if (!match) throw new Error(f[1] + '时长无效');
+        value = durationSeconds(match[1], match[2]);
+      }
+      boundedNumber(value, f[3], f[4], f[1], true);
+    });
+    if (patch['max-body-bytes'] > patch['max-body-storage-bytes']) throw new Error('单条请求体上限不能超过总存储上限');
+    var prices = patch.prices;
+    if (!prices || typeof prices !== 'object' || Array.isArray(prices)) throw new Error('价格必须是对象');
+    var seen = Object.create(null);
+    Object.keys(prices).forEach(function (id) {
+      var normalized = id.trim();
+      if (!normalized || seen[normalized]) throw new Error('模型 ID 为空或重复');
+      seen[normalized] = true;
+      var price = prices[id];
+      if (!price || typeof price !== 'object' || Array.isArray(price) ||
+          Object.keys(price).some(function (key) { return PRICE_KEYS.indexOf(key) < 0; })) throw new Error('价格字段无效');
+      PRICE_KEYS.forEach(function (key) { boundedNumber(price[key], 0, Number.MAX_VALUE, '模型价格', false); });
+    });
+    return patch;
+  }
+
+  function patchesMatch(a, b) {
+    try {
+      validateSettingsPatch(a); validateSettingsPatch(b);
+      var normalize = function (p) {
+        var result = {};
+        SETTING_FIELDS.forEach(function (f) {
+          var v = p[f[0]];
+          var m = f[2] === 'duration' && /^(\d+(?:\.\d+)?)(s|m|h)$/.exec(v);
+          result[f[0]] = m ? durationSeconds(m[1], m[2]) : v;
+        });
+        result['capture-bodies'] = p['capture-bodies'];
+        result.prices = Object.keys(p.prices).sort().map(function (id) {
+          return [id, PRICE_KEYS.map(function (key) { return p.prices[id][key]; })];
+        });
+        return JSON.stringify(result);
+      };
+      return normalize(a) === normalize(b);
+    } catch (_) { return false; }
   }
 
   function buildHealthWarning(status) {
@@ -585,42 +689,121 @@
     return rows;
   }
 
-  function renderSettings(doc, container, settings) {
+  function renderSettings(doc, container, settings, onDirty) {
     clearChildren(container);
     var s = normalizeSettings(settings);
-    var items = [
-      { label: '请求体捕获', value: s.captureBodies ? '已开启' : '已关闭' },
-      { label: '请求体保留', value: formatDuration(s.bodyRetentionSeconds) },
-      { label: '请求记录保留', value: formatDuration(s.requestRetentionSeconds) },
-      { label: '统计数据保留', value: isFinite(s.statsRetentionDays) && s.statsRetentionDays > 0 ? s.statsRetentionDays + ' 天' : '—' },
-      { label: '单条请求体上限', value: formatBytes(s.maxBodyBytes) },
-      { label: '请求体存储上限', value: formatBytes(s.maxBodyStorageBytes) }
-    ];
-
-    var dl = doc.createElement('dl');
-    dl.className = 'settings-grid';
-    for (var i = 0; i < items.length; i++) {
-      var item = doc.createElement('div');
-      item.className = 'settings-item';
-      var dt = doc.createElement('dt');
-      setText(dt, items[i].label);
-      var dd = doc.createElement('dd');
-      setText(dd, items[i].value);
-      item.appendChild(dt);
-      item.appendChild(dd);
-      dl.appendChild(item);
+    var controls = {};
+    var changed = function () { if (onDirty) onDirty(); };
+    function input(label, value, type, id) {
+      var wrapper = doc.createElement('label');
+      wrapper.className = 'setting-field';
+      var title = doc.createElement('span');
+      setText(title, label);
+      wrapper.appendChild(title);
+      var node = doc.createElement('input');
+      node.type = type;
+      node.value = toStr(value);
+      if (type === 'number') node.step = 'any';
+      if (id) node.id = id;
+      node.addEventListener('input', changed);
+      wrapper.appendChild(node);
+      return { wrapper: wrapper, node: node };
     }
-    container.appendChild(dl);
-
+    var capture = input('显式选择捕获请求体（含提示词 / 代码）', '', 'checkbox', 'setting-capture-bodies');
+    capture.wrapper.className = 'setting-field setting-capture';
+    capture.node.checked = s.captureBodies;
+    container.appendChild(capture.wrapper);
     var note = doc.createElement('p');
     note.className = 'settings-note';
-    setText(
-      note,
-      s.captureBodies
-        ? '请求体捕获已开启：最多保存 ' + formatDuration(s.bodyRetentionSeconds) + '，查看时必须二次确认，关闭弹窗即清空。'
-        : '请求体捕获已关闭（capture-bodies: false）：列表仅显示元数据，请求体不会写入磁盘。如需查看，请在 config.yaml 中设置 capture-bodies: true，交由 CPA 重载配置；若部署不支持自动重载，请按部署方式重新加载。'
-    );
+    setText(note, s.captureBodies ? '请求体捕获已开启。' : '请求体捕获已关闭：仅显示元数据。勾选只修改草稿，保存前不会捕获新请求体。');
     container.appendChild(note);
+    var grid = doc.createElement('div');
+    grid.className = 'settings-fields';
+    SETTING_FIELDS.forEach(function (f) {
+      var value = s[f[5]], unit = 's';
+      if (f[2] === 'duration') {
+        if (value % 86400 === 0) unit = 'd';
+        else if (value % 3600 === 0) unit = 'h';
+        else if (value % 60 === 0) unit = 'm';
+        value /= { s: 1, m: 60, h: 3600, d: 86400 }[unit];
+      } else if (f[2] === 'bytes') value /= MIB;
+      var field = input(f[1], value, 'number', 'setting-' + f[0]);
+      var group = doc.createElement('div');
+      group.className = 'setting-field';
+      group.appendChild(field.wrapper);
+      if (f[2] !== 'duration') {
+        field.node.min = f[3] / (f[2] === 'bytes' ? MIB : 1);
+        field.node.max = f[4] / (f[2] === 'bytes' ? MIB : 1);
+      }
+      var select = null;
+      if (f[2] === 'duration') {
+        select = doc.createElement('select');
+        select.setAttribute('aria-label', f[1] + '单位');
+        ['s', 'm', 'h', 'd'].forEach(function (u, i) { select.appendChild(optionEl(doc, u, ['秒', '分钟', '小时', '天'][i])); });
+        select.value = unit;
+        select.id = 'unit-' + f[0];
+        select.addEventListener('change', changed);
+        group.appendChild(select);
+      }
+      controls[f[0]] = { node: field.node, unit: select };
+      grid.appendChild(group);
+    });
+    container.appendChild(grid);
+    var heading = doc.createElement('h3');
+    setText(heading, '模型价格 · USD / 百万 Token');
+    container.appendChild(heading);
+    var rows = doc.createElement('div');
+    container.appendChild(rows);
+    var priceRows = [];
+    function addPrice(id, price) {
+      var row = doc.createElement('div');
+      row.className = 'price-row';
+      var model = input('精确完整模型 ID', id, 'text');
+      model.node.setAttribute('data-price', 'model');
+      row.appendChild(model.wrapper);
+      var record = { row: row, model: model.node, values: {} };
+      PRICE_KEYS.forEach(function (key, i) {
+        var p = input(['输入', '输出', '缓存读', '缓存创建'][i], price[key] === undefined ? 0 : price[key], 'number');
+        p.node.setAttribute('data-price', key);
+        record.values[key] = p.node;
+        row.appendChild(p.wrapper);
+      });
+      var remove = doc.createElement('button');
+      remove.type = 'button'; remove.className = 'btn btn-secondary';
+      setText(remove, '删除');
+      remove.addEventListener('click', function () {
+        rows.removeChild(row); priceRows.splice(priceRows.indexOf(record), 1); changed();
+      });
+      row.appendChild(remove);
+      priceRows.push(record); rows.appendChild(row);
+    }
+    var currentPrices = settingsToPatch(settings).prices;
+    Object.keys(currentPrices).forEach(function (id) { addPrice(id, currentPrices[id]); });
+    var add = doc.createElement('button');
+    add.type = 'button'; add.className = 'btn btn-secondary'; add.id = 'price-add';
+    setText(add, '添加模型价格');
+    add.addEventListener('click', function () { addPrice('', {}); changed(); });
+    container.appendChild(add);
+    return {
+      read: function () {
+        var patch = { 'capture-bodies': capture.node.checked, prices: Object.create(null) };
+        SETTING_FIELDS.forEach(function (f) {
+          var c = controls[f[0]], v = c.node.value;
+          if (toStr(v).trim() === '') throw new Error(f[1] + '不能为空');
+          if (f[2] === 'duration') patch[f[0]] = durationSeconds(v, c.unit.value) + 's';
+          else patch[f[0]] = Number(v) * (f[2] === 'bytes' ? MIB : 1);
+        });
+        priceRows.forEach(function (r) {
+          var id = r.model.value.trim();
+          if (!id || Object.prototype.hasOwnProperty.call(patch.prices, id)) throw new Error('模型 ID 为空或重复');
+          patch.prices[id] = {};
+          PRICE_KEYS.forEach(function (key) {
+            patch.prices[id][key] = boundedNumber(r.values[key].value, 0, Number.MAX_VALUE, '模型价格', false);
+          });
+        });
+        return validateSettingsPatch(patch);
+      }
+    };
   }
 
   function renderChart(canvas, series) {
@@ -882,6 +1065,10 @@
       requestsNote: doc.getElementById('requests-note'),
       loadMore: doc.getElementById('load-more'),
       settingsBody: doc.getElementById('settings-body'),
+      save: doc.getElementById('settings-save'),
+      revert: doc.getElementById('settings-revert'),
+      settingsStatus: doc.getElementById('settings-status'),
+      diskStatus: doc.getElementById('disk-status'),
       dialog: doc.getElementById('body-dialog'),
       bodyMeta: doc.getElementById('body-meta'),
       bodyConfirm: doc.getElementById('body-confirm'),
@@ -893,7 +1080,8 @@
     if (!els.connect || !els.dialog) return;
 
     var loc = win.location || {};
-    var apiBase = deriveApiBase(loc.pathname);
+    var derivedBase = deriveApiBase(loc.pathname);
+    var apiBase = coreApiBase(derivedBase) || derivedBase;
     var theme = createThemeController(win, doc, function () {
       if (state) renderChart(els.chart, state.series);
     });
@@ -921,6 +1109,27 @@
     var moreAbort = null;
     var bodyAbort = null;
     var bodyState = BODY_IDLE;
+    var connectionGate = createGate();
+    var saveAbort = null;
+    var saveTimer = null;
+    var saving = false;
+    var dirty = false;
+    var editor = null;
+
+    function editorActions() {
+      if (els.save) els.save.disabled = !state.connected || !editor || !dirty || saving;
+      if (els.revert) els.revert.disabled = !state.connected || saving;
+      if (els.settingsBody.querySelectorAll) {
+        var fields = els.settingsBody.querySelectorAll('input, select, button');
+        for (var i = 0; i < fields.length; i++) fields[i].disabled = saving || !state.connected;
+      }
+    }
+
+    function markDirty() {
+      dirty = true;
+      setText(els.settingsStatus, '有未保存的草稿（刷新不会覆盖）');
+      editorActions();
+    }
 
     function setStatus(text, kind) {
       setText(els.status, text);
@@ -965,6 +1174,12 @@
     }
 
     function disconnect() {
+      connectionGate.invalidate();
+      if (saveAbort) saveAbort.abort();
+      saveAbort = null;
+      if (saveTimer) win.clearTimeout(saveTimer);
+      saveTimer = null;
+      saving = false;
       state.connected = false;
       state.key = '';
       queryGate.invalidate();
@@ -974,6 +1189,7 @@
       closeBody();
       els.refresh.disabled = true;
       els.loadMore.hidden = true;
+      editorActions();
     }
 
     function handleAuthFailure(err) {
@@ -982,14 +1198,18 @@
       setBanner('认证失败：请确认管理密钥正确、远程管理已开启，或当前客户端在允许范围内。');
     }
 
-    function fetchJson(path, params, signal) {
+    function fetchJson(path, params, signal, method, payload) {
       if (!state.connected || !state.key) return Promise.reject(new Error('尚未连接'));
-      var url = buildApiUrl(apiBase, path, params);
+      var url = buildApiUrl(path === 'config' ? coreApiBase(apiBase) : apiBase, path, params);
       if (!url) return Promise.reject(new Error('无效的接口地址'));
       if (typeof win.fetch !== 'function') return Promise.reject(new Error('浏览器不支持 fetch'));
       var headers = {};
       if (state.key) headers.Authorization = 'Bearer ' + state.key;
-      var init = { method: 'GET', headers: headers, credentials: 'same-origin', cache: 'no-store', redirect: 'error' };
+      var init = { method: method || 'GET', headers: headers, credentials: 'same-origin', cache: 'no-store', redirect: 'error' };
+      if (payload !== undefined) {
+        headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(payload);
+      }
       if (signal) init.signal = signal;
       return win.fetch(url, init).then(function (res) {
         return res.text().then(function (text) {
@@ -1066,17 +1286,28 @@
     }
 
     function applySettings(settings) {
-      renderSettings(doc, els.settingsBody, settings);
+      if (!dirty && !saving) {
+        editor = renderSettings(doc, els.settingsBody, settings, markDirty);
+        setText(els.settingsStatus, '已加载生效设置');
+      }
+      editorActions();
       state.retention = normalizeSettings(settings).requestRetentionSeconds;
       updateRequestsNote();
     }
 
     function applyHealth(status) {
       setBanner(buildHealthWarning(status));
+      var optionalBytes = function (key) { return status && status[key] != null ? formatBytes(status[key]) : '—'; };
+      setText(els.diskStatus, '数据库磁盘 ' + optionalBytes('database_bytes') + ' · 可能可回收 ' +
+        optionalBytes('reclaimable_bytes') + ' · 压缩成功 ' + formatInt(status && status.compactions) +
+        ' / 失败 ' + formatInt(status && status.compaction_errors) + ' · 上次压缩 ' +
+        (status && status.last_compaction_unix > 0 ? formatTime(new Date(status.last_compaction_unix * 1000)) : '—') +
+        ' · 上次回收 ' + optionalBytes('last_compaction_reclaimed_bytes') +
+        '（健康快照 ' + formatTime(new Date()) + '；加载失败时可能过期）');
     }
 
     function refreshAll() {
-      if (!state.connected) return;
+      if (!state.connected || saving) return;
       abortQuery();
       abortMore();
       var controller = newController();
@@ -1114,6 +1345,126 @@
           if (isAbortError(err) || !queryGate.current(token)) return;
           if (err && err.auth) { handleAuthFailure(err); return; }
           setStatus('加载失败：' + ((err && err.message) || '未知错误'), 'error');
+        });
+    }
+
+    function saveSettings() {
+      if (!state.connected || !editor || saving) return;
+      var patch;
+      try { patch = editor.read(); }
+      catch (err) { setText(els.settingsStatus, '未保存：' + err.message); return; }
+      if (!win.confirm('确认保存？捕获请求体可能保存提示词、代码等敏感内容；缩短保留时间会在清理后永久删除旧数据，无法恢复。价格只影响新请求。')) return;
+      abortQuery(); queryGate.invalidate();
+      var token = connectionGate.begin();
+      var controller = newController();
+      saveAbort = controller;
+      var signal = controller ? controller.signal : undefined;
+      saving = true; editorActions();
+      setText(els.settingsStatus, '正在校验并保存…');
+      saveTimer = win.setTimeout(function () {
+        if (!connectionGate.current(token)) return;
+        if (controller) controller.abort();
+        connectionGate.invalidate();
+        saving = false; saveAbort = null; saveTimer = null; editorActions();
+        setText(els.settingsStatus, '保存确认超时（可能已写入），草稿保留；请重新加载核对。');
+      }, 15000);
+      var written = false;
+      var guard = function () {
+        if (!state.connected || !connectionGate.current(token) || (signal && signal.aborted)) {
+          var err = new Error('aborted'); err.name = 'AbortError'; throw err;
+        }
+      };
+      function retryPause() {
+        return new Promise(function (resolve, reject) {
+          if (signal && signal.aborted) { reject({ name: 'AbortError' }); return; }
+          var onAbort = function () { win.clearTimeout(timer); reject({ name: 'AbortError' }); };
+          var timer = win.setTimeout(function () {
+            if (signal) signal.removeEventListener('abort', onAbort);
+            resolve();
+          }, 500);
+          if (signal) signal.addEventListener('abort', onAbort, { once: true });
+        });
+      }
+      function confirmEffective(attempt) {
+        guard();
+        return Promise.all([fetchJson('config', null, signal), fetchJson('settings', null, signal)])
+          .then(function (values) {
+            guard();
+            var config = {};
+            Object.keys(patch).forEach(function (key) { config[key] = values[0][key]; });
+            if (patchesMatch(patch, config) && patchesMatch(patch, settingsToPatch(values[1]))) return values[1];
+            if (attempt >= 20) throw new Error('回读配置或生效设置仍与保存值不一致');
+            return retryPause().then(function () { return confirmEffective(attempt + 1); });
+          }, function (err) {
+            guard();
+            if (err.status === 503 && attempt < 20) return retryPause().then(function () { return confirmEffective(attempt + 1); });
+            throw err;
+          });
+      }
+      fetchJson('validate', null, signal, 'POST', patch)
+        .then(function (result) {
+          guard();
+          if (result.valid !== true) throw new Error('服务端未确认校验通过');
+          return fetchJson('config', null, signal, 'PATCH', patch);
+        })
+        .then(function (result) {
+          guard();
+          if (result.status !== 'ok') throw new Error('服务端未确认写入成功');
+          written = true;
+          setText(els.settingsStatus, '已提交，正在回读持久配置并等待生效…');
+          return confirmEffective(0);
+        })
+        .then(function (settings) {
+          guard(); saving = false; dirty = false;
+          applySettings(settings);
+          setText(els.settingsStatus, '保存成功：宿主持久配置与生效设置已确认');
+          win.clearTimeout(saveTimer); saveTimer = null;
+          saveAbort = null;
+        })
+        .catch(function (err) {
+          if (!connectionGate.current(token) || isAbortError(err)) return;
+          saving = false; saveAbort = null; editorActions();
+          setText(els.settingsStatus, (written ? '已提交但未能确认生效，请重新加载核对：' : '保存未确认（可能已写入，请重新加载核对；草稿保留）：') + err.message);
+          win.clearTimeout(saveTimer); saveTimer = null;
+          if (err.auth) handleAuthFailure(err);
+        });
+    }
+
+    function reloadSettings() {
+      if (!state.connected || saving) return;
+      if (dirty && !win.confirm('放弃未保存草稿并重新加载宿主设置？')) return;
+      var token = connectionGate.begin();
+      abortQuery(); queryGate.invalidate();
+      saving = true; editorActions();
+      saveAbort = newController();
+      var signal = saveAbort ? saveAbort.signal : undefined;
+      setText(els.settingsStatus, '正在重新加载宿主配置与生效设置…');
+      saveTimer = win.setTimeout(function () {
+        if (!connectionGate.current(token)) return;
+        if (saveAbort) saveAbort.abort();
+        connectionGate.invalidate();
+        saving = false; saveAbort = null; saveTimer = null; editorActions();
+        setText(els.settingsStatus, '重新加载超时（草稿保留），请重试。');
+      }, 15000);
+      Promise.all([fetchJson('config', null, signal), fetchJson('settings', null, signal)])
+        .then(function (values) {
+          if (!connectionGate.current(token)) return;
+          var loaded = validateSettingsPatch(settingsToPatch(values[1]));
+          var savedConfig = {};
+          Object.keys(loaded).forEach(function (key) { savedConfig[key] = values[0][key]; });
+          win.clearTimeout(saveTimer); saveTimer = null;
+          saving = false; dirty = false; saveAbort = null;
+          applySettings(values[1]);
+          setText(els.settingsStatus, patchesMatch(loaded, savedConfig)
+            ? '已重新加载：宿主持久配置与当前生效设置一致'
+            : '已重新加载当前生效设置；宿主持久配置与其不一致（或使用默认值），请稍后重新加载核对。');
+        })
+        .catch(function (err) {
+          if (!connectionGate.current(token) || isAbortError(err)) return;
+          saving = false; saveAbort = null; editorActions();
+          setText(els.settingsStatus, '重新加载失败（草稿保留）：' + err.message);
+          win.clearTimeout(saveTimer); saveTimer = null;
+          if (err.auth) handleAuthFailure(err);
         });
     }
 
@@ -1279,6 +1630,9 @@
       }
       state.key = key;
       state.connected = true;
+      dirty = false; editor = null;
+      clearChildren(els.settingsBody);
+      setText(els.settingsStatus, '正在加载新连接设置…');
       els.refresh.disabled = false;
       setBanner('');
       refreshAll();
@@ -1287,6 +1641,8 @@
     // ---- 事件绑定 ----
 
     els.connect.addEventListener('click', connect);
+    if (els.save) els.save.addEventListener('click', saveSettings);
+    if (els.revert) els.revert.addEventListener('click', reloadSettings);
     els.refresh.addEventListener('click', function () { refreshAll(); });
     els.loadMore.addEventListener('click', loadMore);
     els.bodyReveal.addEventListener('click', revealBody);
@@ -1350,6 +1706,11 @@
     MAX_REQUEST_ITEMS: MAX_REQUEST_ITEMS,
     validateBodyDetail: validateBodyDetail,
     deriveApiBase: deriveApiBase,
+    coreApiBase: coreApiBase,
+    durationSeconds: durationSeconds,
+    settingsToPatch: settingsToPatch,
+    validateSettingsPatch: validateSettingsPatch,
+    patchesMatch: patchesMatch,
     buildApiUrl: buildApiUrl,
     isAllowedTransport: isAllowedTransport,
     isLoopbackHost: isLoopbackHost,

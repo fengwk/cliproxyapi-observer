@@ -501,7 +501,7 @@ async function main() {
         await connect(page, mock.SECRET);
         const settings = await page.locator('#settings-body').textContent();
         assert.ok(settings.includes('请求体捕获已关闭'), '应解释捕获关闭');
-        assert.ok(settings.includes('capture-bodies: true'), '应给出开启方式');
+        assert.ok(settings.includes('保存前不会捕获新请求体'), '应给出显式保存方式');
         const buttons = await page.locator('#requests-body button').count();
         assert.equal(buttons, 0, '捕获关闭时不得出现查看按钮');
         await page.screenshot({ path: path.join(OUT, 'standalone-capture-off.png'), fullPage: true });
