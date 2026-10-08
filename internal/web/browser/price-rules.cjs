@@ -191,7 +191,7 @@ async function main() {
       await page.locator('#price-add').click();
       await fillRule(page.locator('.price-row').nth(1), { model: 'claude-opus-4-1', prices: { input: 3, output: 15, 'cache-read': 0.75, 'cache-creation': 3 } });
       await page.locator('#price-add').click();
-      await fillRule(page.locator('.price-row').nth(2), { model: '*', prices: { input: 0.5, output: 1, 'cache-read': 0.1, 'cache-creation': 0.5 } });
+      await fillRule(page.locator('.price-row').nth(2), { model: 'example-model', prices: { input: 0.5, output: 1, 'cache-read': 0.1, 'cache-creation': 0.5 } });
 
       for (const width of [1280, 390]) {
         await page.setViewportSize({ width, height: 900 });

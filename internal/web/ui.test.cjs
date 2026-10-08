@@ -671,10 +671,18 @@ test('normalizePriceRules 规范化别名并严格校验阈值与 UTC 区间', (
     { model: 'm', price: { ...zero, extra: 1 } },
     { model: 'm', price: zero, 'input-tokens-gt': Number.MAX_SAFE_INTEGER + 1 },
     { model: 'm', price: zero, 'input-tokens-gt': -1 },
+    { model: 'm', price: zero, 'input-tokens-gt': true },
+    { model: 'm', price: zero, 'input-tokens-gt': '1' },
+    { model: 'm', price: zero, 'input-tokens-gt': 1, input_tokens_gt: 2 },
+    { model: 'm', price: zero, 'time-range': null },
+    { model: 'm', price: zero, 'time-range': ' ' },
+    { model: 'm', price: { ...zero, input: false } },
+    { model: 'm', price: { ...zero, cache_read: 1 } },
     { model: 'm', price: { ...zero, input: -1 } },
     { model: '', price: zero }
   ]) assert.throws(() => ui.normalizePriceRules([rule]), JSON.stringify(rule));
   assert.throws(() => ui.normalizePriceRules('nope'));
+  assert.equal(ui.normalizePriceRules([{ model: 'm', price: {} }])[0].price.input, 0);
 });
 
 test('规则编辑器保持显式规则优先的顺序，并在重排/删除时标记草稿', () => {

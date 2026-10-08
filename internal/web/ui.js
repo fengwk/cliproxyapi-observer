@@ -473,26 +473,38 @@
     if (!Array.isArray(raw) || raw.length > 1000) throw new Error('价格规则必须是最多 1000 项的列表');
     return raw.map(function (rule) {
       if (!rule || typeof rule !== 'object' || Array.isArray(rule)) throw new Error('价格规则无效');
+      var seenRuleKeys = Object.create(null);
       Object.keys(rule).forEach(function (key) {
         if (RULE_KEYS.indexOf(key) < 0) throw new Error('价格规则包含未知字段');
+        var canonical = key.replace(/_/g, '-');
+        if (seenRuleKeys[canonical]) throw new Error('价格规则包含重复字段');
+        seenRuleKeys[canonical] = true;
       });
       if (typeof rule.model !== 'string' || !rule.model.trim()) throw new Error('规则模型 ID 不能为空');
       var result = { model: rule.model.trim(), price: {} };
       var price = rule.price;
       if (!price || typeof price !== 'object' || Array.isArray(price)) throw new Error('价格字段无效');
+      var seenPriceKeys = Object.create(null);
       Object.keys(price).forEach(function (key) {
-        if (PRICE_KEYS.indexOf(key) < 0 && PRICE_KEYS.indexOf(key.replace(/_/g, '-')) < 0) throw new Error('价格字段无效');
+        var canonical = key.replace(/_/g, '-');
+        if (PRICE_KEYS.indexOf(canonical) < 0) throw new Error('价格字段无效');
+        if (seenPriceKeys[canonical]) throw new Error('价格包含重复字段');
+        seenPriceKeys[canonical] = true;
       });
       PRICE_KEYS.forEach(function (key) {
         var alias = key.replace(/-/g, '_');
-        result.price[key] = boundedNumber(price[key] === undefined ? price[alias] : price[key], 0, Number.MAX_VALUE, '模型价格', false);
+        var value = price[key] === undefined ? price[alias] : price[key];
+        if (value === undefined) value = 0;
+        if (typeof value !== 'number') throw new Error('模型价格必须是数字');
+        result.price[key] = boundedNumber(value, 0, Number.MAX_VALUE, '模型价格', false);
       });
       var threshold = rule['input-tokens-gt'] === undefined ? rule.input_tokens_gt : rule['input-tokens-gt'];
       if (threshold !== undefined) {
+        if (typeof threshold !== 'number') throw new Error('输入 Token 阈值必须是整数');
         result['input-tokens-gt'] = boundedNumber(threshold, 0, Number.MAX_SAFE_INTEGER, '输入 Token 阈值', true);
       }
       var range = rule['time-range'] === undefined ? rule.time_range : rule['time-range'];
-      if (range !== undefined && toStr(range).trim() !== '') {
+      if (range !== undefined && range !== '') {
         // UTC HH:mm-HH:mm; start inclusive, end exclusive, overnight and end 24:00 allowed.
         if (typeof range !== 'string' || !TIME_RANGE.test(range) || range.slice(0, 5) === range.slice(6)) {
           throw new Error('时间区间使用 UTC HH:mm-HH:mm，起点包含终点不包含且不能相同');
@@ -915,6 +927,8 @@
         priceRows.forEach(function (r) { rows.appendChild(r.row); });
         relabel();
         changed();
+        var focus = delta < 0 ? up : down;
+        if (typeof focus.focus === 'function') focus.focus();
       }
       up.addEventListener('click', function () { move(-1); });
       down.addEventListener('click', function () { move(1); });
@@ -1652,8 +1666,7 @@
       var signal = controller ? controller.signal : undefined;
       var tasks = [
         fetchJson('summary', common, signal).then(function (d) { return { kind: 'summary', data: d }; }),
-        fetchJson('requests', assign({}, common, { offset: 0, limit: REQUEST_PAGE_LIMIT,
-          client_key_id: state.clientKeyID, auth_index: state.authIndex }), signal).then(function (d) { return { kind: 'requests', data: d }; }),
+        fetchJson('requests', assign({}, common, { offset: 0, limit: REQUEST_PAGE_LIMIT }), signal).then(function (d) { return { kind: 'requests', data: d }; }),
         fetchJson('settings', null, signal).then(function (d) { return { kind: 'settings', data: d }; }),
         fetchJson('health', null, signal).then(function (d) { return { kind: 'health', data: d }; }),
         fetchJson('credentials', null, signal).then(function (d) {
