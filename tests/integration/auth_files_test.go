@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -29,17 +30,28 @@ func TestAuthFileDimensionFilteringAndStats(t *testing.T) {
 		fmt.Fprintf(w, `{"id":"file-fixture","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":%q},"finish_reason":"stop"}],"usage":%s}`, fixtureText, usageFixtureJSON())
 	}))
 	defer local.Close()
-	h := newHarness(t)
+	dir := t.TempDir()
+	authDir := filepath.Join(dir, "auths")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Load static fixtures before startup to isolate observer attribution from
+	// concurrent management uploads and the host's initial credential scan.
 	names := []string{"fake-file-a.json", "fake-file-b.json"}
 	for i, name := range names {
 		letter := string(rune('a' + i))
 		raw := []byte(fmt.Sprintf(`{"type":"kimi","prefix":"file-%s","email":"same-label","access_token":"fake-file-token-%s","base_url":%q}`, letter, letter, local.URL+"/v1"))
-		status, _, _, err := h.rawRequestWithHeaders(http.MethodPost, "/v8/management/credentials?name="+name, raw,
-			map[string]string{"Authorization": "Bearer " + mgmtKey, "Content-Type": "application/json"})
-		if err != nil || status != 200 {
-			t.Fatalf("fake file upload: status %d err %v", status, err)
+		if err := os.WriteFile(filepath.Join(authDir, name), raw, 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
+	mock := newMockUpstream(t)
+	t.Cleanup(mock.Close)
+	h, err := startHost(t, mock, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(h.Stop)
 	indexes := make(map[string]string)
 	models := make(map[string]string)
 	deadline := time.Now().Add(10 * time.Second)
@@ -87,7 +99,8 @@ func TestAuthFileDimensionFilteringAndStats(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if len(indexes) != 2 || len(models) != 2 || indexes[names[0]] == indexes[names[1]] {
-		t.Fatal("distinct file indexes/models not registered")
+		t.Fatalf("distinct file indexes/models not registered: indexes=%v models=%v\n--- host log tail ---\n%s",
+			indexes, models, logTail(h.stdout.String(), h.stderr.String()))
 	}
 	for i, name := range names {
 		index := indexes[name]
