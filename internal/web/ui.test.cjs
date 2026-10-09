@@ -601,8 +601,9 @@ test('ui 按钮遵循共享 Management Center 契约', () => {
   assert.match(css, /\.seg-btn:hover:not\(:disabled\)/);
 
   // 静态按钮全部带 .btn。
-  for (const m of html.matchAll(/<button\b[^>]*\bclass="([^"]*)"/g)) {
-    assert.ok(m[1].split(/\s+/).includes('btn'), '静态按钮缺少 .btn: ' + m[0]);
+  for (const m of html.matchAll(/<button\b[^>]*>/g)) {
+    const classes = m[0].match(/\bclass="([^"]*)"/);
+    assert.ok(classes && classes[1].split(/\s+/).includes('btn'), '静态按钮缺少 .btn: ' + m[0]);
   }
   // 动态按钮与段控运行时保留 .btn，删除按钮改用已定义的 btn-danger。
   assert.match(js, /className = 'btn btn-danger btn-sm'/);

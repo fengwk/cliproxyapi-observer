@@ -254,11 +254,7 @@ textarea {
 
 /* ---------- 按钮 ---------- */
 
-/*
- * 共享按钮契约：与 CLIProxyAPI Management Center 的 Button.tsx / components.scss
- * 保持一致（见 BUTTONS.md）。常规控件高 46px，btn-sm 高 39px；尺寸与语义色解耦，
- * 表格/行内操作一律使用 btn-sm。与 Provider 面板逐条复制同一组声明。
- */
+/* 按钮共用基础外观，语义色和紧凑尺寸由变体指定。 */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -405,7 +401,7 @@ main {
 
 .setting-capture input:checked::before { transform: rotate(45deg); }
 .setting-capture input:disabled { opacity: 0.55; cursor: not-allowed; }
-button:focus-visible, .setting-capture input:focus-visible {
+.setting-capture input:focus-visible {
   outline: 2px solid var(--text-primary);
   outline-offset: 3px;
 }
