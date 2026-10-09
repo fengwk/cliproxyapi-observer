@@ -198,16 +198,90 @@ async function main() {
     await page.locator('#identity-apply').click();
     await page.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 50);
 
-    // 10. 响应式与安全：移动端无横向溢出、纯文本渲染、无页面错误。
+    // 10. 统一筛选工具栏：单一卡片、同一控件容器；桌面一行底部对齐；无表单/命名序列化入口。
+    assert.equal(await page.locator('section[aria-label="筛选条件"]').count(), 1);
+    assert.equal(await page.locator('section[aria-label="Key 筛选"]').count(), 0);
+    assert.equal((await page.locator('body').textContent()).includes('Key 筛选影响概览'), false);
+    assert.equal(await page.evaluate(() => {
+      const container = document.querySelector('section[aria-label="筛选条件"] .controls');
+      const seg = document.querySelector('section[aria-label="筛选条件"] .seg');
+      const members = ['filter-provider', 'filter-model', 'filter-client-key', 'filter-auth', 'identity-apply'];
+      return !!container && !!seg && seg.closest('.controls') === container &&
+        members.every((id) => document.getElementById(id)?.closest('.controls') === container);
+    }), true);
+    assert.equal(await page.locator('form').count(), 0);
+    assert.equal(await page.locator('input[type="password"]').count(), 1);
+    assert.equal(await page.locator('[name="client_key_id"], [name="auth_index"]').count(), 0);
+    const bottomEdges = () => page.evaluate(() => Array.from(
+      document.querySelector('section[aria-label="筛选条件"] .controls').children
+    ).map((el) => Math.round(el.getBoundingClientRect().bottom)));
+    const desktopBottoms = await bottomEdges();
+    assert.ok(Math.max(...desktopBottoms) - Math.min(...desktopBottoms) <= 1,
+      'desktop controls should align on a single row');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    results.push('single consolidated filter toolbar, one aligned desktop row, no form serialization');
+
+    // 11. 超长认证文件名与超长模型选项不得撑破布局或页面横向溢出。
+    server.controls.credentialFiles = [
+      { auth_index: mock.AUTH_INDEX_A, name: 'fake-file-' + 'x'.repeat(48) + '.json', label: '长文件名账户' },
+      { auth_index: mock.AUTH_INDEX_B, name: 'fake-file-b.json', label: '备用账户' }
+    ];
+    await page.locator('#refresh').click();
+    await page.waitForFunction(() => Array.from(document.querySelectorAll('#filter-auth option'))
+      .some((o) => o.textContent.startsWith('长文件名账户（fake-file-')));
+    await page.locator('#filter-auth').selectOption(mock.AUTH_INDEX_A);
+    await page.evaluate(() => {
+      const model = document.getElementById('filter-model');
+      const opt = document.createElement('option');
+      opt.value = 'm'.repeat(72);
+      opt.textContent = 'm'.repeat(72);
+      model.appendChild(opt);
+      model.value = opt.value;
+    });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    await page.evaluate(() => {
+      const model = document.getElementById('filter-model');
+      model.value = '';
+      Array.from(model.options).forEach((o) => { if (o.value.length > 64) o.remove(); });
+    });
+    // 恢复默认假认证文件与全量结果，供后续响应式与截图使用。
+    server.controls.credentialFiles = [
+      { auth_index: mock.AUTH_INDEX_A, name: 'fake-file-a.json', label: '工作账户' },
+      { auth_index: mock.AUTH_INDEX_B, name: 'fake-file-b.json', label: '备用账户' }
+    ];
+    await page.locator('#refresh').click();
+    await page.waitForFunction(() => Array.from(document.querySelectorAll('#filter-auth option'))
+      .some((o) => o.textContent === '工作账户（fake-file-a.json） · ' + '1'.repeat(16)));
+    await page.locator('#filter-auth').selectOption('');
+    await page.locator('#identity-apply').click();
+    await page.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 50);
+    results.push('long auth filename and long model option keep the layout overflow-free');
+
+    // 12. 响应式与安全：中等宽度与 390px 自然换行、无横向溢出、纯文本渲染、无页面错误。
+    await page.setViewportSize({ width: 768, height: 900 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
     await page.setViewportSize({ width: 390, height: 900 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    assert.ok(new Set(await bottomEdges()).size > 1, 'narrow layout should wrap naturally into multiple rows');
     assert.equal(await page.locator('#requests-body img, #requests-body script').count(), 0);
     assert.equal(await page.locator('#keys-body img, #keys-body script').count(), 0);
     assert.deepEqual(errors, []);
     await page.screenshot({ path: path.join(out, 'keys-390.png'), fullPage: true });
+
+    // 13. 三套主题在桌面与移动端的筛选区近景截图，逐一确认无横向溢出。
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const theme of ['light', 'white', 'dark']) {
+        await page.evaluate((t) => document.documentElement.setAttribute('data-theme', t), theme);
+        await page.waitForFunction((t) => document.documentElement.getAttribute('data-theme') === t, theme);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+        await page.locator('section[aria-label="筛选条件"]').screenshot({ path: path.join(out, 'filter-' + theme + '-' + width + '.png') });
+      }
+    }
     await page.setViewportSize({ width: 1280, height: 900 });
+    await page.evaluate(() => document.documentElement.removeAttribute('data-theme'));
     await page.screenshot({ path: path.join(out, 'keys-1280.png'), fullPage: true });
-    results.push('mobile layout, text-only rendering and error-free interactions');
+    results.push('theme close-ups and mobile layout, text-only rendering and error-free interactions');
   } finally {
     await browser.close();
     await server.close();

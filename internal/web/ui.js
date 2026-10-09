@@ -868,7 +868,7 @@
     priceNote.className = 'settings-note';
     setText(
       priceNote,
-      '规则自上而下匹配：模型 ID、输入 Token 阈值（含缓存，严格大于）与 UTC+0 时间区间（HH:mm-HH:mm，' +
+      '规则自上而下匹配：模型 ID、输入 Token 阈值（严格大于）与 UTC+0 时间区间（HH:mm-HH:mm，' +
         '起点包含、终点不包含，可跨夜，终点可为 24:00）需同时满足（AND），整个请求采用第一条命中的价格；' +
         '无条件规则即默认价，建议放在最后。'
     );
@@ -901,7 +901,7 @@
         record.values[key] = p.node;
         row.appendChild(p.wrapper);
       });
-      var threshold = input('输入 Token >（可选，含缓存）', rule && rule['input-tokens-gt'] !== undefined ? rule['input-tokens-gt'] : '', 'number');
+      var threshold = input('输入 Token >（可选）', rule && rule['input-tokens-gt'] !== undefined ? rule['input-tokens-gt'] : '', 'number');
       threshold.node.step = '1'; threshold.node.min = '0';
       threshold.node.setAttribute('data-price', 'input-tokens-gt');
       record.threshold = threshold.node;

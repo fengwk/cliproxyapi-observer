@@ -18,7 +18,8 @@
 - `settings.cjs`：真实 Chromium 设置保存、价格增删、刷新保留草稿、错误/超时/过期连接、
   503 重配置确认与宿主浮层命中测试，输出截图与 `settings-results.json`。
 - `keys.cjs`：真实 Chromium 的客户端指纹 / 上游凭据筛选、概览与分组联动、分组维度切换
-  与整行点击过滤，输出截图与 `key-results.json`。
+  与整行点击过滤，并校验统一筛选工具栏（单一卡片、桌面一行、窄屏自然换行、无表单序列化），
+  输出三主题筛选区近景截图与 `key-results.json`。
 - `price-rules.cjs`：真实 Chromium 的有序条件定价场景：阈值严格大于、first-match、
   重排持久化、UTC/跨夜/24:00 边界、删除/清空、后端拒绝保留草稿，并输出
   light/white/dark × 1280/390 截图与 `price-rules-results.json`。
@@ -85,6 +86,7 @@ node --test internal/web/ui.test.cjs internal/web/browser/mock-server.test.cjs
 | 刷新取消在途翻页 | 点击刷新立即中止在途翻页请求并失效令牌，重置为第 1 页并丢弃旧响应 |
 | 动态生效定价与小计 | Summary 与历史请求均按当前价格动态映射，小计与未定价分类明确展示 |
 | 客户端 key / 上游凭据筛选 | 概览、趋势、分组与请求记录同源过滤；概览数值随身份变化；`offset` 重置为 0 |
+| 统一筛选工具栏 | 时间范围 / Provider / 模型 / 客户端指纹 / 上游凭据 / 应用按钮同处一张 `筛选条件` 卡片与同一控件容器；桌面 1280px 单行底部对齐，768/390px 自然换行无横向溢出；无 `form` 与命名序列化入口 |
 | 完整指纹与凭据名称 | 请求表只显示 12 位前缀，点击以完整 64 位指纹过滤；上游凭据显示 CPA 标签/名称并以非机密 `auth_index` 过滤 |
 | Key 分组与维度切换 | `client_keys` / `credentials` 身份数组，未归属 id 为空；点击整行按完整 id 过滤，切换维度立即反映 |
 | 有序条件定价 | `price-rules` 顺序、阈值（含缓存、严格大于）、UTC 区间（起含终不含、跨夜、24:00）与 first-match；旧 `prices` map 作为无条件回退 |

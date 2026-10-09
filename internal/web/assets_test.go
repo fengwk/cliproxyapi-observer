@@ -114,6 +114,68 @@ func TestJSForbiddenAPIsAbsent(t *testing.T) {
 	}
 }
 
+// 全局筛选必须合并为单一工具栏：一个 aria-label="筛选条件" 区域同时承载时间范围、
+// Provider、模型、客户端指纹、上游凭据与统一的应用按钮；不得再出现独立的 Key 筛选卡片
+// 或冗长的 Key 筛选说明段落。
+func TestFilterToolbarIsSingleConsolidatedArea(t *testing.T) {
+	html, _, _ := Asset("ui.html")
+	page := string(html)
+
+	if got := strings.Count(page, `aria-label="筛选条件"`); got != 1 {
+		t.Fatalf("ui.html should expose exactly one 筛选条件 region, got %d", got)
+	}
+	if strings.Contains(page, `aria-label="Key 筛选"`) {
+		t.Fatal("ui.html must not keep a separate Key 筛选 card")
+	}
+	if strings.Contains(page, "Key 筛选影响概览") {
+		t.Fatal("ui.html must not keep the removed Key-filter help paragraph")
+	}
+	if strings.Contains(page, "request-filters") {
+		t.Fatal("ui.html must not use the removed request-filters layout")
+	}
+	for _, id := range []string{
+		`id="filter-provider"`,
+		`id="filter-model"`,
+		`id="filter-client-key"`,
+		`id="filter-auth"`,
+		`id="identity-apply"`,
+		`id="range-label"`,
+	} {
+		if !strings.Contains(page, id) {
+			t.Fatalf("ui.html missing filter control %s", id)
+		}
+	}
+	if !strings.Contains(page, ">应用筛选<") {
+		t.Fatal("ui.html apply button should read 应用筛选")
+	}
+}
+
+// 工具栏样式必须收敛到单一 .controls 行，移除废弃的 request-filters / toolbar-spacer，
+// 并隐藏空的凭据状态占位；同时阈值文案不再重复「含缓存」，但保留严格大于语义。
+func TestFilterToolbarStylesAndPricingCopyConsolidated(t *testing.T) {
+	css, _, _ := Asset("ui.css")
+	style := string(css)
+	for _, needle := range []string{".toolbar .controls", "#credential-status:empty"} {
+		if !strings.Contains(style, needle) {
+			t.Fatalf("ui.css missing consolidated toolbar rule %q", needle)
+		}
+	}
+	for _, needle := range []string{".toolbar-spacer", ".request-filters"} {
+		if strings.Contains(style, needle) {
+			t.Fatalf("ui.css should drop unused rule %q", needle)
+		}
+	}
+
+	js, _, _ := Asset("ui.js")
+	source := string(js)
+	if strings.Contains(source, "含缓存") {
+		t.Fatal("ui.js must not repeat 含缓存 in pricing UI copy")
+	}
+	if !strings.Contains(source, "输入 Token >（可选）") {
+		t.Fatal("ui.js threshold label should read 输入 Token >（可选）")
+	}
+}
+
 func TestCSSThemesAndNoExternalImports(t *testing.T) {
 	css, _, _ := Asset("ui.css")
 	style := string(css)

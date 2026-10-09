@@ -50,29 +50,24 @@
         </div>
       </section>
       <section class="toolbar card" aria-label="筛选条件">
-        <div class="seg" role="group" aria-label="时间范围">
-          <button class="seg-btn is-active" type="button" data-range="24h">24 小时</button>
-          <button class="seg-btn" type="button" data-range="7d">7 天</button>
-          <button class="seg-btn" type="button" data-range="30d">30 天</button>
-        </div>
-        <div class="filter">
-          <label for="filter-provider">Provider</label>
-          <select id="filter-provider" data-testid="filter-provider">
-            <option value="">全部</option>
-          </select>
-        </div>
-        <div class="filter">
-          <label for="filter-model">模型</label>
-          <select id="filter-model" data-testid="filter-model">
-            <option value="">全部</option>
-          </select>
-        </div>
-        <div class="toolbar-spacer"></div>
-        <span id="range-label" class="range-label" data-testid="range-label"></span>
-      </section>
-
-      <section class="card" aria-label="Key 筛选">
-        <div id="identity-filters" class="request-filters">
+        <div class="controls">
+          <div class="seg" role="group" aria-label="时间范围">
+            <button class="seg-btn is-active" type="button" data-range="24h">24 小时</button>
+            <button class="seg-btn" type="button" data-range="7d">7 天</button>
+            <button class="seg-btn" type="button" data-range="30d">30 天</button>
+          </div>
+          <div class="filter">
+            <label for="filter-provider">Provider</label>
+            <select id="filter-provider" data-testid="filter-provider">
+              <option value="">全部</option>
+            </select>
+          </div>
+          <div class="filter">
+            <label for="filter-model">模型</label>
+            <select id="filter-model" data-testid="filter-model">
+              <option value="">全部</option>
+            </select>
+          </div>
           <div class="filter">
             <label for="filter-client-key">客户端 key 指纹</label>
             <input id="filter-client-key" type="text" maxlength="64" list="client-key-options" placeholder="全部 / 完整指纹 / unknown" spellcheck="false" />
@@ -85,9 +80,9 @@
               <option value="unknown">未归属（含旧记录）</option>
             </select>
           </div>
-          <button id="identity-apply" class="btn btn-secondary" type="button" disabled>应用 key 筛选</button>
+          <button id="identity-apply" class="btn btn-secondary" type="button" disabled>应用筛选</button>
         </div>
-        <p class="settings-note">Key 筛选影响概览、趋势、分组及请求记录。客户端 key 只显示指纹；上游凭据 / 认证文件显示 CPA 标签（文件名），同一标签的不同文件仍按文件名区分，删除后显示索引。旧数据归入未归属；点击指纹或分组可直接筛选。</p>
+        <span id="range-label" class="range-label" data-testid="range-label"></span>
         <p id="credential-status" class="settings-note" role="status"></p>
       </section>
 

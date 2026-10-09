@@ -435,25 +435,6 @@ button:focus-visible, .setting-capture input:focus-visible {
   overflow-wrap: anywhere;
 }
 
-.request-filters {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 12px;
-  margin: 12px 0;
-}
-
-.request-filters .filter { flex: 1 1 220px; min-width: 0; }
-.request-filters input, .request-filters select {
-  width: 100%;
-  min-width: 0;
-  max-width: 100%;
-  padding: 7px 8px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-}
-
 @media (max-width: 760px) {
   .price-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -499,8 +480,14 @@ button:focus-visible, .setting-capture input:focus-visible {
 
 .toolbar {
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.toolbar .controls {
+  display: flex;
   align-items: flex-end;
-  gap: 12px;
+  gap: 10px 12px;
   flex-wrap: wrap;
 }
 
@@ -509,6 +496,7 @@ button:focus-visible, .setting-capture input:focus-visible {
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   overflow: hidden;
+  flex: none;
 }
 
 .seg-btn {
@@ -533,11 +521,14 @@ button:focus-visible, .setting-capture input:focus-visible {
   color: var(--primary-contrast);
 }
 
+/* 所有筛选控件共享同样的尺寸、内边距与焦点样式，底部对齐并自然换行。 */
 .filter {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  min-width: 150px;
+  flex: 1 1 150px;
+  min-width: 0;
+  max-width: 240px;
 }
 
 .filter label {
@@ -545,23 +536,31 @@ button:focus-visible, .setting-capture input:focus-visible {
   color: var(--text-secondary);
 }
 
+.filter input,
 .filter select {
-  padding: 7px 10px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  padding: 7px 8px;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   background-color: var(--bg-secondary);
   color: var(--text-primary);
-  max-width: 240px;
 }
 
+.filter input:focus,
 .filter select:focus {
   outline: none;
   border-color: var(--primary-color);
   box-shadow: 0 0 0 3px var(--count-badge-bg);
 }
 
-.toolbar-spacer {
-  flex: 1 1 auto;
+#identity-apply {
+  flex: none;
+}
+
+#credential-status:empty {
+  display: none;
 }
 
 .range-label {
