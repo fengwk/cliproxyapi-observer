@@ -876,3 +876,55 @@ test('认证文件显示标签与文件名，同标签不重复且不覆盖文�
     assert.equal(dumped.includes(leak), false);
   });
 });
+
+test('truncateText 截断超长字符串并保留短字符串', () => {
+  assert.equal(ui.truncateText('short', 12), 'short');
+  assert.equal(ui.truncateText('123456789012', 12), '123456789012');
+  assert.equal(ui.truncateText('1234567890123', 12), '123456789012…');
+  assert.equal(ui.truncateText('2921300b7afb00000000', 12), '2921300b7afb…');
+  assert.equal(ui.truncateText('fengwk94@gmail.com（opencode.json）', 12), 'fengwk94@gma…');
+  assert.equal(ui.truncateText('', 12), '');
+  assert.equal(ui.truncateText(null, 12), '');
+});
+
+test('renderRequestsTable 简化模型列并截断 key/auth 且保留 hover title', () => {
+  const doc = new FakeDocument();
+  const tbody = doc.createElement('tbody');
+  const fullKey = '2921300b7afb' + '0'.repeat(52);
+  const fullCred = 'fengwk94@gmail.com（opencode-go-0ba95305ffa1ba700d8f63765ced53a2ef95eddecf70577fa0d88f01605f6210.json）';
+  const items = [
+    {
+      request_id: 'r1',
+      time: '2026-10-09T16:13:48Z',
+      model: 'opencode-go/deepseek-v4.1-flash',
+      alias: 'deepseek-v4.1-flash',
+      accounting_quality: 'unclassified',
+      stream: true,
+      provider: 'opencode-go',
+      client_key_id: fullKey,
+      auth_index: '1'.repeat(16)
+    }
+  ];
+  const credentials = { ['1'.repeat(16)]: fullCred };
+  ui.renderRequestsTable(doc, tbody, items, null, credentials, null);
+
+  const row = tbody.childNodes[0];
+  const cells = row.childNodes;
+  // 1. 模型列：直接展示 model 字符串，无别名/核算/流式堆叠；别名存入 title
+  const modelCell = cells[1];
+  assert.equal(modelCell.textContent, 'opencode-go/deepseek-v4.1-flash');
+  assert.equal(modelCell.title, '别名 deepseek-v4.1-flash');
+  assert.ok(!collectText(modelCell).some((t) => t.includes('核算')));
+  assert.ok(!collectText(modelCell).some((t) => t.includes('流式')));
+
+  // 2. 客户端 key 列：按钮展示 12 位前缀 + …，完整 64 位存入 title
+  const keyCell = cells[3];
+  const keyButton = keyCell.childNodes[0];
+  assert.equal(keyButton.textContent, '2921300b7afb…');
+  assert.equal(keyButton.title, fullKey);
+
+  // 3. auth 列：展示 12 位前缀 + …，完整凭据存入 title
+  const authCell = cells[4];
+  assert.equal(authCell.textContent, 'fengwk94@gma…');
+  assert.equal(authCell.title, fullCred);
+});

@@ -198,6 +198,12 @@
     );
   }
 
+  function truncateText(value, maxLen) {
+    var s = toStr(value);
+    var limit = maxLen || 12;
+    return s.length > limit ? s.slice(0, limit) + '…' : s;
+  }
+
   function nullCost(source) {
     if (!source || typeof source !== 'object') return null;
     var v = source.cost_usd;
@@ -721,50 +727,31 @@
       var tr = doc.createElement('tr');
       tr.appendChild(cell(doc, '', r.time));
 
-      var modelCell = doc.createElement('td');
-      var wrap = doc.createElement('div');
-      wrap.className = 'model-cell';
-      var name = doc.createElement('span');
-      setText(name, r.model);
-      wrap.appendChild(name);
-      if (r.alias) {
-        var alias = doc.createElement('span');
-        alias.className = 'model-alias';
-        setText(alias, '别名 ' + r.alias);
-        wrap.appendChild(alias);
+      var modelCell = cell(doc, 'model-cell', r.model);
+      if (r.alias && r.alias !== r.model) {
+        modelCell.title = '别名 ' + r.alias;
       }
-      if (r.quality) {
-        var quality = doc.createElement('span');
-        quality.className = 'model-alias';
-        setText(quality, '核算 ' + r.quality);
-        wrap.appendChild(quality);
-      }
-      if (r.stream) {
-        var stream = doc.createElement('span');
-        stream.className = 'model-alias';
-        setText(stream, '流式');
-        wrap.appendChild(stream);
-      }
-      modelCell.appendChild(wrap);
       tr.appendChild(modelCell);
 
       tr.appendChild(cell(doc, 'col-secondary', r.provider));
       var keyCell = cell(doc, '', '未归属');
+      keyCell.title = '未归属';
       if (r.clientKeyID) {
         clearChildren(keyCell);
         var keyButton = doc.createElement('button');
         keyButton.type = 'button';
         keyButton.className = 'btn btn-secondary btn-sm';
         keyButton.title = r.clientKeyID;
-        setText(keyButton, r.clientKeyID.slice(0, 12) + '…');
+        setText(keyButton, truncateText(r.clientKeyID, 12));
         (function (button, id) {
           button.addEventListener('click', function () { if (onKey) onKey(id); });
         })(keyButton, r.clientKeyID);
         keyCell.appendChild(keyButton);
       }
       tr.appendChild(keyCell);
-      var authCell = cell(doc, '', r.credential);
-      authCell.title = r.authIndex;
+      var authDisplay = truncateText(r.credential, 12);
+      var authCell = cell(doc, '', authDisplay);
+      authCell.title = r.credential;
       tr.appendChild(authCell);
       tr.appendChild(cell(doc, 'num col-secondary', r.tokens));
       tr.appendChild(cell(doc, 'num', r.latency));
@@ -1609,7 +1596,7 @@
       var auth = els.auth.value || '';
       if ((key && key !== 'unknown' && !/^[a-f0-9]{64}$/.test(key)) ||
           (auth && auth !== 'unknown' && !/^[a-f0-9]{16}$/.test(auth))) {
-        setStatus('筛选值无效，请从下拉列表中选择客户端 key 或上游凭据', 'error');
+        setStatus('筛选值无效，请从下拉列表中选择客户端 key 或 auth', 'error');
         return;
       }
       state.clientKeyID = key;
@@ -1729,7 +1716,7 @@
           state.requestClientKeyID = state.clientKeyID;
           state.requestAuthIndex = state.authIndex;
           state.credentials = byKind.credentials || Object.create(null);
-          setText(els.credentialStatus, byKind.credentials ? '' : 'CPA 凭据 / 认证文件名称加载失败，本次仅按索引显示；上游凭据筛选仍可用。');
+          setText(els.credentialStatus, byKind.credentials ? '' : 'CPA 凭据名称加载失败，本次仅按索引显示；auth 筛选仍可用。');
           state.refreshing = false;
           applyRequestsPage(byKind.requests, 0);
           renderKeyGroups();
@@ -2155,6 +2142,7 @@
     formatBytes: formatBytes,
     formatDuration: formatDuration,
     formatTime: formatTime,
+    truncateText: truncateText,
     counter: counter,
     buildOverview: buildOverview,
     buildGroupRows: buildGroupRows,

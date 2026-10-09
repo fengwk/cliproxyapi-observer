@@ -724,17 +724,7 @@ td.num.warn {
 }
 
 .model-cell {
-  display: flex;
-  flex-direction: column;
-  line-height: 1.3;
-  white-space: normal;
-  min-width: 120px;
-  max-width: 320px;
-}
-
-.model-alias {
-  font-size: 11px;
-  color: var(--text-tertiary);
+  white-space: nowrap;
 }
 
 .badge {

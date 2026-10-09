@@ -67,9 +67,11 @@ async function main() {
       [['', '全部'], ['unknown', '未归属（含旧记录）']]
     );
 
-    // 1. 上游凭据展示 CPA 标签与认证文件名，缓存命中率带分子分母并显式标注。
-    assert.match(await page.locator('#requests-body').textContent(), /工作账户（fake-file-a\.json）/);
-    assert.match(await page.locator('#requests-body').textContent(), /备用账户（fake-file-b\.json）/);
+    // 1. 上游凭据展示短名称截断，title 暴露完整凭据名称；缓存命中率带分子分母并显式标注。
+    assert.match(await page.locator('#requests-body').textContent(), /工作账户（fake-fi…/);
+    assert.match(await page.locator('#requests-body').textContent(), /备用账户（fake-fi…/);
+    assert.ok(await page.locator('#requests-body td[title="工作账户（fake-file-a.json）"]').count() > 0);
+    assert.ok(await page.locator('#requests-body td[title="备用账户（fake-file-b.json）"]').count() > 0);
     assert.match(await page.locator('[data-metric="cache"]').textContent(), /请求命中率.*812\/1,234/);
     results.push('current CPA labels with auth file names and explicit request-level cache ratio');
 
@@ -101,7 +103,8 @@ async function main() {
     await page.locator('#identity-apply').click();
     await page.waitForFunction(() => {
       const rows = Array.from(document.querySelectorAll('#requests-body tr'));
-      return rows.length === 25 && rows.every((row) => row.textContent.includes('备用账户（fake-file-b.json）'));
+      return rows.length === 25 && rows.every((row) => row.children[4]?.title === '备用账户（fake-file-b.json）' &&
+        row.children[4]?.textContent === '备用账户（fake-fi…');
     });
     await waitMetric(page, 'requests', '530');
     results.push('auth file selection filters by nonsecret auth_index');
@@ -170,7 +173,8 @@ async function main() {
     await page.locator('#identity-apply').click();
     await page.waitForFunction(() => {
       const rows = Array.from(document.querySelectorAll('#requests-body tr'));
-      return rows.length === 25 && rows.every((row) => row.textContent.includes('同名（dup-two.json）'));
+      return rows.length === 25 && rows.every((row) => row.children[4]?.title === '同名（dup-two.json）' &&
+        row.children[4]?.textContent === '同名（dup-two.j…');
     });
     await waitMetric(page, 'requests', '530');
     results.push('same-label auth files stay distinguishable and filter independently');
@@ -188,7 +192,8 @@ async function main() {
     await page.locator('#identity-apply').click();
     await page.waitForFunction(() => {
       const rows = Array.from(document.querySelectorAll('#requests-body tr'));
-      return rows.length === 26 && rows.every((row) => row.textContent.includes('索引 ' + '1'.repeat(16)));
+      return rows.length === 26 && rows.every((row) => row.children[4]?.title === '索引 ' + '1'.repeat(16) &&
+        row.children[4]?.textContent === '索引 ' + '1'.repeat(9) + '…');
     });
     await waitMetric(page, 'requests', '700');
     results.push('missing credential names fall back to the nonsecret index');
@@ -206,10 +211,11 @@ async function main() {
     await page.locator('#identity-apply').click();
     await page.waitForFunction(() => {
       const rows = Array.from(document.querySelectorAll('#requests-body tr'));
-      return rows.length === 26 && rows.some((row) => row.textContent.includes('onerror=alert(1)'));
+      return rows.length === 26 && rows.some((row) => row.textContent.includes('<script>evil…'));
     });
     assert.match(await page.locator('#requests-body').textContent(),
-      /<script>evil<\/script>（<img src=x onerror=alert\(1\)>\.json）/);
+      /<script>evil…/);
+    assert.ok(await page.locator('#requests-body td[title="<script>evil</script>（<img src=x onerror=alert(1)>.json）"]').count() > 0);
     assert.equal(await page.locator('#requests-body img, #requests-body script, #keys-body img, #keys-body script').count(), 0);
     assert.equal(dialogMessage, null);
     results.push('hostile file names and labels render as text only');

@@ -150,6 +150,25 @@ func TestFilterToolbarIsSingleConsolidatedArea(t *testing.T) {
 	}
 }
 
+// 请求表与筛选标签简化：上游凭据列更名为 auth，不得再残留繁冗的「上游凭据 / 认证文件」文案。
+func TestRequestsTableHeaderAndFilterLabelAuth(t *testing.T) {
+	html, _, _ := Asset("ui.html")
+	page := string(html)
+
+	if strings.Contains(page, "上游凭据 / 认证文件") {
+		t.Fatal("ui.html must not retain verbose 上游凭据 / 认证文件 text")
+	}
+	if !strings.Contains(page, `<label for="filter-auth">auth</label>`) {
+		t.Fatal("ui.html filter label for auth should be auth")
+	}
+	if !strings.Contains(page, `<th>auth</th>`) {
+		t.Fatal("ui.html requests table header should include <th>auth</th>")
+	}
+	if !strings.Contains(page, `<option value="auth">auth</option>`) {
+		t.Fatal("ui.html key-group-kind select should include <option value=\"auth\">auth</option>")
+	}
+}
+
 // 客户端 key 筛选统一为原生下拉：只做选择、默认明确「全部」、含「未归属（含旧记录）」；
 // 不得再保留需手填的 input 或 datalist 候选。
 func TestClientKeyFilterIsNativeSelect(t *testing.T) {
