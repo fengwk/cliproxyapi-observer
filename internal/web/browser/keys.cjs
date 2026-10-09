@@ -39,6 +39,8 @@ async function main() {
     },
     { key, value }
   );
+  // identity-apply 在刷新/翻页/保存中禁用；等待其重新可用可避免与在途刷新竞态。
+  const idle = (page) => page.waitForFunction(() => !document.getElementById('identity-apply').disabled);
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     page.on('pageerror', (e) => errors.push(e.message));
@@ -56,6 +58,15 @@ async function main() {
     await page.locator('#identity-apply').waitFor();
     await page.waitForFunction(() => !document.getElementById('identity-apply').disabled);
 
+    // 1a. 客户端 key 是原生下拉：连接后默认「全部」并含「未归属」，不再有手填 input/datalist。
+    assert.equal(await page.locator('#filter-client-key').evaluate((el) => el.tagName), 'SELECT');
+    assert.equal(await page.locator('input#filter-client-key, datalist').count(), 0);
+    assert.equal(await page.locator('#filter-client-key').inputValue(), '');
+    assert.deepEqual(
+      (await page.locator('#filter-client-key option').evaluateAll((opts) => opts.map((o) => [o.value, o.textContent]))).slice(0, 2),
+      [['', '全部'], ['unknown', '未归属（含旧记录）']]
+    );
+
     // 1. 上游凭据展示 CPA 标签与认证文件名，缓存命中率带分子分母并显式标注。
     assert.match(await page.locator('#requests-body').textContent(), /工作账户（fake-file-a\.json）/);
     assert.match(await page.locator('#requests-body').textContent(), /备用账户（fake-file-b\.json）/);
@@ -70,6 +81,9 @@ async function main() {
     await button.click();
     await page.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 26);
     assert.equal(await page.locator('#filter-client-key').inputValue(), fingerprint);
+    // 下拉只显示 12 位前缀，但选中项的 value 与 title 都是请求实际使用的完整 64 位指纹。
+    assert.equal(await page.locator('#filter-client-key option:checked').textContent(), fingerprint.slice(0, 12) + '…');
+    assert.equal(await page.locator('#filter-client-key').evaluate((el) => el.selectedOptions[0].title), fingerprint);
     assert.ok(calls.some((url) => url.pathname.endsWith('/requests') &&
       url.searchParams.get('client_key_id') === fingerprint && url.searchParams.get('offset') === '0'));
     assert.equal(await page.locator('#requests-next').isDisabled(), true);
@@ -82,7 +96,7 @@ async function main() {
 
     // 3. 上游凭据按「标签（文件名）」选择，使用非机密 auth_index 过滤，概览同步变化。
     assert.match(await page.locator('#filter-auth').textContent(), /备用账户（fake-file-b\.json） · 2222222222222222/);
-    await page.locator('#filter-client-key').fill('');
+    await page.locator('#filter-client-key').selectOption('');
     await page.locator('#filter-auth').selectOption('2'.repeat(16));
     await page.locator('#identity-apply').click();
     await page.waitForFunction(() => {
@@ -93,7 +107,7 @@ async function main() {
     results.push('auth file selection filters by nonsecret auth_index');
 
     // 4. 未归属桶：空 id 表示旧记录；key 筛选必须传播到 summary。
-    await page.locator('#filter-client-key').fill('unknown');
+    await page.locator('#filter-client-key').selectOption('unknown');
     await page.locator('#filter-auth').selectOption('unknown');
     await page.locator('#identity-apply').click();
     await page.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 1);
@@ -102,7 +116,7 @@ async function main() {
     results.push('legacy unknown bucket: key filters reach the summary');
 
     // 5. 应用筛选重置 offset 与分页。
-    await page.locator('#filter-client-key').fill('');
+    await page.locator('#filter-client-key').selectOption('');
     await page.locator('#filter-auth').selectOption('');
     await page.locator('#identity-apply').click();
     await page.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 50);
@@ -129,7 +143,7 @@ async function main() {
     assert.equal(await page.locator('#filter-client-key').inputValue(), 'unknown');
 
     // 清除筛选后切换到上游凭据维度，凭据名称来自 CPA，可再次点击过滤。
-    await page.locator('#filter-client-key').fill('');
+    await page.locator('#filter-client-key').selectOption('');
     await page.locator('#identity-apply').click();
     await page.waitForFunction(() => document.querySelectorAll('#keys-body tr').length === 3);
     await page.locator('#key-group-kind').selectOption('auth');
@@ -362,6 +376,94 @@ async function main() {
     await page.locator('#identity-apply').click();
     await page.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 50);
     results.push('long auth filename and long model option keep the layout overflow-free');
+
+    // 11b. 空结果：key=A 与 auth=B 交集为空，summary.client_keys 为空；已选完整指纹仍须保留。
+    await page.locator('#filter-client-key').selectOption(mock.CLIENT_KEY_A);
+    await page.locator('#filter-auth').selectOption(mock.AUTH_INDEX_B);
+    await page.locator('#identity-apply').click();
+    await page.waitForFunction((key) => {
+      const sel = document.getElementById('filter-client-key');
+      return sel.value === key && !!sel.querySelector('option[value="' + key + '"]');
+    }, mock.CLIENT_KEY_A);
+    assert.equal(await page.locator('#filter-client-key option:checked').textContent(), mock.CLIENT_KEY_A.slice(0, 12) + '…');
+    assert.ok(calls.some((url) => url.pathname.endsWith('/summary') &&
+      url.searchParams.get('client_key_id') === mock.CLIENT_KEY_A &&
+      url.searchParams.get('auth_index') === mock.AUTH_INDEX_B));
+    assert.ok(calls.some((url) => url.pathname.endsWith('/requests') &&
+      url.searchParams.get('client_key_id') === mock.CLIENT_KEY_A &&
+      url.searchParams.get('auth_index') === mock.AUTH_INDEX_B && url.searchParams.get('offset') === '0'));
+    await idle(page);
+
+    // 11c. 刷新与时间范围切换后保持同一选中指纹，不落回「全部」。
+    await page.locator('#refresh').click();
+    await idle(page);
+    assert.equal(await page.locator('#filter-client-key').inputValue(), mock.CLIENT_KEY_A);
+    await page.locator('#filter-auth').selectOption('');
+    await page.locator('#identity-apply').click();
+    await page.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 26);
+    await idle(page);
+    await page.locator('.seg-btn[data-range="7d"]').click();
+    await idle(page);
+    assert.equal(await page.locator('#filter-client-key').inputValue(), mock.CLIENT_KEY_A);
+
+    // 11d. 回到「全部」后选择另一完整指纹并应用，query 使用完整 64 位。
+    await page.locator('#filter-client-key').selectOption('');
+    await page.locator('#identity-apply').click();
+    await page.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 50);
+    await idle(page);
+    await page.locator('#filter-client-key').selectOption(mock.CLIENT_KEY_B);
+    await page.locator('#identity-apply').click();
+    await page.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 25);
+    await idle(page);
+    assert.equal(await page.locator('#filter-client-key').inputValue(), mock.CLIENT_KEY_B);
+    assert.ok(calls.some((url) => url.pathname.endsWith('/requests') &&
+      url.searchParams.get('client_key_id') === mock.CLIENT_KEY_B && url.searchParams.get('offset') === '0'));
+    results.push('empty result, refresh and time range keep the selected full fingerprint; direct select filters by the full id');
+
+    // 11e. 未应用的新选择在翻页重建选项后仍保留，而查询仍用已应用的过滤条件。
+    await page.locator('#filter-client-key').selectOption('');
+    await page.locator('#identity-apply').click();
+    await page.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 50);
+    await idle(page);
+    await page.locator('#filter-client-key').selectOption(mock.CLIENT_KEY_B);
+    await page.locator('#requests-next').click();
+    await page.waitForFunction(() => document.getElementById('requests-page').textContent.includes('第 2 页'));
+    await idle(page);
+    assert.equal(await page.locator('#filter-client-key').inputValue(), mock.CLIENT_KEY_B);
+    assert.ok(calls.some((url) => url.pathname.endsWith('/requests') &&
+      url.searchParams.get('client_key_id') === null && url.searchParams.get('offset') === '50'));
+    await page.locator('#requests-prev').click();
+    await page.waitForFunction(() => document.getElementById('requests-page').textContent.includes('第 1 页'));
+    await idle(page);
+    await page.locator('#filter-client-key').selectOption('');
+    await page.locator('#identity-apply').click();
+    await page.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 50);
+    await idle(page);
+    results.push('pagination keeps the pending selection while the query keeps the applied filter');
+
+    // 11f. 人为移除某指纹的 option，点击请求行身份必须补全并选中完整值。
+    await page.evaluate((key) => {
+      const opt = document.querySelector('#filter-client-key option[value="' + key + '"]');
+      if (opt) opt.remove();
+    }, mock.CLIENT_KEY_A);
+    assert.equal(await page.locator('#filter-client-key option[value="' + mock.CLIENT_KEY_A + '"]').count(), 0);
+    await page.locator(`#requests-body button[title="${mock.CLIENT_KEY_A}"]`).first().click();
+    await idle(page);
+    assert.equal(await page.locator('#filter-client-key').inputValue(), mock.CLIENT_KEY_A);
+    assert.equal(await page.locator('#filter-client-key option[value="' + mock.CLIENT_KEY_A + '"]').count(), 1);
+    assert.ok(calls.some((url) => url.pathname.endsWith('/requests') &&
+      url.searchParams.get('client_key_id') === mock.CLIENT_KEY_A && url.searchParams.get('offset') === '0'));
+    results.push('clicking a request identity restores a missing option and filters by the full fingerprint');
+
+    // 11g. 重连后 key/auth 回到「全部」，并把时间范围恢复默认以复用既有截图初始状态。
+    await page.locator('#connect').click();
+    await idle(page);
+    assert.equal(await page.locator('#filter-client-key').inputValue(), '');
+    assert.equal(await page.locator('#filter-auth').inputValue(), '');
+    assert.equal(await page.locator('#filter-client-key option').first().textContent(), '全部');
+    await page.locator('.seg-btn[data-range="24h"]').click();
+    await idle(page);
+    results.push('reconnect resets the client key selector to 全部');
 
     // 12. 响应式与安全：中等宽度与 390px 自然换行、无横向溢出、纯文本渲染、无页面错误。
     await page.setViewportSize({ width: 768, height: 900 });

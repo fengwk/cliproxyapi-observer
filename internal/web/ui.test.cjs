@@ -811,6 +811,32 @@ test('凭据名称优先标签并安全降级，保留反向代理前缀', () =>
   assert.equal(ui.buildRequestRows([{}])[0].credential, '未归属');
 });
 
+// 客户端 key 现在是原生下拉：只做选择，默认明确「全部」。候选只含合法 64 位指纹，
+// 展示前 12 位但筛选值始终完整；已选指纹即使不在新候选中也必须保留，避免 UI 落回
+// 「全部」而查询仍按旧 key 执行。
+test('clientKeyOptions 提供固定全部/未归属选项并保留已选指纹', () => {
+  const a = 'a'.repeat(64);
+  const b = 'b'.repeat(64);
+  const c = 'c'.repeat(64);
+  const groups = [{ id: b }, { id: a }, { id: '' }, { id: 'not-a-fingerprint' }];
+  const items = [{ client_key_id: a }, { client_key_id: 'unknown' }, { client_key_id: null }];
+  const opts = ui.clientKeyOptions(groups, items, '');
+  // 固定选项在前：空值「全部」与未归属；随后是去重排序的完整指纹。
+  assert.deepEqual(opts.map((o) => o.value), ['', 'unknown', a, b]);
+  assert.equal(opts[0].label, '全部');
+  assert.equal(opts[1].label, '未归属（含旧记录）');
+  // 候选文本是 12 位前缀，筛选值与 title 始终是完整 64 位指纹。
+  assert.equal(opts[2].label, a.slice(0, 12) + '…');
+  assert.equal(opts[2].title, a);
+  assert.equal(opts[2].value.length, 64);
+  // 已选指纹即使不在新候选（空结果或切换其它维度）中也保留。
+  assert.deepEqual(ui.clientKeyOptions([], [], c).map((o) => o.value), ['', 'unknown', c]);
+  // 非法或固定选中值不注入重复候选；畸形输入仅剩固定选项。
+  assert.deepEqual(ui.clientKeyOptions([], [], 'bogus').map((o) => o.value), ['', 'unknown']);
+  assert.deepEqual(ui.clientKeyOptions([], [], 'unknown').map((o) => o.value), ['', 'unknown']);
+  assert.deepEqual(ui.clientKeyOptions(null, undefined, null).map((o) => o.value), ['', 'unknown']);
+});
+
 // Auth files show "label（filename）" so a shared label cannot hide which file was used;
 // only nonsecret display fields are retained, never source/path/id/secret values.
 test('认证文件显示标签与文件名，同标签不重复且不覆盖文件名', () => {

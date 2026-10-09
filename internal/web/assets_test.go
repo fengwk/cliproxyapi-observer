@@ -150,6 +150,32 @@ func TestFilterToolbarIsSingleConsolidatedArea(t *testing.T) {
 	}
 }
 
+// 客户端 key 筛选统一为原生下拉：只做选择、默认明确「全部」、含「未归属（含旧记录）」；
+// 不得再保留需手填的 input 或 datalist 候选。
+func TestClientKeyFilterIsNativeSelect(t *testing.T) {
+	html, _, _ := Asset("ui.html")
+	page := string(html)
+
+	selectTag := regexp.MustCompile(`(?s)<select[^>]*\bid="filter-client-key"[^>]*>(.*?)</select>`).FindStringSubmatch(page)
+	if selectTag == nil {
+		t.Fatal("filter-client-key should be a native <select>")
+	}
+	if body := selectTag[1]; !strings.Contains(body, `<option value="">全部</option>`) ||
+		!strings.Contains(body, `<option value="unknown">未归属（含旧记录）</option>`) {
+		t.Fatalf("client key select should default to 全部 and include 未归属, got %q", body)
+	}
+	for _, needle := range []string{
+		`list="client-key-options"`,
+		`id="client-key-options"`,
+		`<datalist`,
+		`id="filter-client-key" type=`,
+	} {
+		if strings.Contains(page, needle) {
+			t.Fatalf("ui.html must not keep removable client-key input/datalist marker %q", needle)
+		}
+	}
+}
+
 // 工具栏样式必须收敛到单一 .controls 行，移除废弃的 request-filters / toolbar-spacer，
 // 并隐藏空的凭据状态占位；同时阈值文案不再重复「含缓存」，但保留严格大于语义。
 func TestFilterToolbarStylesAndPricingCopyConsolidated(t *testing.T) {

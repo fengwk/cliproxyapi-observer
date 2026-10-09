@@ -1144,6 +1144,34 @@
     return option;
   }
 
+  // 客户端 key 下拉候选：始终含「全部」「未归属」；只收集合法 64 位指纹并去重排序，
+  // 展示前 12 位但 value/title 为完整指纹；当前已选合法指纹即使不在候选也保留。
+  function clientKeyOptions(groups, items, selected) {
+    var ids = Object.create(null);
+    var collect = function (id) { if (/^[a-f0-9]{64}$/.test(toStr(id))) ids[id] = true; };
+    (Array.isArray(groups) ? groups : []).forEach(function (group) { collect(group && group.id); });
+    (Array.isArray(items) ? items : []).forEach(function (item) { collect(item && item.client_key_id); });
+    var chosen = toStr(selected);
+    if (chosen && chosen !== 'unknown' && /^[a-f0-9]{64}$/.test(chosen)) ids[chosen] = true;
+    var out = [
+      { value: '', label: '全部' },
+      { value: 'unknown', label: '未归属（含旧记录）' }
+    ];
+    Object.keys(ids).sort().forEach(function (id) {
+      out.push({ value: id, label: id.slice(0, 12) + '…', title: id });
+    });
+    return out;
+  }
+
+  function selectHasOption(select, value) {
+    var options = select && select.options;
+    if (!options) return false;
+    for (var i = 0; i < options.length; i++) {
+      if (options[i].value === value) return true;
+    }
+    return false;
+  }
+
   function createThemeController(win, doc, onChange) {
     var observer = null;
 
@@ -1543,17 +1571,13 @@
 
     function updateIdentityOptions() {
       var selected = els.auth.value || '';
+      var selectedKey = els.clientKey.value || '';
       var authNames = assign(Object.create(null), state.credentials);
       if (selected && selected !== 'unknown' && !authNames[selected]) authNames[selected] = '索引 ' + selected;
-      var keys = Object.create(null);
-      state.clientGroups.forEach(function (group) {
-        if (/^[a-f0-9]{64}$/.test(toStr(group.id))) keys[group.id] = true;
-      });
       state.authGroups.forEach(function (group) {
         if (/^[a-f0-9]{16}$/.test(toStr(group.id)) && !authNames[group.id]) authNames[group.id] = '索引 ' + group.id;
       });
       state.items.forEach(function (item) {
-        if (/^[a-f0-9]{64}$/.test(toStr(item.client_key_id))) keys[item.client_key_id] = true;
         if (/^[a-f0-9]{16}$/.test(toStr(item.auth_index)) && !authNames[item.auth_index]) {
           authNames[item.auth_index] = '索引 ' + item.auth_index;
         }
@@ -1565,19 +1589,22 @@
         els.auth.appendChild(optionEl(doc, index, authNames[index] + ' · ' + index));
       });
       els.auth.value = selected;
-      var options = doc.getElementById('client-key-options');
-      clearChildren(options);
-      options.appendChild(optionEl(doc, 'unknown', '未归属（含旧记录）'));
-      Object.keys(keys).sort().forEach(function (key) { options.appendChild(optionEl(doc, key, key.slice(0, 12) + '…')); });
+      clearChildren(els.clientKey);
+      clientKeyOptions(state.clientGroups, state.items, selectedKey).forEach(function (opt) {
+        var option = optionEl(doc, opt.value, opt.label);
+        if (opt.title) option.title = opt.title;
+        els.clientKey.appendChild(option);
+      });
+      els.clientKey.value = selectedKey;
     }
 
     function applyIdentityFilter() {
       if (!state.connected || saving || state.refreshing || state.loadingPage) return;
-      var key = els.clientKey.value.trim();
+      var key = els.clientKey.value || '';
       var auth = els.auth.value || '';
       if ((key && key !== 'unknown' && !/^[a-f0-9]{64}$/.test(key)) ||
           (auth && auth !== 'unknown' && !/^[a-f0-9]{16}$/.test(auth))) {
-        setStatus('请输入完整的 64 位客户端指纹，或使用 unknown 筛选未归属记录', 'error');
+        setStatus('筛选值无效，请从下拉列表中选择客户端 key 或上游凭据', 'error');
         return;
       }
       state.clientKeyID = key;
@@ -1587,7 +1614,15 @@
 
     function filterByKey(key) {
       if (!state.connected || saving || state.refreshing || state.loadingPage) return;
-      els.clientKey.value = key;
+      var value = key || 'unknown';
+      // 点击请求/分组身份时为合法但当前缺失的指纹补足 option，避免静默落回「全部」。
+      if (value !== 'unknown' && !/^[a-f0-9]{64}$/.test(value)) return;
+      if (!selectHasOption(els.clientKey, value)) {
+        var option = optionEl(doc, value, value.slice(0, 12) + '…');
+        option.title = value;
+        els.clientKey.appendChild(option);
+      }
+      els.clientKey.value = value;
       applyIdentityFilter();
     }
 
@@ -2103,6 +2138,7 @@
     normalizeTheme: normalizeTheme,
     resolveThemeSource: resolveThemeSource,
     rangeBounds: rangeBounds,
+    clientKeyOptions: clientKeyOptions,
     formatInt: formatInt,
     formatCompact: formatCompact,
     formatCost: formatCost,

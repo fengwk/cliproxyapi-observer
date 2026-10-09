@@ -69,9 +69,11 @@
             </select>
           </div>
           <div class="filter">
-            <label for="filter-client-key">客户端 key 指纹</label>
-            <input id="filter-client-key" type="text" maxlength="64" list="client-key-options" placeholder="全部 / 完整指纹 / unknown" spellcheck="false" />
-            <datalist id="client-key-options"><option value="unknown">未归属（含旧记录）</option></datalist>
+            <label for="filter-client-key">客户端 key</label>
+            <select id="filter-client-key">
+              <option value="">全部</option>
+              <option value="unknown">未归属（含旧记录）</option>
+            </select>
           </div>
           <div class="filter">
             <label for="filter-auth">上游凭据 / 认证文件</label>
