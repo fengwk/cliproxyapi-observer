@@ -14,6 +14,14 @@ if (!OUT) throw new Error('Provide an external evidence directory');
 
 const results = [];
 const ready = (frame) => frame.waitForFunction(() => document.getElementById('conn-status').textContent.startsWith('已更新'));
+
+// 主题切换会触发按钮/边框 150ms 过渡；截图前先跨越两个渲染帧让过渡启动，再等待
+// 文档内动画全部结束，避免截到中间灰阶/低对比帧。
+async function settleTransitions(page) {
+  await page.evaluate(() => new Promise((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== 'running'));
+}
 async function connect(frame) {
   await frame.locator('#mgmt-key').fill(mock.SECRET);
   await frame.locator('#connect').click();
@@ -163,6 +171,58 @@ async function main() {
       assert.equal(await page.locator('.price-row').count(), 0);
     });
 
+    await run('Shared button contract covers pricing actions and semantic variants', async ({ server, page }) => {
+      await page.goto(server.resourceURL); await connect(page);
+      const contract = await page.evaluate(() => {
+        const round = (v) => Math.round(parseFloat(v));
+        const snap = (el) => {
+          const s = getComputedStyle(el);
+          return {
+            cls: el.className,
+            fontSize: round(s.fontSize),
+            fontWeight: s.fontWeight,
+            radius: round(s.borderTopLeftRadius),
+            height: Math.round(el.getBoundingClientRect().height),
+            bg: s.backgroundColor,
+            color: s.color,
+            opacity: s.opacity,
+            cursor: s.cursor
+          };
+        };
+        const row = document.querySelector('.price-row');
+        return {
+          del: snap(row.querySelector('button.btn-danger')),
+          move: snap(row.querySelector('button.btn-secondary')),
+          add: snap(document.getElementById('price-add')),
+          save: snap(document.getElementById('settings-save')),
+          saveDisabled: document.getElementById('settings-save').disabled
+        };
+      });
+      // 删除使用已定义的 .btn-danger（错误语义色）+ btn-sm，不再有组件级 price-delete 覆盖。
+      assert.match(contract.del.cls, /(^|\s)btn(\s|$)/);
+      assert.match(contract.del.cls, /(^|\s)btn-danger(\s|$)/);
+      assert.match(contract.del.cls, /(^|\s)btn-sm(\s|$)/);
+      assert.equal(contract.del.cls.includes('price-delete'), false, '删除按钮不得再带 price-delete');
+      assert.equal(contract.del.fontSize, 14);
+      assert.equal(contract.del.fontWeight, '600');
+      assert.equal(contract.del.height, 39);
+      assert.equal(contract.del.radius, 8);
+      assert.equal(contract.del.bg, 'rgb(198, 87, 70)', '危险按钮使用 error 语义色');
+      assert.equal(contract.del.color, 'rgb(255, 255, 255)');
+      // 行内次要操作 = btn-secondary btn-sm，紧凑高度 39。
+      assert.match(contract.move.cls, /(^|\s)btn-secondary(\s|$)/);
+      assert.match(contract.move.cls, /(^|\s)btn-sm(\s|$)/);
+      assert.equal(contract.move.height, 39);
+      // 常规主操作 = btn btn-secondary，46px / 16px。
+      assert.match(contract.add.cls, /(^|\s)btn-secondary(\s|$)/);
+      assert.equal(contract.add.height, 46);
+      assert.equal(contract.add.fontSize, 16);
+      // 未保存时保存按钮禁用：降低不透明度并阻止光标。
+      assert.equal(contract.saveDisabled, true);
+      assert.equal(contract.save.opacity, '0.6');
+      assert.equal(contract.save.cursor, 'not-allowed');
+    });
+
     await run('Malformed rules are rejected before write; backend rejection keeps the draft', async ({ server, page }) => {
       await page.goto(server.resourceURL); await connect(page);
       const row = page.locator('.price-row').nth(0);
@@ -202,6 +262,7 @@ async function main() {
           }, theme);
           const tName = theme || 'light';
           await page.locator('#settings-body').scrollIntoViewIfNeeded();
+          await settleTransitions(page);
           await page.screenshot({ path: path.join(OUT, 'price-rules-' + tName + '-' + width + '.png'), fullPage: true });
         }
       }

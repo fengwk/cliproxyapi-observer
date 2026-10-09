@@ -95,10 +95,12 @@ node --test internal/web/ui.test.cjs internal/web/browser/mock-server.test.cjs
 | 异步确认弹窗完整生命周期 | 取消/Escape 保留草稿且 0 请求；重复点击不重复弹窗；断开/重连使在途弹窗失效；干净草稿不弹窗 |
 | 无障碍主题复选框 | `appearance: none`、label 文本点击与 Space 键切换、禁用状态防篡改 |
 | 宿主浮层命中与穿透保护 | 1280px / 390px 下宿主 overlay 绝不遮挡密钥、连接、刷新与状态控件 |
+| 共享按钮契约 | 所有按钮带 `.btn`；常规 46px/16px/600/10×14、紧凑 `btn-sm` 39px/14px/600/8×10、段控复用 `.btn` 基础（同字号字重 + 拼接圆角）；危险删除按钮 error 语义色；禁用不透明度/光标与键盘焦点轮廓；三主题一致，无页面横向溢出 |
 
 ## 说明
 
 - 管理密钥与全部数据均为假值；服务只监听 `127.0.0.1`，不会访问任何真实 CPA 或上游。
+- 主题切换会触发按钮/边框 150ms 过渡；截图脚本在切换主题后等待文档与同源 iframe 内动画结束（`settleTransitions`），避免截到中间灰阶/低对比帧。
 - CSP 的 `frame-ancestors 'self'` 由宿主响应头提供（`<meta>` 中该指令会被浏览器忽略），
   因此 `ui.html` 的元策略只声明 `default-src/script-src/style-src/img-src/connect-src/base-uri/form-action`。
 

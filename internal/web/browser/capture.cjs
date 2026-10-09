@@ -75,6 +75,20 @@ async function appFrame(page, origin) {
   return page.frame({ url: (u) => u.href.startsWith(origin + mock.RESOURCE_BASE) });
 }
 
+// 主题切换会触发按钮/边框 150ms 过渡；截图前先跨越两个渲染帧让过渡启动，再等待
+// 文档与同源 iframe 内的动画全部结束，避免截到中间灰阶/低对比帧。
+async function settleTransitions(page) {
+  await page.evaluate(() => new Promise((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.waitForFunction(() => {
+    const docs = [document];
+    for (const frame of document.querySelectorAll('iframe')) {
+      try { if (frame.contentDocument) docs.push(frame.contentDocument); } catch (err) { /* cross-origin */ }
+    }
+    return docs.every((doc) => doc.getAnimations().every((a) => a.playState !== 'running'));
+  });
+}
+
 async function connect(frame, secret) {
   const page = typeof frame.page === 'function' ? frame.page() : frame;
   if (!watched.has(page)) {
@@ -412,6 +426,7 @@ async function main() {
   });
 
   const shot = async (page, name) => {
+    await settleTransitions(page);
     await page.screenshot({ path: path.join(OUT, name + '.png'), fullPage: true });
     return name + '.png';
   };

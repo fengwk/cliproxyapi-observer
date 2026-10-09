@@ -6,6 +6,20 @@ const path = require('node:path');
 const { chromium } = require('playwright');
 const mock = require('./mock-server.cjs');
 
+// 主题切换会触发按钮/边框 150ms 过渡；截图前先跨越两个渲染帧让过渡启动，再等待
+// 文档与同源 iframe 内的动画全部结束，避免截到中间灰阶/低对比帧。
+async function settleTransitions(page) {
+  await page.evaluate(() => new Promise((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.waitForFunction(() => {
+    const docs = [document];
+    for (const frame of document.querySelectorAll('iframe')) {
+      try { if (frame.contentDocument) docs.push(frame.contentDocument); } catch (err) { /* cross-origin */ }
+    }
+    return docs.every((doc) => doc.getAnimations().every((a) => a.playState !== 'running'));
+  });
+}
+
 // Local, fake identities only. Exercise key filtering, dimension switching and
 // filter-aware summary through authenticated mocks.
 async function main() {
@@ -221,6 +235,98 @@ async function main() {
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
     results.push('single consolidated filter toolbar, one aligned desktop row, no form serialization');
 
+    // 10b. 共享按钮契约：所有按钮带 .btn；常规控件 46px/16px/600/10×14/半径 8，
+    // 紧凑 btn-sm 39px/14px/600/8×10；段控保留 .btn 基础（同字号字重、拼接圆角）；
+    // 禁用态与键盘焦点可见轮廓符合 Management Center 设计语言。
+    const contract = await page.evaluate(() => {
+      const round = (v) => Math.round(parseFloat(v));
+      const snap = (el) => {
+        const s = getComputedStyle(el);
+        const r = el.getBoundingClientRect();
+        return {
+          hasBtn: el.classList.contains('btn'),
+          fontSize: round(s.fontSize),
+          fontWeight: s.fontWeight,
+          padTop: round(s.paddingTop),
+          padRight: round(s.paddingRight),
+          radius: round(s.borderTopLeftRadius),
+          height: Math.round(r.height),
+          opacity: s.opacity,
+          cursor: s.cursor
+        };
+      };
+      const normals = ['#connect', '#refresh', '#identity-apply', '#settings-save',
+        '#settings-revert', '#requests-prev', '#requests-next']
+        .map((sel) => ({ sel, ...snap(document.querySelector(sel)) }));
+      const smalls = Array.from(document.querySelectorAll('#requests-body button, #keys-body button'))
+        .slice(0, 4).map((el) => ({ text: el.textContent, ...snap(el) }));
+      const segments = Array.from(document.querySelectorAll('.seg-btn')).map((el) => ({
+        cls: el.className,
+        groupHeight: Math.round(el.parentElement.getBoundingClientRect().height),
+        ...snap(el)
+      }));
+      const prev = document.querySelector('#requests-prev');
+      return { normals, smalls, segments, disabled: { flag: prev.disabled, ...snap(prev) } };
+    });
+    for (const b of contract.normals) {
+      assert.equal(b.hasBtn, true, b.sel + ' 必须带 .btn');
+      assert.equal(b.fontSize, 16, b.sel + ' 常规字号 16px');
+      assert.equal(b.fontWeight, '600', b.sel + ' 常规字重 600');
+      assert.equal(b.padTop, 10, b.sel + ' 常规纵向内边距 10px');
+      assert.equal(b.padRight, 14, b.sel + ' 常规横向内边距 14px');
+      assert.equal(b.radius, 8, b.sel + ' 圆角 8px');
+      assert.equal(b.height, 46, b.sel + ' 常规高度 46px');
+    }
+    assert.ok(contract.smalls.length > 0, '应存在紧凑操作按钮');
+    for (const b of contract.smalls) {
+      assert.equal(b.hasBtn, true, '紧凑按钮必须带 .btn');
+      assert.equal(b.fontSize, 14);
+      assert.equal(b.fontWeight, '600');
+      assert.equal(b.padTop, 8);
+      assert.equal(b.padRight, 10);
+      assert.equal(b.radius, 8);
+      assert.equal(b.height, 39);
+    }
+    assert.equal(contract.segments.length, 3);
+    for (const b of contract.segments) {
+      assert.equal(b.hasBtn, true, '段控必须保留 .btn');
+      assert.equal(b.fontSize, 16, '段控字号与 .btn 一致');
+      assert.equal(b.fontWeight, '600', '段控字重与 .btn 一致');
+      assert.equal(b.padTop, 10);
+      assert.equal(b.padRight, 14);
+      assert.equal(b.radius, 0, '段控拼接圆角');
+      assert.equal(b.groupHeight, 46, '段控组高 46px');
+    }
+    assert.equal(contract.disabled.flag, true, '#requests-prev 第一页应为禁用');
+    assert.equal(contract.disabled.opacity, '0.6', '禁用态降低不透明度');
+    assert.equal(contract.disabled.cursor, 'not-allowed', '禁用态使用 not-allowed 光标');
+
+    // 键盘焦点必须显示可见轮廓（按 .btn:focus-visible 契约）。
+    await page.locator('#filter-auth').focus();
+    await page.keyboard.press('Tab');
+    const focusState = await page.evaluate(() => {
+      const el = document.activeElement;
+      const s = getComputedStyle(el);
+      return { id: el.id, visible: el.matches(':focus-visible'),
+        width: s.outlineWidth, style: s.outlineStyle, offset: s.outlineOffset, color: s.outlineColor };
+    });
+    assert.equal(focusState.id, 'identity-apply', 'Tab 应落到下一个控件');
+    assert.equal(focusState.visible, true, '按钮键盘焦点可见');
+    assert.equal(focusState.width, '2px');
+    assert.equal(focusState.style, 'solid');
+    assert.equal(focusState.offset, '3px');
+    assert.notEqual(focusState.color, 'rgba(0, 0, 0, 0)', '焦点轮廓必须可见');
+
+    // 主按钮悬停改变背景（语义色 hover 令牌生效）。
+    const hoverBefore = await page.locator('#connect').evaluate((el) => getComputedStyle(el).backgroundColor);
+    await page.locator('#connect').hover();
+    await page.waitForFunction((before) =>
+      getComputedStyle(document.getElementById('connect')).backgroundColor !== before, hoverBefore);
+    const hoverAfter = await page.locator('#connect').evaluate((el) => getComputedStyle(el).backgroundColor);
+    assert.notEqual(hoverAfter, hoverBefore, '主按钮悬停背景应变化');
+    await page.mouse.move(0, 0);
+    results.push('shared .btn contract: normal/small/segment geometry, disabled and focus states');
+
     // 11. 超长认证文件名与超长模型选项不得撑破布局或页面横向溢出。
     server.controls.credentialFiles = [
       { auth_index: mock.AUTH_INDEX_A, name: 'fake-file-' + 'x'.repeat(48) + '.json', label: '长文件名账户' },
@@ -266,6 +372,7 @@ async function main() {
     assert.equal(await page.locator('#requests-body img, #requests-body script').count(), 0);
     assert.equal(await page.locator('#keys-body img, #keys-body script').count(), 0);
     assert.deepEqual(errors, []);
+    await settleTransitions(page);
     await page.screenshot({ path: path.join(out, 'keys-390.png'), fullPage: true });
 
     // 13. 三套主题在桌面与移动端的筛选区近景截图，逐一确认无横向溢出。
@@ -275,11 +382,13 @@ async function main() {
         await page.evaluate((t) => document.documentElement.setAttribute('data-theme', t), theme);
         await page.waitForFunction((t) => document.documentElement.getAttribute('data-theme') === t, theme);
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+        await settleTransitions(page);
         await page.locator('section[aria-label="筛选条件"]').screenshot({ path: path.join(out, 'filter-' + theme + '-' + width + '.png') });
       }
     }
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.evaluate(() => document.documentElement.removeAttribute('data-theme'));
+    await settleTransitions(page);
     await page.screenshot({ path: path.join(out, 'keys-1280.png'), fullPage: true });
     results.push('theme close-ups and mobile layout, text-only rendering and error-free interactions');
   } finally {

@@ -917,7 +917,7 @@
       var down = doc.createElement('button');
       down.type = 'button'; down.className = 'btn btn-secondary btn-sm'; setText(down, '下移');
       var remove = doc.createElement('button');
-      remove.type = 'button'; remove.className = 'btn btn-danger btn-sm price-delete'; setText(remove, '删除');
+      remove.type = 'button'; remove.className = 'btn btn-danger btn-sm'; setText(remove, '删除');
       record.up = up; record.down = down; record.remove = remove;
       function move(delta) {
         var index = priceRows.indexOf(record), target = index + delta;
@@ -2040,8 +2040,8 @@
         if (!range) return;
         state.range = range;
         for (var i = 0; i < segButtons.length; i++) {
-          if (segButtons[i] === button) segButtons[i].className = 'seg-btn is-active';
-          else segButtons[i].className = 'seg-btn';
+          if (segButtons[i] === button) segButtons[i].className = 'btn seg-btn is-active';
+          else segButtons[i].className = 'btn seg-btn';
         }
         if (state.connected) refreshAll();
       });

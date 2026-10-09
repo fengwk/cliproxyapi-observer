@@ -17,6 +17,21 @@ const deferred = () => {
 };
 const ready = (frame) => frame.waitForFunction(() =>
   document.getElementById('conn-status').textContent.startsWith('已更新'));
+
+// 主题切换会触发按钮/边框 150ms 过渡；截图前先跨越两个渲染帧让过渡启动，再等待
+// 文档与同源 iframe 内的动画全部结束，避免截到中间灰阶/低对比帧。
+async function settleTransitions(page) {
+  await page.evaluate(() => new Promise((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.waitForFunction(() => {
+    const docs = [document];
+    for (const frame of document.querySelectorAll('iframe')) {
+      try { if (frame.contentDocument) docs.push(frame.contentDocument); } catch (err) { /* cross-origin */ }
+    }
+    return docs.every((doc) => doc.getAnimations().every((a) => a.playState !== 'running'));
+  });
+}
+
 async function connect(frame) {
   await frame.locator('#mgmt-key').fill(mock.SECRET);
   await frame.locator('#connect').click();
@@ -620,6 +635,7 @@ async function main() {
           }, theme);
           const tName = theme || 'light';
           // Page screenshot
+          await settleTransitions(page);
           await page.screenshot({ path: path.join(OUT, 'standalone-settings-' + tName + '-' + width + '.png'), fullPage: true });
 
           // Modal screenshot
@@ -661,6 +677,7 @@ async function main() {
           }
           assert.ok(await frame.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth) <= 1);
           await frame.locator('#refresh').click(); await ready(frame);
+          await settleTransitions(page);
           await page.screenshot({ path: path.join(OUT, 'iframe-' + (theme || 'light') + '-' + width + '.png'), fullPage: true });
           await frame.locator('#settings-body').scrollIntoViewIfNeeded();
           await page.evaluate(() => window.scrollTo(0, 0));
@@ -668,6 +685,7 @@ async function main() {
             const card = document.getElementById('settings-body').parentElement;
             window.scrollTo(0, card.offsetTop - 140);
           });
+          await settleTransitions(page);
           await page.screenshot({ path: path.join(OUT, 'settings-' + (theme || 'light') + '-' + width + '.png') });
 
           // Iframe modal screenshot for each theme and width
@@ -683,6 +701,7 @@ async function main() {
               box.y < hostOverlay.y + hostOverlay.height && box.y + box.height > hostOverlay.y, false, id + ' overlaps host overlay');
             assert.equal(await page.evaluate((b) => document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2).tagName, box), 'IFRAME');
           }
+          await settleTransitions(page);
           await page.screenshot({ path: path.join(OUT, 'iframe-modal-' + (theme || 'light') + '-' + width + '.png') });
           await frame.locator('#confirmation-cancel').click();
           await frame.locator('#confirmation-dialog').waitFor({ state: 'hidden' });

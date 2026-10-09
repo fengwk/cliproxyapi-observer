@@ -562,6 +562,55 @@ test('ui.css 覆盖三套主题令牌', () => {
   assert.equal(/@import|https?:\/\//i.test(css), false, 'CSS 不得引入外部资源');
 });
 
+// 共享按钮契约：与 Provider 面板逐条复制同一组声明。所有按钮必须带 .btn，
+// 尺寸只来自语义/尺寸变体类，禁止组件或表格专属的字体、内边距、颜色覆盖。
+test('ui 按钮遵循共享 Management Center 契约', () => {
+  const css = fs.readFileSync(path.join(__dirname, 'ui.css'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, 'ui.html'), 'utf8');
+  const js = fs.readFileSync(path.join(__dirname, 'ui.js'), 'utf8');
+
+  const base = css.match(/\.btn\s*\{([^}]*)\}/);
+  assert.ok(base, '.btn 基础规则必须存在');
+  assert.match(base[1], /display:\s*inline-flex/);
+  assert.match(base[1], /gap:\s*8px/);
+  assert.match(base[1], /padding:\s*10px 14px/);
+  assert.match(base[1], /border-radius:\s*var\(--radius-md\)/);
+  assert.match(base[1], /font-size:\s*16px/);
+  assert.match(base[1], /font-weight:\s*600/);
+  assert.match(base[1], /line-height:\s*1\.5/);
+  assert.match(base[1], /white-space:\s*nowrap/);
+
+  const small = css.match(/\.btn-sm\s*\{([^}]*)\}/);
+  assert.ok(small, '.btn-sm 规则必须存在');
+  assert.match(small[1], /padding:\s*8px 10px/);
+  assert.match(small[1], /font-size:\s*14px/);
+  assert.equal(/font-weight/.test(small[1]), false, 'btn-sm 不得覆盖字重');
+
+  assert.match(css, /\.btn-danger\s*\{[^}]*background-color:\s*var\(--error-color\)/);
+  assert.match(css, /\.btn-danger:hover:not\(:disabled\)/);
+  assert.match(css, /\.btn:disabled\s*\{[^}]*opacity:\s*0\.6/);
+  assert.match(css, /\.btn:disabled\s*\{[^}]*cursor:\s*not-allowed/);
+  assert.match(css, /\.btn:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--text-primary\)/);
+  assert.equal(/price-delete/.test(css), false, '不得保留 price-delete 视觉覆盖');
+
+  // 段控复用 .btn 基础，只特化拼接边框/圆角/选中与默认文字色；不得定义字号/字重/内边距。
+  const seg = css.match(/\.seg-btn\s*\{([^}]*)\}/);
+  assert.ok(seg, '.seg-btn 规则必须存在');
+  assert.equal(/font-size|font-weight|padding/.test(seg[1]), false, 'seg-btn 尺寸必须继承 .btn');
+  assert.match(seg[1], /border-radius:\s*0/);
+  assert.match(css, /\.seg-btn:hover:not\(:disabled\)/);
+
+  // 静态按钮全部带 .btn。
+  for (const m of html.matchAll(/<button\b[^>]*\bclass="([^"]*)"/g)) {
+    assert.ok(m[1].split(/\s+/).includes('btn'), '静态按钮缺少 .btn: ' + m[0]);
+  }
+  // 动态按钮与段控运行时保留 .btn，删除按钮改用已定义的 btn-danger。
+  assert.match(js, /className = 'btn btn-danger btn-sm'/);
+  assert.match(js, /className = 'btn seg-btn is-active'/);
+  assert.match(js, /className = 'btn seg-btn'/);
+  assert.equal(js.includes('price-delete'), false, 'ui.js 不得再引用 price-delete');
+});
+
 // 保存只允许同源 v0 核心配置路由；版本转换不能削弱路径防线。
 test('config URLs use only v0 while preserving proxy prefix', () => {
   assert.equal(ui.coreApiBase(ui.deriveApiBase('/proxy/v8/resource/plugins/cliproxyapi-observer/ui')),
