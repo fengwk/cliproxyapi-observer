@@ -1591,7 +1591,7 @@
         els.auth.appendChild(optionEl(doc, index, authNames[index] + ' · ' + index));
       });
       els.auth.value = selected;
-      // 快照上拉已出现的候选，使同一连接内已发现的 key 不因当前结果集变化而消失。
+      // 保留本次连接已出现的下拉候选，不随当前结果集变化而移除。
       var previousKeyOptions = els.clientKey.options
         ? Array.prototype.slice.call(els.clientKey.options) : [];
       clearChildren(els.clientKey);
