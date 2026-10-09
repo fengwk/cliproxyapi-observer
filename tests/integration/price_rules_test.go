@@ -37,9 +37,24 @@ func TestConditionalPricingPatchOrderAndRestart(t *testing.T) {
 	}
 	waitPrice := func(host *harness, want float64) {
 		deadline := time.Now().Add(10 * time.Second)
+		var lastStatus int
 		for time.Now().Before(deadline) {
+			status, _, raw := host.managementRequest(t, http.MethodGet, "/v0/management/plugins/"+pluginID+"/requests?limit=50")
+			lastStatus = status
+			// Reconfiguration briefly closes the store; only 503 is retryable.
+			if status == http.StatusServiceUnavailable {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			if status != http.StatusOK {
+				t.Fatalf("requests status %d body %s", status, truncate(raw, 300))
+			}
+			var page requestPage
+			if err := json.Unmarshal(raw, &page); err != nil {
+				t.Fatalf("decode requests: %v", err)
+			}
 			requestMatch := false
-			for _, r := range host.fetchRequests(t).Items {
+			for _, r := range page.Items {
 				if r.RequestID == target.RequestID && r.CostUSD != nil && approxEqual(*r.CostUSD, want, 1e-12) {
 					requestMatch = true
 				}
@@ -51,7 +66,8 @@ func TestConditionalPricingPatchOrderAndRestart(t *testing.T) {
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
-		t.Fatal("rule price not reflected consistently in request and summary")
+		t.Fatalf("rule price not reflected consistently in request and summary (last requests status %d)\n--- host log tail ---\n%s",
+			lastStatus, logTail(host.stdout.String(), host.stderr.String()))
 	}
 	patch(9, true) // Ten input tokens (including four cached) satisfy >9.
 	waitPrice(h, 36.0/1e6)
