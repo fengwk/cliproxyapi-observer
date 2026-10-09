@@ -273,7 +273,7 @@ cost_usd = (uncached_input * input_price + cache_read * cache_read_price
 
 - `client_key_id`：数据库中随机 32 字节 secret 派生的 HMAC-SHA256（64 位小写十六进制）。
   UI 以下拉选择（全部 / 未归属 / 已出现的指纹，只显示前 12 位），内部按完整指纹传值，
-  无需手填完整指纹。CPA 下游 key 没有原生名称。
+  无需手填完整指纹；同一连接内已出现的指纹保留在候选中，重新连接后清空。CPA 下游 key 没有原生名称。
   secret 随数据库备份、重开和物理压缩保留；不同数据库的同一 key 指纹不同。
 - `auth_index`：CPA usage 回调提供的非机密 16 位小写十六进制索引。
   `GET /v8/management/credentials` 暴露当前凭据/认证文件的同一索引、`name` 与 `label`；

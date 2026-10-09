@@ -1145,12 +1145,14 @@
   }
 
   // 客户端 key 下拉候选：始终含「全部」「未归属」；只收集合法 64 位指纹并去重排序，
-  // 展示前 12 位但 value/title 为完整指纹；当前已选合法指纹即使不在候选也保留。
-  function clientKeyOptions(groups, items, selected) {
+  // 展示前 12 位但 value/title 为完整指纹；当前已选合法指纹与本次连接已出现的候选
+  // （previousOptions）即使不在当前结果中也保留。
+  function clientKeyOptions(groups, items, selected, previousOptions) {
     var ids = Object.create(null);
     var collect = function (id) { if (/^[a-f0-9]{64}$/.test(toStr(id))) ids[id] = true; };
     (Array.isArray(groups) ? groups : []).forEach(function (group) { collect(group && group.id); });
     (Array.isArray(items) ? items : []).forEach(function (item) { collect(item && item.client_key_id); });
+    (Array.isArray(previousOptions) ? previousOptions : []).forEach(function (option) { collect(option && option.value); });
     var chosen = toStr(selected);
     if (chosen && chosen !== 'unknown' && /^[a-f0-9]{64}$/.test(chosen)) ids[chosen] = true;
     var out = [
@@ -1589,8 +1591,11 @@
         els.auth.appendChild(optionEl(doc, index, authNames[index] + ' · ' + index));
       });
       els.auth.value = selected;
+      // 快照上拉已出现的候选，使同一连接内已发现的 key 不因当前结果集变化而消失。
+      var previousKeyOptions = els.clientKey.options
+        ? Array.prototype.slice.call(els.clientKey.options) : [];
       clearChildren(els.clientKey);
-      clientKeyOptions(state.clientGroups, state.items, selectedKey).forEach(function (opt) {
+      clientKeyOptions(state.clientGroups, state.items, selectedKey, previousKeyOptions).forEach(function (opt) {
         var option = optionEl(doc, opt.value, opt.label);
         if (opt.title) option.title = opt.title;
         els.clientKey.appendChild(option);
@@ -2042,6 +2047,8 @@
       state.credentials = Object.create(null);
       els.clientKey.value = ''; els.auth.value = '';
       state.clientGroups = []; state.authGroups = [];
+      // 新连接不得保留上一个连接的候选 key。
+      clearChildren(els.clientKey);
       updateIdentityOptions();
       renderRequestsTable(doc, els.requestsBody, [], openBody);
       updateRequestsNote();

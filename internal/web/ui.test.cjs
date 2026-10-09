@@ -835,6 +835,11 @@ test('clientKeyOptions 提供固定全部/未归属选项并保留已选指纹',
   assert.deepEqual(ui.clientKeyOptions([], [], 'bogus').map((o) => o.value), ['', 'unknown']);
   assert.deepEqual(ui.clientKeyOptions([], [], 'unknown').map((o) => o.value), ['', 'unknown']);
   assert.deepEqual(ui.clientKeyOptions(null, undefined, null).map((o) => o.value), ['', 'unknown']);
+  // previousOptions（本次连接已出现的候选）：只接受合法 64 位、去重；空结果时全部保留。
+  const previous = [{ value: a }, { value: c }, { value: a }, { value: 'unknown' }, { value: 'bogus' }, { value: '' }];
+  assert.deepEqual(ui.clientKeyOptions([], [], '', previous).map((o) => o.value), ['', 'unknown', a, c]);
+  assert.deepEqual(ui.clientKeyOptions([], [], b, previous).map((o) => o.value), ['', 'unknown', a, b, c]);
+  assert.deepEqual(ui.clientKeyOptions([], [], '', null).map((o) => o.value), ['', 'unknown']);
 });
 
 // Auth files show "label（filename）" so a shared label cannot hide which file was used;
