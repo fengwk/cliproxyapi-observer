@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -193,5 +194,81 @@ func TestPriceRuleUsesTotalInputAndPreservesCacheRates(t *testing.T) {
 	if err != nil || math.Abs(summary.Totals.CostUSD-want) > 1e-12 ||
 		summary.Totals.CacheHits != 1 || summary.Totals.UnpricedRequests != 0 {
 		t.Fatal("aggregate tier price differs from request")
+	}
+}
+
+// 0 is a normal, valid price for free models (e.g. promotional hours or contributor tiers).
+// Requests matching a zero-price rule must be marked as priced ($0.0000), not unpriced.
+func TestFreeModelZeroPricePricedNotUnpriced(t *testing.T) {
+	const model = "opencode-go/step-5-preview-free"
+	s := openTestStore(t, func(cfg *Config) {
+		cfg.PriceRules = []PriceRule{
+			{
+				Model:     model,
+				TimeRange: "00:00-08:30",
+				Price:     Price{Input: 0, Output: 0, CacheRead: 0, CacheCreation: 0},
+			},
+		}
+	})
+
+	// Match: 04:00 UTC is inside 00:00-08:30 UTC
+	tMatch := time.Date(2026, 10, 10, 4, 0, 0, 0, time.UTC)
+	// Miss: 12:00 UTC (yesterday, within 24h) is outside 00:00-08:30 UTC
+	tMiss := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+
+	s.SubmitUsage(pluginapi.UsageRecord{
+		RequestID: "free-in-window", Provider: "opencode-go", Model: model,
+		ExecutorType: "executorAdapter", RequestedAt: tMatch,
+		Detail: pluginapi.UsageDetail{
+			InputTokens: 22800, OutputTokens: 282, CacheReadTokens: 11300, TotalTokens: 23082,
+		},
+	})
+	s.SubmitUsage(pluginapi.UsageRecord{
+		RequestID: "free-out-of-window", Provider: "opencode-go", Model: model,
+		ExecutorType: "executorAdapter", RequestedAt: tMiss,
+		Detail: pluginapi.UsageDetail{
+			InputTokens: 22800, OutputTokens: 282, CacheReadTokens: 11300, TotalTokens: 23082,
+		},
+	})
+	flushAll(t, s)
+
+	page, err := s.Requests(Query{Model: model})
+	if err != nil || len(page.Items) != 2 {
+		t.Fatalf("requests: count=%d, err=%v", len(page.Items), err)
+	}
+
+	for _, it := range page.Items {
+		if it.RequestID == "free-in-window" {
+			if it.CostUSD == nil {
+				t.Fatalf("in-window free model request must not be nil (unpriced)")
+			}
+			if *it.CostUSD != 0.0 {
+				t.Fatalf("in-window free model cost = %v, want 0.0", *it.CostUSD)
+			}
+		} else if it.RequestID == "free-out-of-window" {
+			if it.CostUSD != nil {
+				t.Fatalf("out-of-window request should be unpriced (nil), got %v", *it.CostUSD)
+			}
+		}
+	}
+
+	summary, err := s.Summary(Query{Model: model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Totals.Requests != 2 {
+		t.Fatalf("totals.Requests = %d, want 2", summary.Totals.Requests)
+	}
+	if summary.Totals.UnpricedRequests != 1 {
+		t.Fatalf("totals.UnpricedRequests = %d, want 1 (only the out-of-window request)", summary.Totals.UnpricedRequests)
+	}
+	if summary.Totals.CostUSD != 0.0 {
+		t.Fatalf("totals.CostUSD = %v, want 0.0", summary.Totals.CostUSD)
+	}
+	if len(summary.Groups) != 1 {
+		t.Fatalf("groups count = %d, want 1", len(summary.Groups))
+	}
+	if summary.Groups[0].UnpricedRequests != 1 {
+		t.Fatalf("group.UnpricedRequests = %d, want 1", summary.Groups[0].UnpricedRequests)
 	}
 }

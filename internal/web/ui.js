@@ -727,30 +727,29 @@
       var tr = doc.createElement('tr');
       tr.appendChild(cell(doc, '', r.time));
 
-      var modelCell = cell(doc, 'model-cell', r.model);
+      var modelCell = cell(doc, 'model-cell cell-truncate', r.model);
       if (r.alias && r.alias !== r.model) {
         modelCell.title = '别名 ' + r.alias;
+      } else {
+        modelCell.title = r.model;
       }
       tr.appendChild(modelCell);
 
       tr.appendChild(cell(doc, 'col-secondary', r.provider));
-      var keyCell = cell(doc, '', '未归属');
-      keyCell.title = '未归属';
-      if (r.clientKeyID) {
-        clearChildren(keyCell);
-        var keyButton = doc.createElement('button');
-        keyButton.type = 'button';
-        keyButton.className = 'btn btn-secondary btn-sm';
-        keyButton.title = r.clientKeyID;
-        setText(keyButton, truncateText(r.clientKeyID, 12));
-        (function (button, id) {
-          button.addEventListener('click', function () { if (onKey) onKey(id); });
-        })(keyButton, r.clientKeyID);
-        keyCell.appendChild(keyButton);
+
+      var keyDisplay = r.clientKeyID ? truncateText(r.clientKeyID, 12) : '未归属';
+      var keyClass = 'cell-truncate' + (r.clientKeyID ? ' cell-clickable' : '');
+      var keyCell = cell(doc, keyClass, keyDisplay);
+      keyCell.title = r.clientKeyID || '未归属';
+      if (r.clientKeyID && onKey) {
+        (function (id) {
+          keyCell.addEventListener('click', function () { onKey(id); });
+        })(r.clientKeyID);
       }
       tr.appendChild(keyCell);
+
       var authDisplay = truncateText(r.credential, 12);
-      var authCell = cell(doc, '', authDisplay);
+      var authCell = cell(doc, 'cell-truncate', authDisplay);
       authCell.title = r.credential;
       tr.appendChild(authCell);
       tr.appendChild(cell(doc, 'num col-secondary', r.tokens));

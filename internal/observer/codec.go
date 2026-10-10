@@ -173,6 +173,15 @@ func addBillable(c *Counters, r Request) {
 func priceCounters(c *Counters, model string, prices map[string]Price) {
 	c.CostUSD = 0
 	c.UnpricedRequests = c.Requests
+	price, ok := prices[model]
+	if !ok {
+		return
+	}
+	if isZeroPrice(price) {
+		c.CostUSD = 0
+		c.UnpricedRequests = 0
+		return
+	}
 	if c.completeRequests == 0 || c.completeRequests > c.Requests {
 		return
 	}

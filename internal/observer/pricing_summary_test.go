@@ -174,7 +174,7 @@ func TestQueryTimePricingLifecycle(t *testing.T) {
 		t.Fatalf("Close step 4: %v", err)
 	}
 
-	// Step 5: Reopen with zero prices: cost is 0.0 and non-nil
+	// Step 5: Reopen with zero prices: cost is 0.0 and non-nil for all requests
 	cfg.Prices = map[string]Price{
 		"test-model": {Input: 0, Output: 0, CacheRead: 0, CacheCreation: 0},
 	}
@@ -196,8 +196,8 @@ func TestQueryTimePricingLifecycle(t *testing.T) {
 				t.Fatalf("req-complete cost = %v, want 0.0", *it.CostUSD)
 			}
 		} else if it.RequestID == "req-unknown" {
-			if it.CostUSD != nil {
-				t.Fatalf("req-unknown cost should remain nil, got %v", *it.CostUSD)
+			if it.CostUSD == nil || *it.CostUSD != 0.0 {
+				t.Fatalf("req-unknown cost with zero price should be 0.0, got %v", it.CostUSD)
 			}
 		}
 	}

@@ -917,14 +917,24 @@ test('renderRequestsTable 简化模型列并截断 key/auth 且保留 hover titl
   assert.ok(!collectText(modelCell).some((t) => t.includes('核算')));
   assert.ok(!collectText(modelCell).some((t) => t.includes('流式')));
 
-  // 2. 客户端 key 列：按钮展示 12 位前缀 + …，完整 64 位存入 title
+  // 2. 客户端 key 列：纯文本展示 12 位前缀 + …，完整 64 位存入 title，无 button 元素
   const keyCell = cells[3];
-  const keyButton = keyCell.childNodes[0];
-  assert.equal(keyButton.textContent, '2921300b7afb…');
-  assert.equal(keyButton.title, fullKey);
+  assert.equal(keyCell.textContent, '2921300b7afb…');
+  assert.equal(keyCell.title, fullKey);
+  assert.equal(findNodes(keyCell, (n) => n.tagName === 'button').length, 0);
+  assert.ok(keyCell.className.includes('cell-clickable'));
+  assert.ok(keyCell.className.includes('cell-truncate'));
 
   // 3. auth 列：展示 12 位前缀 + …，完整凭据存入 title
   const authCell = cells[4];
   assert.equal(authCell.textContent, 'fengwk94@gma…');
   assert.equal(authCell.title, fullCred);
+  assert.ok(authCell.className.includes('cell-truncate'));
+
+  // 4. 点击 key 单元格依然触发 onKey 筛选
+  let clickedKey = null;
+  const tbody2 = doc.createElement('tbody');
+  ui.renderRequestsTable(doc, tbody2, items, null, credentials, (k) => { clickedKey = k; });
+  tbody2.childNodes[0].childNodes[3].dispatch('click');
+  assert.equal(clickedKey, fullKey);
 });

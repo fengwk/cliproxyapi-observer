@@ -184,11 +184,15 @@ func selectRulePrice(model string, input int64, at time.Time, rules []PriceRule,
 }
 
 func (s *Store) requestCost(r Request) *float64 {
-	if !completeTokens(r) {
-		return nil
-	}
 	price, ok := selectRulePrice(r.Model, r.InputTokens, r.Time, s.cfg.PriceRules, s.prices)
 	if !ok {
+		return nil
+	}
+	if isZeroPrice(price) {
+		cost := 0.0
+		return &cost
+	}
+	if !completeTokens(r) {
 		return nil
 	}
 	return tokenCost(uint64(r.UncachedInputTokens), uint64(r.CacheReadTokens), uint64(r.CacheCreationTokens),

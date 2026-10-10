@@ -727,6 +727,24 @@ td.num.warn {
   white-space: nowrap;
 }
 
+.cell-truncate {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cell-clickable {
+  cursor: pointer;
+  color: inherit;
+  transition: color var(--transition-fast);
+}
+
+.cell-clickable:hover {
+  color: var(--primary-color);
+  text-decoration: underline;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;

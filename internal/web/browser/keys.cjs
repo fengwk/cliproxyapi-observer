@@ -76,11 +76,11 @@ async function main() {
     results.push('current CPA labels with auth file names and explicit request-level cache ratio');
 
     // 2. 请求表点击完整指纹：只显示 12 位前缀，筛选使用完整 64 位。
-    const button = page.locator('#requests-body button[title]').first();
-    const fingerprint = await button.getAttribute('title');
+    const keyCell = page.locator('#requests-body td.cell-clickable').first();
+    const fingerprint = await keyCell.getAttribute('title');
     assert.equal(fingerprint.length, 64);
-    assert.equal((await button.textContent()).length, 13);
-    await button.click();
+    assert.equal((await keyCell.textContent()).length, 13);
+    await keyCell.click();
     await page.waitForFunction(() => document.querySelectorAll('#requests-body tr').length === 26);
     assert.equal(await page.locator('#filter-client-key').inputValue(), fingerprint);
     // 下拉只显示 12 位前缀，但选中项的 value 与 title 都是请求实际使用的完整 64 位指纹。
@@ -466,7 +466,7 @@ async function main() {
     }, mock.CLIENT_KEY_A);
     assert.equal(await page.locator('#filter-client-key option[value="' + mock.CLIENT_KEY_A + '"]').count(), 0);
     stepCalls = calls.length;
-    await page.locator(`#requests-body button[title="${mock.CLIENT_KEY_A}"]`).first().click();
+    await page.locator(`#requests-body td[title="${mock.CLIENT_KEY_A}"]`).first().click();
     await idle(page);
     assert.equal(await page.locator('#filter-client-key').inputValue(), mock.CLIENT_KEY_A);
     assert.equal(await page.locator('#filter-client-key option[value="' + mock.CLIENT_KEY_A + '"]').count(), 1);

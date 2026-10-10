@@ -112,11 +112,23 @@ func tpsFor(breakdown usage.TokenBreakdown, genNS int64) *float64 {
 // RequestCost ignores any legacy stored cost and prices the normalized,
 // mutually exclusive buckets using the current exact full model identity.
 func RequestCost(r Request, prices map[string]Price) *float64 {
+	price, ok := prices[r.Model]
+	if !ok {
+		return nil
+	}
+	if isZeroPrice(price) {
+		cost := 0.0
+		return &cost
+	}
 	if !completeTokens(r) {
 		return nil
 	}
 	return tokenCost(uint64(r.UncachedInputTokens), uint64(r.CacheReadTokens),
 		uint64(r.CacheCreationTokens), uint64(r.OutputTokens), r.Model, prices)
+}
+
+func isZeroPrice(p Price) bool {
+	return p.Input == 0 && p.Output == 0 && p.CacheRead == 0 && p.CacheCreation == 0
 }
 
 func completeTokens(r Request) bool {
