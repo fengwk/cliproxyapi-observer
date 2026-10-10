@@ -249,6 +249,9 @@ func applyContributionDelta(row, old, next Counters) (Counters, bool) {
 	ow := persistedWords(old)
 	nw := persistedWords(next)
 	for i := range rw {
+		if rw[i] < ow[i] {
+			return Counters{}, false
+		}
 		switch {
 		case nw[i] == ow[i]:
 		case nw[i] > ow[i]:

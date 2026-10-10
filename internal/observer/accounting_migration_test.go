@@ -421,6 +421,9 @@ func TestAccountingMigrationCorruptionRollsBack(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := testConfig(t, nil)
 			migratedDB(t, cfg, func(tx *bolt.Tx) error {
+				if err := putRequestRow(tx, good); err != nil {
+					return err
+				}
 				if err := addRow(tx, bucketStats, statsKey(statsMinute(at), openCodeGoProvider, model), good); err != nil {
 					return err
 				}
@@ -429,7 +432,7 @@ func TestAccountingMigrationCorruptionRollsBack(t *testing.T) {
 				}
 				return tc.setup(tx)
 			})
-			var beforeGlobal, beforeKey []byte
+			var beforeGlobal, beforeKey, beforeRequest []byte
 			db, err := bolt.Open(cfg.DataPath, 0o600, &bolt.Options{Timeout: time.Second})
 			if err != nil {
 				t.Fatal(err)
@@ -437,6 +440,7 @@ func TestAccountingMigrationCorruptionRollsBack(t *testing.T) {
 			_ = db.View(func(tx *bolt.Tx) error {
 				beforeGlobal = append([]byte(nil), tx.Bucket(bucketStats).Get(statsKey(statsMinute(at), openCodeGoProvider, model))...)
 				beforeKey = append([]byte(nil), tx.Bucket(bucketKeyStats).Get(keyStatsKey(statsMinute(at), good.InputTokens, "", "", openCodeGoProvider, model))...)
+				beforeRequest = append([]byte(nil), tx.Bucket(bucketRequests).Get(encodeRequestKey(good.Time, good.Sequence))...)
 				return nil
 			})
 			_ = db.Close()
@@ -464,6 +468,9 @@ func TestAccountingMigrationCorruptionRollsBack(t *testing.T) {
 				}
 				if got := tx.Bucket(bucketKeyStats).Get(keyStatsKey(statsMinute(at), good.InputTokens, "", "", openCodeGoProvider, model)); string(got) != string(beforeKey) {
 					t.Errorf("key stats changed despite rollback")
+				}
+				if got := tx.Bucket(bucketRequests).Get(encodeRequestKey(good.Time, good.Sequence)); string(got) != string(beforeRequest) {
+					t.Errorf("earlier repaired request changed despite rollback")
 				}
 				return nil
 			})
@@ -506,6 +513,17 @@ func TestAccountingMigrationSkipsUnsafe(t *testing.T) {
 				addRequestCounters(&c, r)
 				c.billableInput = math.MaxUint64
 				if err := sb.Put(key, encodeCounters(c)); err != nil {
+					return err
+				}
+				return addRow(tx, bucketKeyStats, keyStatsKey(statsMinute(at), r.InputTokens, "", "", openCodeGoProvider, model), r)
+			},
+		},
+		{
+			name: "unchanged_input_underflow",
+			setup: func(tx *bolt.Tx, r Request) error {
+				c := requestContribution(r)
+				c.InputTokens = 0
+				if err := tx.Bucket(bucketStats).Put(statsKey(statsMinute(at), r.Provider, r.Model), encodeCounters(c)); err != nil {
 					return err
 				}
 				return addRow(tx, bucketKeyStats, keyStatsKey(statsMinute(at), r.InputTokens, "", "", openCodeGoProvider, model), r)
