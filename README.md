@@ -73,9 +73,9 @@ bbolt 数据库，并通过 CPA 管理 API 与内置中文页面提供查询。�
 
 ## 安装与使用
 
-要求：支持原生插件的 CPA v8。原生 SDK 基线锁定在 `go.mod`（v8.0.16），最低宿主
-v8.0.15；更高 v8 版本由 CI 每日验证，不保证未通过测试的版本或 v9 兼容。
-SDK 精确版本由自动维护链路在验证兼容后升级。
+要求：支持原生插件的 CPA v8。原生 SDK 基线锁定在 `go.mod`（v8.0.23），最低宿主
+v8.0.15；已测宿主为 v8.0.15 与 v8.0.23，更高 v8 版本由 CI 每日验证，
+不保证未通过测试的版本或 v9 兼容。SDK 精确版本由自动维护链路在验证兼容后升级。
 
 ### 1. 安装插件
 
@@ -291,7 +291,7 @@ cost_usd = (uncached_input * input_price + cache_read * cache_read_price
 Observer 不保存 `APIKey`、`AuthID`、`Source`、认证文件内容或路径，也不下载认证文件。
 CPA 的文件索引基于其凭据身份；更换文件位置或身份可能产生新索引，Observer 不猜测合并。
 
-OpenCode Provider 的凭据绑定执行路径在本地 CPA v8.0.15/v8.0.20 双插件联调中，
+OpenCode Provider 的凭据绑定执行路径在本地 CPA v8.0.15/v8.0.23 双插件联调中，
 流式与非流式请求均进入 Observer，提供商为 `opencode-go`，模型保留
 `opencode-go/<model>` 全名；按插件 ID `cliproxyapi-opencode-provider` 过滤会匹配不到这些记录。
 当前锁定 SDK 不识别 `opencode-go` 的 token 重叠语义，因此非零用量会标为
