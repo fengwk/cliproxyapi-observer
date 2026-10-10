@@ -3,7 +3,9 @@ package observer
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -286,9 +288,9 @@ func TestAccountingMigrationMovesAnthropicInputKey(t *testing.T) {
 		if g.billableInput != 100 || g.billableRead != 50 || g.billableWrite != 20 || g.billableOutput != 200 {
 			t.Fatalf("global billable wrong: %+v", g)
 		}
-		oldRow, _ := decodeCounters(tx.Bucket(bucketKeyStats).Get(keyStatsKey(minute, 100, client, "", openCodeGoProvider, model)))
-		if oldRow.Requests != 0 {
-			t.Fatalf("old input key still holds the contribution: %+v", oldRow)
+		oldKey := keyStatsKey(minute, 100, client, "", openCodeGoProvider, model)
+		if tx.Bucket(bucketKeyStats).Get(oldKey) != nil {
+			t.Fatalf("drained old input key row was retained")
 		}
 		newRow, ok := decodeCounters(tx.Bucket(bucketKeyStats).Get(keyStatsKey(minute, 170, client, "", openCodeGoProvider, model)))
 		if !ok || newRow.Requests != 1 || newRow.completeRequests != 1 {
@@ -532,4 +534,211 @@ func TestAccountingMigrationSkipsUnsafe(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAccountingMigrationRetainsMixedOldKeyRow verifies that when a moved
+// Anthropic contribution shares its old input-length key with a record that
+// stays unclassified, only the moved part is removed and the row is retained.
+func TestAccountingMigrationRetainsMixedOldKeyRow(t *testing.T) {
+	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Minute)
+	minute := statsMinute(at)
+	const model = "opencode-go/claude-sonnet-4-5"
+	client := strings.Repeat("d", 64)
+
+	move := legacyUnclassified(1, "move", at, model, pluginapi.UsageDetail{
+		InputTokens: 100, CacheReadTokens: 50, CacheCreationTokens: 20,
+		OutputTokens: 200, ReasoningTokens: 100, TotalTokens: 370,
+	})
+	move.ClientKeyID = client
+	// Same old input length and identity, but not recoverable, so it stays.
+	stay := legacyUnclassified(2, "stay", at.Add(time.Second), model, pluginapi.UsageDetail{
+		InputTokens: 100, OutputTokens: 40, TotalTokens: 0,
+	})
+	stay.ClientKeyID = client
+
+	cfg := testConfig(t, nil)
+	migratedDB(t, cfg, func(tx *bolt.Tx) error {
+		for _, r := range []Request{move, stay} {
+			if err := putRequestRow(tx, r); err != nil {
+				return err
+			}
+			if err := addRow(tx, bucketStats, statsKey(minute, openCodeGoProvider, model), r); err != nil {
+				return err
+			}
+			key := keyStatsKey(minute, r.InputTokens, r.ClientKeyID, r.AuthIndex, r.Provider, r.Model)
+			if err := addRow(tx, bucketKeyStats, key, r); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	s, err := Open(cfg)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer s.Close()
+
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		retained, ok := decodeCounters(tx.Bucket(bucketKeyStats).Get(keyStatsKey(minute, 100, client, "", openCodeGoProvider, model)))
+		if !ok || retained.Requests != 1 || retained.completeRequests != 0 {
+			t.Fatalf("mixed old key row not retained correctly: ok=%v %+v", ok, retained)
+		}
+		moved, ok := decodeCounters(tx.Bucket(bucketKeyStats).Get(keyStatsKey(minute, 170, client, "", openCodeGoProvider, model)))
+		if !ok || moved.Requests != 1 || moved.completeRequests != 1 {
+			t.Fatalf("moved contribution missing from new key: ok=%v %+v", ok, moved)
+		}
+		global, ok := decodeCounters(tx.Bucket(bucketStats).Get(statsKey(minute, openCodeGoProvider, model)))
+		if !ok || global.Requests != 2 || global.completeRequests != 1 {
+			t.Fatalf("global wrong: ok=%v %+v", ok, global)
+		}
+		return nil
+	})
+}
+
+// TestAccountingMigrationLargePageSplit drives a few hundred retained rows
+// through the streaming cursor so request rows span multiple pages and many
+// in-place rewrites force reseeks. It proves no row is skipped or duplicated
+// and that aggregates and summaries stay exact across a reopen.
+func TestAccountingMigrationLargePageSplit(t *testing.T) {
+	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Minute)
+	const model = "opencode-go/glm-5.2"
+	const subCount, anthCount, badCount = 300, 60, 40
+	const total = subCount + anthCount + badCount
+
+	subsetRaw := pluginapi.UsageDetail{InputTokens: 10, CacheReadTokens: 2, OutputTokens: 5, TotalTokens: 15}
+	anthRaw := pluginapi.UsageDetail{InputTokens: 100, CacheReadTokens: 50, CacheCreationTokens: 20, OutputTokens: 200, ReasoningTokens: 100, TotalTokens: 370}
+	badRaw := pluginapi.UsageDetail{InputTokens: 7, CacheReadTokens: 1, OutputTokens: 2, TotalTokens: 999}
+
+	cfg := testConfig(t, func(c *Config) {
+		c.Prices = map[string]Price{model: {Input: 1, Output: 1, CacheRead: 1, CacheCreation: 1}}
+	})
+	seq := uint64(0)
+	migratedDB(t, cfg, func(tx *bolt.Tx) error {
+		add := func(id string, raw pluginapi.UsageDetail) error {
+			seq++
+			r := legacyUnclassified(seq, id, at, model, raw)
+			if err := putRequestRow(tx, r); err != nil {
+				return err
+			}
+			if err := addRow(tx, bucketStats, statsKey(statsMinute(at), openCodeGoProvider, model), r); err != nil {
+				return err
+			}
+			return addRow(tx, bucketKeyStats, keyStatsKey(statsMinute(at), r.InputTokens, "", "", openCodeGoProvider, model), r)
+		}
+		for i := 0; i < subCount; i++ {
+			if err := add(fmt.Sprintf("sub-%d", i), subsetRaw); err != nil {
+				return err
+			}
+		}
+		for i := 0; i < anthCount; i++ {
+			if err := add(fmt.Sprintf("anth-%d", i), anthRaw); err != nil {
+				return err
+			}
+		}
+		for i := 0; i < badCount; i++ {
+			if err := add(fmt.Sprintf("bad-%d", i), badRaw); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	check := func(stage string, s *Store) {
+		t.Helper()
+		records := allRequests(t, s)
+		if len(records) != total {
+			t.Fatalf("%s: retained records = %d, want %d (skipped/duplicated)", stage, len(records), total)
+		}
+		complete := 0
+		for _, r := range records {
+			switch r.AccountingQuality {
+			case "complete":
+				complete++
+			case "unclassified":
+			default:
+				t.Fatalf("%s: unexpected quality %q", stage, r.AccountingQuality)
+			}
+		}
+		if complete != subCount+anthCount {
+			t.Fatalf("%s: complete = %d, want %d", stage, complete, subCount+anthCount)
+		}
+		var global Counters
+		_ = s.db.View(func(tx *bolt.Tx) error {
+			var ok bool
+			global, ok = decodeCounters(tx.Bucket(bucketStats).Get(statsKey(statsMinute(at), openCodeGoProvider, model)))
+			if !ok {
+				t.Fatalf("%s: global stats missing", stage)
+			}
+			return nil
+		})
+		if global.Requests != total || global.completeRequests != subCount+anthCount {
+			t.Fatalf("%s: global requests/complete = %d/%d", stage, global.Requests, global.completeRequests)
+		}
+		wantInput := int64(subCount*10 + anthCount*170 + badCount*7)
+		wantOutput := int64(subCount*5 + anthCount*200 + badCount*2)
+		wantTotal := int64(subCount*15 + anthCount*370 + badCount*999)
+		if int64(global.InputTokens) != wantInput || int64(global.OutputTokens) != wantOutput ||
+			int64(global.TotalTokens) != wantTotal {
+			t.Fatalf("%s: global tokens = %d/%d/%d, want %d/%d/%d", stage,
+				global.InputTokens, global.OutputTokens, global.TotalTokens, wantInput, wantOutput, wantTotal)
+		}
+		// Prices are all 1, so the summary is the sum of the four billable buckets.
+		wantBillable := int64(subCount*8+anthCount*100) + int64(subCount*2+anthCount*50) +
+			int64(anthCount*20) + int64(subCount*5+anthCount*200)
+		sum, err := s.Summary(Query{Provider: openCodeGoProvider, Model: model})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sum.Totals.Requests != total || sum.Totals.UnpricedRequests != badCount {
+			t.Fatalf("%s: summary requests/unpriced = %d/%d", stage, sum.Totals.Requests, sum.Totals.UnpricedRequests)
+		}
+		if !approx(sum.Totals.CostUSD, float64(wantBillable)/1_000_000) {
+			t.Fatalf("%s: cost = %v, want %v", stage, sum.Totals.CostUSD, float64(wantBillable)/1_000_000)
+		}
+	}
+
+	s1, err := Open(cfg)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	check("first", s1)
+	if fi, err := os.Stat(cfg.DataPath); err != nil {
+		t.Fatalf("stat db: %v", err)
+	} else if fi.Size() < 32<<10 {
+		t.Fatalf("fixture db too small (%d bytes) to span bbolt pages", fi.Size())
+	}
+	snapshot := map[string][]byte{}
+	_ = s1.db.View(func(tx *bolt.Tx) error {
+		for _, name := range [][]byte{bucketRequests, bucketStats, bucketKeyStats} {
+			_ = tx.Bucket(name).ForEach(func(k, v []byte) error {
+				snapshot[string(name)+"\x00"+string(k)] = append([]byte(nil), v...)
+				return nil
+			})
+		}
+		return nil
+	})
+	_ = s1.Close()
+
+	s2, err := Open(cfg)
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	defer s2.Close()
+	check("reopen", s2)
+	_ = s2.db.View(func(tx *bolt.Tx) error {
+		if seq := tx.Bucket(bucketAccountingMeta).Sequence(); seq != accountingMigrationSequence {
+			t.Fatalf("accounting marker = %d, want %d", seq, accountingMigrationSequence)
+		}
+		for _, name := range [][]byte{bucketRequests, bucketStats, bucketKeyStats} {
+			_ = tx.Bucket(name).ForEach(func(k, v []byte) error {
+				key := string(name) + "\x00" + string(k)
+				if string(snapshot[key]) != string(v) {
+					t.Fatalf("bucket %s key %x changed on reopen", name, k)
+				}
+				return nil
+			})
+		}
+		return nil
+	})
 }

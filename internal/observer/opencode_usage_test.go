@@ -191,6 +191,11 @@ func TestOpenCodeAccountingRejectsAmbiguousOrInvalid(t *testing.T) {
 			detail: pluginapi.UsageDetail{InputTokens: 5, OutputTokens: 3, CacheReadTokens: 2, TotalTokens: 8},
 		},
 		{
+			// A bare prefix has no native model id and is never a target.
+			name: "bare_namespace", provider: openCodeGoProvider, executor: openCodeGoExecutor, model: "opencode-go/",
+			detail: pluginapi.UsageDetail{InputTokens: 5, OutputTokens: 3, CacheReadTokens: 2, TotalTokens: 8},
+		},
+		{
 			// A known provider is never reinterpreted by the observer.
 			name: "other_provider_unchanged", provider: "mystery-provider", executor: openCodeGoExecutor, model: "opencode-go/m",
 			detail: pluginapi.UsageDetail{InputTokens: 5, OutputTokens: 3, CacheReadTokens: 2, TotalTokens: 8},
@@ -234,6 +239,29 @@ func TestOpenCodeOtherProviderUnaffected(t *testing.T) {
 	}
 	if r.InputTokens != 100 || r.UncachedInputTokens != 70 || r.CacheReadTokens != 30 {
 		t.Fatalf("subset accounting changed: %+v", r)
+	}
+}
+
+// isOpenCodeCompatTarget must stay narrow: exact provider, exact executor, and a
+// non-empty native id inside the opencode-go/ namespace.
+func TestOpenCodeCompatTargetIsolation(t *testing.T) {
+	cases := []struct {
+		provider, executor, model string
+		want                      bool
+	}{
+		{openCodeGoProvider, openCodeGoExecutor, "opencode-go/glm-5.2", true},
+		{openCodeGoProvider, openCodeGoExecutor, "opencode-go/", false},
+		{openCodeGoProvider, openCodeGoExecutor, "opencode-go", false},
+		{openCodeGoProvider, openCodeGoExecutor, "other/glm", false},
+		{openCodeGoProvider, "executor", "opencode-go/glm", false},
+		{openCodeGoExecutor, openCodeGoExecutor, "opencode-go/glm", false},
+		{"opencode-go-x", openCodeGoExecutor, "opencode-go/glm", false},
+	}
+	for _, tc := range cases {
+		if got := isOpenCodeCompatTarget(tc.provider, tc.executor, tc.model); got != tc.want {
+			t.Errorf("isOpenCodeCompatTarget(%q,%q,%q) = %v, want %v",
+				tc.provider, tc.executor, tc.model, got, tc.want)
+		}
 	}
 }
 

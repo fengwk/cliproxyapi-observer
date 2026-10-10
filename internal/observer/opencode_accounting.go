@@ -18,9 +18,10 @@ const (
 
 // isOpenCodeCompatTarget reports whether a usage record belongs to the cohort
 // whose canonical accounting the observer may reconstruct from raw counters.
+// A bare "opencode-go/" model has no native id and is not a model.
 func isOpenCodeCompatTarget(provider, executor, model string) bool {
 	return provider == openCodeGoProvider && executor == openCodeGoExecutor &&
-		strings.HasPrefix(model, openCodeGoModelPrefix)
+		strings.HasPrefix(model, openCodeGoModelPrefix) && len(model) > len(openCodeGoModelPrefix)
 }
 
 // recoverOpenCodeBreakdown rebuilds a canonical, mutually exclusive token

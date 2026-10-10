@@ -48,50 +48,45 @@ func (s *Store) migrateAccounting() error {
 			return am.SetSequence(accountingMigrationSequence)
 		}
 
-		type repair struct {
-			key  []byte
-			old  Request
-			next Request
-		}
-		var repairs []repair
-		// Collect candidates in a read-only pass so the request bucket is never
-		// mutated while it is being iterated.
-		if err := rb.ForEach(func(key, value []byte) error {
-			if len(key) != requestKeyLen {
-				return fmt.Errorf("corrupt retained request key during accounting migration")
-			}
+		// Stream with a cursor and repair in place: memory stays O(1) in the
+		// number of retained rows. Mutating the request bucket invalidates the
+		// cursor, so after an in-place rewrite the copied key is reseeked and
+		// the iteration resumes at its successor.
+		c := rb.Cursor()
+		key, value := c.First()
+		for key != nil {
+			keyCopy := append([]byte(nil), key...)
 			var r Request
-			if err := json.Unmarshal(value, &r); err != nil {
+			rewritten := false
+			switch {
+			case len(keyCopy) != requestKeyLen:
+				return fmt.Errorf("corrupt retained request key during accounting migration")
+			case json.Unmarshal(value, &r) != nil:
 				return fmt.Errorf("corrupt retained request during accounting migration")
-			}
-			if !bytes.Equal(key, encodeRequestKey(r.Time, r.Sequence)) {
+			case !bytes.Equal(keyCopy, encodeRequestKey(r.Time, r.Sequence)):
 				return fmt.Errorf("retained request key mismatch during accounting migration")
+			case r.AccountingQuality == string(usage.TokenAccountingQualityUnclassified) &&
+				isOpenCodeCompatTarget(r.Provider, r.Executor, r.Model):
+				if recovered, ok := recoverOpenCodeBreakdown(r.RawUsage); ok {
+					next := r
+					storeBreakdown(&next, recovered)
+					next.GenerationNS = generationNS(next.LatencyNS, next.TTFTNS)
+					next.TPS = tpsFor(recovered, next.GenerationNS)
+					// Bodies and derived cost stay off the retained record.
+					next.CostUSD = nil
+					next.BodyAvailable = false
+					if err := replaceAccountingContribution(tx, keyCopy, r, next); err != nil {
+						return err
+					}
+					rewritten = true
+				}
 			}
-			if r.AccountingQuality != string(usage.TokenAccountingQualityUnclassified) ||
-				!isOpenCodeCompatTarget(r.Provider, r.Executor, r.Model) {
-				return nil
+			if rewritten {
+				if again, _ := c.Seek(keyCopy); again == nil {
+					break
+				}
 			}
-			recovered, ok := recoverOpenCodeBreakdown(r.RawUsage)
-			if !ok {
-				return nil
-			}
-			next := r
-			storeBreakdown(&next, recovered)
-			next.GenerationNS = generationNS(next.LatencyNS, next.TTFTNS)
-			next.TPS = tpsFor(recovered, next.GenerationNS)
-			// Bodies and derived cost stay off the retained record.
-			next.CostUSD = nil
-			next.BodyAvailable = false
-			repairs = append(repairs, repair{key: append([]byte(nil), key...), old: r, next: next})
-			return nil
-		}); err != nil {
-			return err
-		}
-
-		for _, rep := range repairs {
-			if err := replaceAccountingContribution(tx, rep.key, rep.old, rep.next); err != nil {
-				return err
-			}
+			key, value = c.Next()
 		}
 		return am.SetSequence(accountingMigrationSequence)
 	})
@@ -174,7 +169,13 @@ func replaceAccountingContribution(tx *bolt.Tx, key []byte, old, next Request) e
 		if err := kb.Put(newRowKey, encodeCounters(mergedRow)); err != nil {
 			return err
 		}
-		if err := kb.Put(oldRowKey, encodeCounters(reducedRow)); err != nil {
+		if isEmptyCounters(reducedRow) {
+			// Drop a fully drained old row; all persisted words are checked so
+			// residues are not hidden behind a zero request count.
+			if err := kb.Delete(oldRowKey); err != nil {
+				return err
+			}
+		} else if err := kb.Put(oldRowKey, encodeCounters(reducedRow)); err != nil {
 			return err
 		}
 	}
@@ -205,6 +206,16 @@ func persistedWords(c Counters) [persistedCounterWords]uint64 {
 		c.CacheHits, c.LatencyNS, c.LatencySamples, c.TTFTNS, c.TTFTSamples,
 		c.completeRequests, c.billableInput, c.billableRead, c.billableWrite, c.billableOutput,
 	}
+}
+
+// isEmptyCounters reports whether every persisted counter word is zero.
+func isEmptyCounters(c Counters) bool {
+	for _, w := range persistedWords(c) {
+		if w != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func withPersistedWords(c Counters, w [persistedCounterWords]uint64) Counters {
