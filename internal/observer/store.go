@@ -30,7 +30,7 @@ var (
 	bucketTraceBodyRefs = []byte("trace_body_refs")
 	allBuckets          = [][]byte{
 		bucketRequests, bucketStats, bucketKeyStats, bucketIdentity, bucketBodies, bucketBodyMeta,
-		bucketBodyIndex, bucketUsageTrace, bucketTraceBody, bucketTraceBodyRefs,
+		bucketBodyIndex, bucketUsageTrace, bucketTraceBody, bucketTraceBodyRefs, bucketAccountingMeta,
 	}
 )
 
@@ -185,6 +185,10 @@ func openStore(config Config, cleanupPeriod time.Duration) (*Store, error) {
 		return nil, err
 	}
 	if err := s.migrateKeyStats(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := s.migrateAccounting(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -1183,10 +1187,7 @@ func (s *Store) writeBatch(usage []Request, bodies []pendingBody) error {
 			r.Sequence = seq
 			r.BodyAvailable = false
 			// Shadow the derived API field only for disk serialization.
-			value, err := json.Marshal(struct {
-				Request
-				CostUSD *float64 `json:"cost_usd,omitempty"`
-			}{Request: r})
+			value, err := marshalStoredRequest(r)
 			if err != nil {
 				return err
 			}
