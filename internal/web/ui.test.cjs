@@ -256,7 +256,7 @@ test('aggregate costs distinguish all-unknown, partial and priced-zero', () => {
   }
   const partial = { requests: 5, unpriced_requests: 2, cost_usd: 0 };
   assert.match(ui.buildOverview(partial).find((c) => c.key === 'cost').sub, /已定价小计；未定价 2 条/);
-  assert.match(ui.buildGroupRows([partial])[0].cost, /已定价小计；未知 2 条/);
+  assert.match(ui.buildGroupRows([partial])[0].cost, /已定价小计；未定价 2 条/);
   assert.equal(ui.buildGroupRows([{ requests: 5, unpriced_requests: 0, cost_usd: 0 }])[0].cost, '$0.0000');
 });
 

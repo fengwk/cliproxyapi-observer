@@ -217,7 +217,7 @@
     var unknown = counter(source, 'unpriced_requests');
     if (requests > 0 && unknown >= requests) return '未定价';
     var value = formatCost(nullCost(source));
-    return unknown > 0 ? value + ' 已定价小计；未知 ' + formatInt(unknown) + ' 条' : value;
+    return unknown > 0 ? value + ' 已定价小计；未定价 ' + formatInt(unknown) + ' 条' : value;
   }
 
   function validateBodyDetail(detail, requestId) {
