@@ -1051,6 +1051,23 @@ func TestQueryTimePricingAcrossConfigPatchAndRestart(t *testing.T) {
 	// Step 2: PATCH prices (map 1) and verify the SAME historical request and summary reflect current price.
 	patchPrice(p1Input, p1Output, p1CacheRead, p1CacheGen)
 
+	// The config watcher may briefly quiesce the store. Only 503 is retryable;
+	// all other failures remain fatal, and the surrounding deadline is unchanged.
+	fetchDuringReload := func(host *harness) (requestPage, bool) {
+		status, _, body := host.managementRequest(t, http.MethodGet, "/v0/management/plugins/"+pluginID+"/requests?limit=50")
+		if status == http.StatusServiceUnavailable {
+			return requestPage{}, false
+		}
+		if status != http.StatusOK {
+			t.Fatalf("requests status %d body %s\n--- host log tail ---\n%s", status, truncate(body, 300), logTail(host.stdout.String(), host.stderr.String()))
+		}
+		var page requestPage
+		if err := json.Unmarshal(body, &page); err != nil {
+			t.Fatalf("decode requests: %v\n%s", err, truncate(body, 300))
+		}
+		return page, true
+	}
+
 	deadline := time.Now().Add(15 * time.Second)
 	var matchedRequest bool
 	var matchedSummary bool
@@ -1059,7 +1076,11 @@ func TestQueryTimePricingAcrossConfigPatchAndRestart(t *testing.T) {
 	var lastUnpriced uint64
 
 	for time.Now().Before(deadline) {
-		reqs := h.fetchRequests(t)
+		reqs, ready := fetchDuringReload(h)
+		if !ready {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
 		for _, it := range reqs.Items {
 			if it.RequestID == targetID {
 				lastReqCost = it.CostUSD
@@ -1101,7 +1122,11 @@ func TestQueryTimePricingAcrossConfigPatchAndRestart(t *testing.T) {
 	matchedSummary = false
 
 	for time.Now().Before(deadline) {
-		reqs := h.fetchRequests(t)
+		reqs, ready := fetchDuringReload(h)
+		if !ready {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
 		for _, it := range reqs.Items {
 			if it.RequestID == targetID {
 				lastReqCost = it.CostUSD
@@ -1146,7 +1171,11 @@ func TestQueryTimePricingAcrossConfigPatchAndRestart(t *testing.T) {
 	matchedSummary = false
 
 	for time.Now().Before(deadline) {
-		reqs := restarted.fetchRequests(t)
+		reqs, ready := fetchDuringReload(restarted)
+		if !ready {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
 		for _, it := range reqs.Items {
 			if it.RequestID == targetID {
 				lastReqCost = it.CostUSD
