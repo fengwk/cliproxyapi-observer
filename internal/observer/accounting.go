@@ -30,6 +30,18 @@ func NormalizeUsage(record pluginapi.UsageRecord) Request {
 	ensured := usage.EnsureTokenBreakdownForProvider(detail, record.Provider, record.ExecutorType)
 	breakdown := ensured.TokenBreakdown
 
+	// Observer-only compatibility for the opencode-go adapter: the host passes
+	// raw callback counters without a breakdown, so reconstruct a canonical one
+	// when the raw values uniquely determine it. Only this exact provider,
+	// executor and model namespace are reinterpreted; every other record keeps
+	// the SDK's accounting untouched.
+	if breakdown.Quality == usage.TokenAccountingQualityUnclassified &&
+		isOpenCodeCompatTarget(record.Provider, record.ExecutorType, record.Model) {
+		if recovered, ok := recoverOpenCodeBreakdown(record.Detail); ok {
+			breakdown = recovered
+		}
+	}
+
 	req := Request{
 		RequestID:         record.RequestID,
 		TraceID:           record.TraceID,
@@ -52,13 +64,7 @@ func NormalizeUsage(record pluginapi.UsageRecord) Request {
 	}
 	if breakdown.Quality == usage.TokenAccountingQualityComplete {
 		// Canonical, mutually exclusive buckets.
-		req.InputTokens = breakdown.Input.TotalTokens
-		req.UncachedInputTokens = breakdown.Input.UncachedTokens
-		req.OutputTokens = breakdown.Output.TotalTokens
-		req.ReasoningTokens = breakdown.Output.ReasoningTokens
-		req.CacheReadTokens = breakdown.Input.CacheReadTokens
-		req.CacheCreationTokens = breakdown.Input.CacheWriteTokens
-		req.TotalTokens = breakdown.TotalTokens
+		storeBreakdown(&req, breakdown)
 	} else {
 		// Unknown/ambiguous semantics: keep the authoritative total but do not
 		// guess how reasoning overlaps output. Expose the raw positive counters
