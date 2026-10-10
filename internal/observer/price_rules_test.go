@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	bolt "go.etcd.io/bbolt"
 )
@@ -201,7 +202,16 @@ func TestPriceRuleUsesTotalInputAndPreservesCacheRates(t *testing.T) {
 // Requests matching a zero-price rule must be marked as priced ($0.0000), not unpriced.
 func TestFreeModelZeroPricePricedNotUnpriced(t *testing.T) {
 	const model = "opencode-go/step-5-preview-free"
+	// Yesterday's UTC window stays inside a 48h retention and is computed
+	// relative to the wall clock, so the test never depends on a fixed date.
+	day := time.Now().UTC().Truncate(24 * time.Hour).Add(-24 * time.Hour)
+	// Match: 04:00 UTC is inside 00:00-08:30 UTC.
+	tMatch := day.Add(4 * time.Hour)
+	// Miss: 12:00 UTC is outside 00:00-08:30 UTC but still inside the window.
+	tMiss := day.Add(12 * time.Hour)
+
 	s := openTestStore(t, func(cfg *Config) {
+		cfg.RequestRetention = 48 * time.Hour
 		cfg.PriceRules = []PriceRule{
 			{
 				Model:     model,
@@ -210,11 +220,6 @@ func TestFreeModelZeroPricePricedNotUnpriced(t *testing.T) {
 			},
 		}
 	})
-
-	// Match: 04:00 UTC is inside 00:00-08:30 UTC
-	tMatch := time.Date(2026, 10, 10, 4, 0, 0, 0, time.UTC)
-	// Miss: 12:00 UTC (yesterday, within 24h) is outside 00:00-08:30 UTC
-	tMiss := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
 
 	s.SubmitUsage(pluginapi.UsageRecord{
 		RequestID: "free-in-window", Provider: "opencode-go", Model: model,
@@ -232,27 +237,36 @@ func TestFreeModelZeroPricePricedNotUnpriced(t *testing.T) {
 	})
 	flushAll(t, s)
 
-	page, err := s.Requests(Query{Model: model})
+	query := Query{From: day, To: day.Add(24 * time.Hour), Model: model}
+	page, err := s.Requests(query)
 	if err != nil || len(page.Items) != 2 {
 		t.Fatalf("requests: count=%d, err=%v", len(page.Items), err)
 	}
 
+	seen := map[string]bool{}
 	for _, it := range page.Items {
-		if it.RequestID == "free-in-window" {
+		seen[it.RequestID] = true
+		switch it.RequestID {
+		case "free-in-window":
 			if it.CostUSD == nil {
 				t.Fatalf("in-window free model request must not be nil (unpriced)")
 			}
 			if *it.CostUSD != 0.0 {
 				t.Fatalf("in-window free model cost = %v, want 0.0", *it.CostUSD)
 			}
-		} else if it.RequestID == "free-out-of-window" {
+		case "free-out-of-window":
 			if it.CostUSD != nil {
 				t.Fatalf("out-of-window request should be unpriced (nil), got %v", *it.CostUSD)
 			}
+		default:
+			t.Fatalf("unexpected request id %q", it.RequestID)
 		}
 	}
+	if !seen["free-in-window"] || !seen["free-out-of-window"] {
+		t.Fatalf("both request ids must be observed, got %v", seen)
+	}
 
-	summary, err := s.Summary(Query{Model: model})
+	summary, err := s.Summary(query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,5 +284,123 @@ func TestFreeModelZeroPricePricedNotUnpriced(t *testing.T) {
 	}
 	if summary.Groups[0].UnpricedRequests != 1 {
 		t.Fatalf("group.UnpricedRequests = %d, want 1", summary.Groups[0].UnpricedRequests)
+	}
+}
+
+// Unclassified usage has an authoritative total but no provable uncached
+// bucket. A zero price is still a priced zero, a missing price stays unpriced,
+// and any non-zero price cannot be applied to ambiguous tokens.
+func TestRequestCostOnUnclassifiedUsageZeroMissingAndPartialPrices(t *testing.T) {
+	const model = "mystery-model"
+	r := NormalizeUsage(pluginapi.UsageRecord{
+		RequestID: "u1", Provider: "mystery-provider", Model: model,
+		RequestedAt: time.Unix(4000, 0).UTC(),
+		Detail:      pluginapi.UsageDetail{InputTokens: 100, OutputTokens: 50, CacheReadTokens: 7},
+	})
+	if r.AccountingQuality != string(usage.TokenAccountingQualityUnclassified) {
+		t.Fatalf("fixture quality = %q, want unclassified", r.AccountingQuality)
+	}
+	for _, tc := range []struct {
+		name       string
+		prices     map[string]Price
+		wantPriced bool
+	}{
+		{"zero price is a priced zero", map[string]Price{model: {}}, true},
+		{"missing price stays unpriced", map[string]Price{}, false},
+		{"partial non-zero price stays unpriced", map[string]Price{model: {Input: 1}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cost := RequestCost(r, tc.prices)
+			if !tc.wantPriced {
+				if cost != nil {
+					t.Fatalf("cost = %v, want nil (unpriced)", *cost)
+				}
+				return
+			}
+			if cost == nil || *cost != 0.0 {
+				t.Fatalf("cost = %v, want priced 0.0", cost)
+			}
+		})
+	}
+}
+
+// A zero fallback price prices every matching request at $0.0000, including
+// unclassified usage whose tokens cannot be measured, so nothing is unpriced.
+func TestZeroPriceFallbackSummaryPricedNotUnpriced(t *testing.T) {
+	const model = "zero-fallback-model"
+	day := time.Now().UTC().Truncate(24 * time.Hour).Add(-24 * time.Hour)
+	at := day.Add(6 * time.Hour)
+	s := openTestStore(t, func(cfg *Config) {
+		cfg.RequestRetention = 48 * time.Hour
+		cfg.Prices = map[string]Price{model: {}}
+	})
+	s.SubmitUsage(usageRecord("complete", "openai", model, at, simpleUsage(1000, 500)))
+	s.SubmitUsage(usageRecord("unclassified", "mystery", model, at, simpleUsage(2000, 1000)))
+	flushAll(t, s)
+
+	q := Query{From: day, To: day.Add(24 * time.Hour), Model: model}
+	summary, err := s.Summary(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Totals.Requests != 2 || summary.Totals.UnpricedRequests != 0 || summary.Totals.CostUSD != 0 {
+		t.Fatalf("zero-price fallback totals = %+v, want 2 requests / 0 unpriced / 0 cost", summary.Totals)
+	}
+	page, err := s.Requests(q)
+	if err != nil || len(page.Items) != 2 {
+		t.Fatalf("requests: count=%d, err=%v", len(page.Items), err)
+	}
+	for _, it := range page.Items {
+		if it.CostUSD == nil || *it.CostUSD != 0.0 {
+			t.Fatalf("%s cost = %v, want priced 0.0", it.RequestID, it.CostUSD)
+		}
+	}
+}
+
+// An ordered non-zero rule prices only requests whose tokens are complete;
+// ambiguous usage matching the same rule stays unpriced so the summary never
+// guesses a monetary amount.
+func TestOrderedRulePricesCompleteAndClassifiesIncomplete(t *testing.T) {
+	const model = "ordered-quality-model"
+	day := time.Now().UTC().Truncate(24 * time.Hour).Add(-24 * time.Hour)
+	at := day.Add(10 * time.Hour)
+	s := openTestStore(t, func(cfg *Config) {
+		cfg.RequestRetention = 48 * time.Hour
+		cfg.PriceRules = []PriceRule{{Model: model, Price: Price{Input: 2, Output: 3}}}
+	})
+	// Complete: 1000 in, 500 out -> (1000*2 + 500*3)/1e6 = 0.0035.
+	s.SubmitUsage(usageRecord("complete", "openai", model, at, simpleUsage(1000, 500)))
+	// Unclassified: ambiguous tokens must remain unpriced despite the rule.
+	s.SubmitUsage(usageRecord("incomplete", "mystery", model, at, simpleUsage(2000, 1000)))
+	flushAll(t, s)
+
+	q := Query{From: day, To: day.Add(24 * time.Hour), Model: model}
+	summary, err := s.Summary(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Totals.Requests != 2 || summary.Totals.UnpricedRequests != 1 || !approx(summary.Totals.CostUSD, 0.0035) {
+		t.Fatalf("ordered rule totals = %+v, want 2 requests / 1 unpriced / 0.0035", summary.Totals)
+	}
+	page, err := s.Requests(q)
+	if err != nil || len(page.Items) != 2 {
+		t.Fatalf("requests: count=%d, err=%v", len(page.Items), err)
+	}
+	seen := map[string]bool{}
+	for _, it := range page.Items {
+		seen[it.RequestID] = true
+		switch it.RequestID {
+		case "complete":
+			if it.CostUSD == nil || !approx(*it.CostUSD, 0.0035) {
+				t.Fatalf("complete cost = %v, want 0.0035", it.CostUSD)
+			}
+		case "incomplete":
+			if it.CostUSD != nil {
+				t.Fatalf("incomplete cost = %v, want unpriced", *it.CostUSD)
+			}
+		}
+	}
+	if !seen["complete"] || !seen["incomplete"] {
+		t.Fatalf("both request ids must be observed, got %v", seen)
 	}
 }

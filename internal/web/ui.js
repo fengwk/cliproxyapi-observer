@@ -728,11 +728,11 @@
       tr.appendChild(cell(doc, '', r.time));
 
       var modelCell = cell(doc, 'model-cell cell-truncate', r.model);
-      if (r.alias && r.alias !== r.model) {
-        modelCell.title = '别名 ' + r.alias;
-      } else {
-        modelCell.title = r.model;
-      }
+      // The cell is CSS-truncated, so the hover title must always carry the
+      // full model name; a differing alias is appended on a new line.
+      modelCell.title = r.alias && r.alias !== r.model
+        ? r.model + '\n别名 ' + r.alias
+        : r.model;
       tr.appendChild(modelCell);
 
       tr.appendChild(cell(doc, 'col-secondary', r.provider));

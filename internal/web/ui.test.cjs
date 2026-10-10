@@ -910,10 +910,11 @@ test('renderRequestsTable 简化模型列并截断 key/auth 且保留 hover titl
 
   const row = tbody.childNodes[0];
   const cells = row.childNodes;
-  // 1. 模型列：直接展示 model 字符串，无别名/核算/流式堆叠；别名存入 title
+  // 1. Model cell: plain model text, no alias/accounting/stream stacking; the title
+  // always carries the full model and appends a differing alias on a new line.
   const modelCell = cells[1];
   assert.equal(modelCell.textContent, 'opencode-go/deepseek-v4.1-flash');
-  assert.equal(modelCell.title, '别名 deepseek-v4.1-flash');
+  assert.equal(modelCell.title, 'opencode-go/deepseek-v4.1-flash\n别名 deepseek-v4.1-flash');
   assert.ok(!collectText(modelCell).some((t) => t.includes('核算')));
   assert.ok(!collectText(modelCell).some((t) => t.includes('流式')));
 
@@ -930,6 +931,17 @@ test('renderRequestsTable 简化模型列并截断 key/auth 且保留 hover titl
   assert.equal(authCell.textContent, 'fengwk94@gma…');
   assert.equal(authCell.title, fullCred);
   assert.ok(authCell.className.includes('cell-truncate'));
+
+  // 3b. Without a differing alias the title is exactly the full model; the cell
+  // stays plain text and renders no button.
+  const tbodyPlain = doc.createElement('tbody');
+  ui.renderRequestsTable(doc, tbodyPlain, [
+    { request_id: 'r2', model: 'opencode-go/full-model-with-no-alias', provider: 'opencode-go' }
+  ], null, {}, null);
+  const plainModelCell = tbodyPlain.childNodes[0].childNodes[1];
+  assert.equal(plainModelCell.textContent, 'opencode-go/full-model-with-no-alias');
+  assert.equal(plainModelCell.title, 'opencode-go/full-model-with-no-alias');
+  assert.equal(findNodes(plainModelCell, (n) => n.tagName === 'button').length, 0);
 
   // 4. 点击 key 单元格依然触发 onKey 筛选
   let clickedKey = null;
