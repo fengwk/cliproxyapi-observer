@@ -214,6 +214,46 @@ func addCounters(dst *Counters, src Counters) {
 	dst.billableOutput = addSat(dst.billableOutput, src.billableOutput)
 }
 
+// cacheAccountingFor derives the exposed token-weighted cache accounting from
+// the private complete-accounting partitions. It returns nil whenever a
+// partition saturated at the MaxUint64 sentinel, the merged complete input
+// overflowed, or the partitions break a basic invariant, so a consumer never
+// computes a ratio from a truncated or incoherent basis.
+func cacheAccountingFor(c Counters) *CacheAccounting {
+	// A saturated counter is a sentinel, not a real total.
+	if c.completeRequests == math.MaxUint64 || c.billableInput == math.MaxUint64 ||
+		c.billableRead == math.MaxUint64 || c.billableWrite == math.MaxUint64 {
+		return nil
+	}
+	if c.completeRequests > c.Requests {
+		return nil
+	}
+	if c.completeRequests == 0 {
+		// An empty complete partition is a valid zero basis; token partitions
+		// without a complete request are incoherent.
+		if c.billableInput != 0 || c.billableRead != 0 || c.billableWrite != 0 || c.billableOutput != 0 {
+			return nil
+		}
+		return &CacheAccounting{}
+	}
+	// Complete input is the sum of the mutually exclusive buckets. A saturated
+	// sum means the denominator was truncated.
+	input := addSat(addSat(c.billableInput, c.billableRead), c.billableWrite)
+	if input == math.MaxUint64 {
+		return nil
+	}
+	// The complete partition can never exceed the public raw totals it derives
+	// from; a violation means the stored aggregate is corrupt.
+	if c.billableRead > c.CacheReadTokens || c.billableWrite > c.CacheCreationTokens || input > c.InputTokens {
+		return nil
+	}
+	return &CacheAccounting{
+		Requests:        c.completeRequests,
+		InputTokens:     input,
+		CacheReadTokens: c.billableRead,
+	}
+}
+
 // addSat adds two uint64 counters, saturating at MaxUint64 instead of wrapping.
 func addSat(a, b uint64) uint64 {
 	if a > math.MaxUint64-b {

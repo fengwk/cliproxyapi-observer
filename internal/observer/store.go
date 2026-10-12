@@ -613,7 +613,9 @@ func (s *Store) Summary(query Query) (Summary, error) {
 		from = retainedFrom
 	}
 	if !from.Before(to) {
-		return Summary{From: from, To: to, Groups: []Group{}, Series: []Point{}}, nil
+		out := Summary{From: from, To: to, Groups: []Group{}, Series: []Point{}}
+		out.projectCacheAccounting()
+		return out, nil
 	}
 
 	fromMinute := statsMinute(from)
@@ -704,7 +706,29 @@ func (s *Store) Summary(query Query) (Summary, error) {
 		ClientKeys:  sortedKeyGroups(clientGroups),
 		Credentials: sortedKeyGroups(authGroups),
 	}
+	// One central projection after all merging keeps Totals, every group, the
+	// downsampled series and both key breakdowns consistent.
+	out.projectCacheAccounting()
 	return out, nil
+}
+
+// projectCacheAccounting fills the derived CacheAccounting view on every
+// aggregated counters object at once. It is called after aggregation so the
+// derived field never accumulates and the private partitions never leak.
+func (out *Summary) projectCacheAccounting() {
+	out.Totals.CacheAccounting = cacheAccountingFor(out.Totals)
+	for i := range out.Groups {
+		out.Groups[i].CacheAccounting = cacheAccountingFor(out.Groups[i].Counters)
+	}
+	for i := range out.Series {
+		out.Series[i].CacheAccounting = cacheAccountingFor(out.Series[i].Counters)
+	}
+	for i := range out.ClientKeys {
+		out.ClientKeys[i].CacheAccounting = cacheAccountingFor(out.ClientKeys[i].Counters)
+	}
+	for i := range out.Credentials {
+		out.Credentials[i].CacheAccounting = cacheAccountingFor(out.Credentials[i].Counters)
+	}
 }
 
 func sortedGroups(groups map[string]*Group) []Group {

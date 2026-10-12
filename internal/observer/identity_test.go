@@ -263,5 +263,8 @@ func TestIdentityStatsSurviveCompaction(t *testing.T) {
 func equalSummaryCounters(a, b Counters) bool {
 	sameCost := math.Abs(a.CostUSD-b.CostUSD) < 1e-12
 	a.CostUSD, b.CostUSD = 0, 0
+	// CacheAccounting is a derived, per-object projection that addCounters
+	// intentionally does not accumulate; it is validated by its own tests.
+	a.CacheAccounting, b.CacheAccounting = nil, nil
 	return sameCost && reflect.DeepEqual(a, b)
 }

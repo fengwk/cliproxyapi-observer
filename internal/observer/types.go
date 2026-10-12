@@ -158,6 +158,18 @@ type Query struct {
 	Offset      int
 }
 
+// CacheAccounting is the derived, token-weighted cache read basis for one
+// aggregate. It covers exactly the complete/self-consistent accounting
+// partition so a consumer can compute cache_read_tokens/input_tokens without
+// diluting it with unclassified raw counters. Requests is the complete
+// accounting coverage count (including zero-input complete records); it is not
+// the "requests with a cache hit" ratio. The struct is never persisted.
+type CacheAccounting struct {
+	Requests        uint64 `json:"requests"`
+	InputTokens     uint64 `json:"input_tokens"`
+	CacheReadTokens uint64 `json:"cache_read_tokens"`
+}
+
 type Counters struct {
 	Requests            uint64  `json:"requests"`
 	FailedRequests      uint64  `json:"failed_requests"`
@@ -174,8 +186,13 @@ type Counters struct {
 	TTFTSamples         uint64  `json:"ttft_samples"`
 	CostUSD             float64 `json:"cost_usd"`
 	UnpricedRequests    uint64  `json:"unpriced_requests"`
+	// CacheAccounting is a derived, query-time public projection of the private
+	// complete-accounting partitions below. It is never persisted and is nil
+	// (JSON null) when the aggregate is saturated or incoherent, so a consumer
+	// never divides by a truncated basis.
+	CacheAccounting *CacheAccounting `json:"cache_accounting"`
 	// Only these complete-accounting partitions are billable. They are stored,
-	// never exposed, and must not include ambiguous raw display counters.
+	// never exposed directly, and must not include ambiguous raw display counters.
 	completeRequests uint64
 	billableInput    uint64
 	billableRead     uint64
