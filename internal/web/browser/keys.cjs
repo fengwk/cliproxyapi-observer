@@ -257,7 +257,7 @@ async function main() {
     assert.ok(Math.max(...identityBottoms) - Math.min(...identityBottoms) <= 1, 'desktop identity controls should align on one row');
     assert.ok(await page.locator('#time-start').evaluate((el) => el.getBoundingClientRect().width >= 240), 'desktop time input must show the full value');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
-    results.push('single consolidated filter toolbar, one aligned desktop row, no form serialization');
+    results.push('single filter toolbar, aligned range and identity rows, no form serialization');
 
     // 10b. 共享按钮契约：所有按钮带 .btn；常规控件至少 34px/13px/600/6×12/行高 20/半径 8，
     // 紧凑 btn-sm 至少 28px/12px/600/3×9；段控保留 .btn 基础（同字号字重、拼接圆角）；

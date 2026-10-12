@@ -185,6 +185,7 @@ POST /v0/management/plugins/cliproxyapi-observer/validate
 无过滤时开销随 `offset + limit` 增长，有过滤时可能扫描更多区间记录；不会额外全库计数。
 
 面板始终显示开始和结束时间。24 小时、7 天、30 天只填入草稿，点击“应用时间”后才查询。
+应用后的范围保持固定，不随刷新、筛选或翻页滑动；本地时间会转换为 UTC 查询参数。
 非法或起止颠倒的草稿不会发请求；刷新失败时保留上次成功加载的记录、页码和时间窗口。
 模型表的请求命中率是 `cache_hits / requests`。请求表的缓存读占比是
 `cache_read_tokens / input_tokens`，只在完整且自洽的 token 分桶上计算。筛选下拉仍以原生

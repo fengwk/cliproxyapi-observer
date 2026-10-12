@@ -23,6 +23,8 @@
 - `price-rules.cjs`：真实 Chromium 的有序条件定价场景：阈值严格大于、first-match、
   重排持久化、UTC/跨夜/24:00 边界、删除/清空、后端拒绝保留草稿，并输出
   light/white/dark × 1280/390 截图与 `price-rules-results.json`。
+- `ui-polish.cjs`：时间草稿、固定 UTC 查询窗口、失败分页恢复、严格缓存占比、
+  下拉键盘与禁用分组、长 iframe 定位、三主题 768px 布局及 44px 触控目标。
 - `mock-server.test.cjs`：Node mock 合约回归。mock CSP 直接读取
   `internal/plugin/management.go` 的 `cspPolicy`，不会使用另一套策略。
 
@@ -46,6 +48,8 @@ NODE_PATH="$tmp/node_modules" CHROMIUM_PATH=/usr/bin/chromium \
 node internal/web/browser/keys.cjs "$tmp/keys-evidence"
 NODE_PATH="$tmp/node_modules" CHROMIUM_PATH=/usr/bin/chromium \
 node internal/web/browser/price-rules.cjs "$tmp/price-rules-evidence"
+NODE_PATH="$tmp/node_modules" CHROMIUM_PATH=/usr/bin/chromium \
+node internal/web/browser/ui-polish.cjs "$tmp/polish-evidence"
 node --test internal/web/ui.test.cjs internal/web/browser/mock-server.test.cjs
 ```
 
@@ -56,7 +60,7 @@ node --test internal/web/ui.test.cjs internal/web/browser/mock-server.test.cjs
 - **offset / limit 语义**：请求列表采用 `offset`（`0..2147483647`）与 `limit`（默认 50，后端上限 100，UI 固定每页请求 50）切页，返回 `{ items, offset, limit, has_more }`，废弃所有游标 `cursor` 字段。
 - **权衡考量**：
   - **优势**：不为总页数额外全库计数；翻页采用单页替换（固定最多 50 行），避免无限列表 DOM/内存累加。
-  - **开销与偏移漂移**：深页需跳过前面的匹配记录，无过滤时开销随 `offset + limit` 增长，有过滤时可能扫描更多区间记录。翻页固定 from/to，不查询总条数或总页数；保留清理或迟到写入仍可能造成偏移、重复/遗漏。因此刷新、筛选或重连会重置查询窗口与第 1 页（`offset=0`）。
+  - **开销与偏移漂移**：深页需跳过前面的匹配记录，无过滤时开销随 `offset + limit` 增长，有过滤时可能扫描更多区间记录。翻页固定 from/to，不查询总条数或总页数；保留清理或迟到写入仍可能造成偏移、重复/遗漏。刷新、筛选或重连成功后回到第 1 页（`offset=0`）；刷新与筛选沿用已应用的固定时间范围，不应用未确认的草稿。
 - **动态查询定价**：历史请求明细与 summary 总成本均在查询时按当前生效价格（`effectiveSettings.prices`）动态计算；保存配置更新价格后立即反映于历史明细，无需快照。
 
 ## 弹窗与表单合约

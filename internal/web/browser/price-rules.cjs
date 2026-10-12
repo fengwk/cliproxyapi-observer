@@ -209,7 +209,7 @@ async function main() {
       assert.equal(contract.del.radius, 8);
       assert.equal(contract.del.bg, 'rgb(198, 87, 70)', '危险按钮使用 error 语义色');
       assert.equal(contract.del.color, 'rgb(255, 255, 255)');
-      // 行内次要操作 = btn-secondary btn-sm，紧凑高度 39。
+      // 行内次要操作 = btn-secondary btn-sm，高度至少 28px。
       assert.match(contract.move.cls, /(^|\s)btn-secondary(\s|$)/);
       assert.match(contract.move.cls, /(^|\s)btn-sm(\s|$)/);
       assert.ok(contract.move.height >= 28);

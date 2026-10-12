@@ -1340,10 +1340,15 @@
       return select && select.options ? Array.prototype.slice.call(select.options) : [];
     }
 
+    function optionDisabled(option) {
+      var group = option && option.parentNode;
+      return !option || option.disabled || !!(group && group.tagName === 'OPTGROUP' && group.disabled);
+    }
+
     function enabledIndexes(select) {
       var indexes = [];
       optionsOf(select).forEach(function (option, index) {
-        if (!option.disabled) indexes.push(index);
+        if (!optionDisabled(option)) indexes.push(index);
       });
       return indexes;
     }
@@ -1366,6 +1371,7 @@
       if (active && active.trigger) {
         active.trigger.setAttribute('aria-expanded', 'false');
         active.trigger.removeAttribute('aria-activedescendant');
+        active.trigger.removeAttribute('aria-controls');
         if (restoreFocus && typeof active.trigger.focus === 'function') active.trigger.focus();
       }
       active = null;
@@ -1454,12 +1460,13 @@
       optionsOf(select).forEach(function (option, index) {
         var item = doc.createElement('button');
         item.type = 'button';
+        item.tabIndex = -1;
         item.className = 'select-option' + (option.value === select.value ? ' is-selected' : '') +
           (index === highlight ? ' is-highlighted' : '');
         item.id = select.id + '-option-' + index;
         item.setAttribute('role', 'option');
         item.setAttribute('aria-selected', option.value === select.value ? 'true' : 'false');
-        item.disabled = !!option.disabled;
+        item.disabled = optionDisabled(option);
         setText(item, option.textContent || option.label || option.value || '');
         item.addEventListener('mousedown', function (event) { event.preventDefault(); });
         item.addEventListener('click', function () { commit(index); });
@@ -1468,7 +1475,12 @@
       if (highlight >= 0) {
         active.trigger.setAttribute('aria-activedescendant', select.id + '-option-' + highlight);
         var current = popup.childNodes[highlight];
-        if (current && current.scrollIntoView) current.scrollIntoView({ block: 'nearest' });
+        if (current) {
+          if (current.offsetTop < popup.scrollTop) popup.scrollTop = current.offsetTop;
+          else if (current.offsetTop + current.offsetHeight > popup.scrollTop + popup.clientHeight) {
+            popup.scrollTop = current.offsetTop + current.offsetHeight - popup.clientHeight;
+          }
+        }
       } else active.trigger.removeAttribute('aria-activedescendant');
     }
 
@@ -1476,7 +1488,7 @@
       if (!active) return;
       var select = active.select;
       var option = optionsOf(select)[index];
-      if (!option || option.disabled) return;
+      if (select.disabled || optionDisabled(option)) return;
       var changed = select.value !== option.value;
       select.value = option.value;
       closePopup(true);
@@ -1493,9 +1505,10 @@
         if (!popup) open(record);
         else moveHighlight(record.select, key === 'ArrowUp' || key === 'Home' ? -1 : 1, key === 'Home' || key === 'End');
         paintOptions();
-      } else if ((key === 'Enter' || key === ' ') && popup) {
+      } else if (key === 'Enter' || key === ' ') {
         event.preventDefault();
-        commit(highlight);
+        if (popup) commit(highlight);
+        else open(record);
       } else if (key === 'Escape' && popup) {
         event.preventDefault();
         closePopup(true);
@@ -1517,11 +1530,11 @@
       popup.id = record.select.id + '-listbox';
       record.trigger.setAttribute('aria-controls', popup.id);
       record.trigger.setAttribute('aria-expanded', 'true');
-      var selected = optionsOf(record.select).findIndex(function (option) { return option.value === record.select.value && !option.disabled; });
+      var selected = optionsOf(record.select).findIndex(function (option) { return option.value === record.select.value && !optionDisabled(option); });
       var enabled = enabledIndexes(record.select);
       highlight = selected >= 0 ? selected : (enabled.length ? enabled[0] : -1);
-      paintOptions();
       placePopup();
+      paintOptions();
       if (!outsideBound) {
         win.addEventListener('mousedown', onOutside, true);
         try {
@@ -1623,6 +1636,7 @@
     }
 
     function refresh() {
+      closePopup(false);
       var selects = doc.querySelectorAll ? doc.querySelectorAll('select') : [];
       var seen = [];
       for (var i = 0; i < selects.length; i++) {
@@ -1847,6 +1861,7 @@
     }
 
     function disconnect() {
+      selects.close();
       connectionGate.invalidate();
       finishConfirmation(false);
       if (saveAbort) saveAbort.abort();
@@ -2173,6 +2188,7 @@
           for (var i = 0; i < results.length; i++) byKind[results[i].kind] = results[i].data;
           applySummary(byKind.summary);
           state.bounds = bounds;
+          showRange();
           state.requestProvider = common.provider;
           state.requestModel = common.model;
           state.requestClientKeyID = state.clientKeyID;

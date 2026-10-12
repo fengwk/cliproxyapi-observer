@@ -18,7 +18,7 @@ async function main() {
   const results = [];
   const calls = [];
   try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, timezoneId: 'Asia/Shanghai' });
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
     page.on('request', (request) => {
@@ -50,6 +50,9 @@ async function main() {
     const applied = calls.slice(mark).find((url) => url.pathname.endsWith('/requests'));
     assert.equal(Date.parse(applied.searchParams.get('to')) - Date.parse(applied.searchParams.get('from')), 7 * 24 * 60 * 60 * 1000);
     assert.equal(applied.searchParams.get('offset'), '0');
+    const shownRange = await page.locator('#range-label').textContent();
+    assert.equal(shownRange.includes(await page.evaluate((value) => window.ObserverUI.formatRangeTime(value),
+      applied.searchParams.get('from'))), true);
     results.push('preset fills draft and explicit apply queries page one');
 
     const fixed = applied.searchParams.get('from');
@@ -86,9 +89,27 @@ async function main() {
     await page.locator('#conn-status').filter({ hasText: '已更新' }).waitFor();
     assert.equal(await page.locator('#filter-provider').inputValue(), 'anthropic');
     assert.equal(calls.filter((url) => url.pathname.endsWith('/summary')).at(-1).searchParams.get('provider'), 'anthropic');
+    await page.locator('#filter-provider').evaluate((el) => {
+      const group = document.createElement('optgroup');
+      group.disabled = true;
+      const option = document.createElement('option');
+      option.value = 'retired';
+      option.textContent = 'Retired <b>provider</b>';
+      group.appendChild(option);
+      el.appendChild(group);
+    });
+    await page.evaluate(() => window.__observerSelects.refresh());
+    await trigger.click();
+    assert.equal(await popup.locator('button').last().isDisabled(), true);
+    assert.equal(await popup.locator('b').count(), 0);
+    await trigger.press('End');
+    assert.notEqual(await trigger.getAttribute('aria-activedescendant'), await popup.locator('button').last().getAttribute('id'));
+    await trigger.press('Escape');
+    await page.locator('#filter-provider optgroup').evaluate((el) => el.remove());
     await page.locator('#filter-provider').evaluate((el) => { el.disabled = true; });
     await page.evaluate(() => window.__observerSelects.refresh());
     assert.equal(await page.locator('#filter-provider-trigger').isDisabled(), true);
+    assert.equal(await page.locator('#time-start').evaluate((el) => Math.round(el.getBoundingClientRect().height)), 34);
     await page.locator('#filter-provider').evaluate((el) => { el.disabled = false; });
     await page.evaluate(() => window.__observerSelects.refresh());
     await page.locator('#connect').click();
@@ -164,6 +185,29 @@ async function main() {
     await embed.mouse.click(8, 8);
     await frame.locator('.select-popup').waitFor({ state: 'hidden' });
     results.push('iframe menu stays within the parent-visible area and closes on outside click');
+    await embed.setViewportSize({ width: 768, height: 900 });
+    for (const theme of ['light', 'white', 'dark']) {
+      await embed.evaluate((value) => {
+        if (value === 'light') document.documentElement.removeAttribute('data-theme');
+        else document.documentElement.setAttribute('data-theme', value);
+      }, theme);
+      await frame.waitForFunction((value) => (document.documentElement.getAttribute('data-theme') || 'light') === value, theme);
+      assert.equal(await frame.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+      await frame.locator('#filter-provider-trigger').click();
+      await menu.waitFor();
+      assert.equal(await menu.evaluate((el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.left >= 8 && rect.right <= window.innerWidth - 8;
+      }), true);
+      await embed.screenshot({ path: path.join(out, 'ui-polish-' + theme + '-768.png'), animations: 'disabled' });
+      await frame.locator('#filter-provider-trigger').press('Escape');
+    }
+    const touch = await browser.newContext({ viewport: { width: 390, height: 900 }, hasTouch: true });
+    const touchPage = await touch.newPage();
+    await touchPage.goto(server.resourceURL);
+    assert.ok(await touchPage.locator('#time-apply').evaluate((el) => el.getBoundingClientRect().height >= 44));
+    await touch.close();
+    results.push('three tablet themes avoid overflow; coarse pointers keep 44px touch targets');
   } finally {
     await browser.close();
     await server.close();
