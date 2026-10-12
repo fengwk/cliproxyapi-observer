@@ -237,21 +237,25 @@ async function main() {
     assert.equal(await page.locator('section[aria-label="Key 筛选"]').count(), 0);
     assert.equal((await page.locator('body').textContent()).includes('Key 筛选影响概览'), false);
     assert.equal(await page.evaluate(() => {
-      const container = document.querySelector('section[aria-label="筛选条件"] .controls');
-      const seg = document.querySelector('section[aria-label="筛选条件"] .seg');
+      const range = document.querySelector('.range-controls');
+      const identity = document.querySelector('.identity-controls');
+      const seg = document.querySelector('.seg');
       const members = ['filter-provider', 'filter-model', 'filter-client-key', 'filter-auth', 'identity-apply'];
-      return !!container && !!seg && seg.closest('.controls') === container &&
-        members.every((id) => document.getElementById(id)?.closest('.controls') === container);
+      return !!range && !!identity && seg.closest('.controls') === range &&
+        ['time-start', 'time-end', 'time-apply'].every((id) => document.getElementById(id)?.closest('.controls') === range) &&
+        members.every((id) => document.getElementById(id)?.closest('.controls') === identity);
     }), true);
     assert.equal(await page.locator('form').count(), 0);
     assert.equal(await page.locator('input[type="password"]').count(), 1);
     assert.equal(await page.locator('[name="client_key_id"], [name="auth_index"]').count(), 0);
-    const bottomEdges = () => page.evaluate(() => Array.from(
-      document.querySelector('section[aria-label="筛选条件"] .controls').children
-    ).map((el) => Math.round(el.getBoundingClientRect().bottom)));
-    const desktopBottoms = await bottomEdges();
-    assert.ok(Math.max(...desktopBottoms) - Math.min(...desktopBottoms) <= 1,
-      'desktop controls should align on a single row');
+    const rowBottoms = (selector) => page.evaluate((sel) => Array.from(
+      document.querySelector(sel).children
+    ).map((el) => Math.round(el.getBoundingClientRect().bottom)), selector);
+    const rangeBottoms = await rowBottoms('.range-controls');
+    const identityBottoms = await rowBottoms('.identity-controls');
+    assert.ok(Math.max(...rangeBottoms) - Math.min(...rangeBottoms) <= 1, 'desktop range controls should align on one row');
+    assert.ok(Math.max(...identityBottoms) - Math.min(...identityBottoms) <= 1, 'desktop identity controls should align on one row');
+    assert.ok(await page.locator('#time-start').evaluate((el) => el.getBoundingClientRect().width >= 240), 'desktop time input must show the full value');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
     results.push('single consolidated filter toolbar, one aligned desktop row, no form serialization');
 
@@ -507,7 +511,8 @@ async function main() {
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
     await page.setViewportSize({ width: 390, height: 900 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
-    assert.ok(new Set(await bottomEdges()).size > 1, 'narrow layout should wrap naturally into multiple rows');
+    assert.ok(new Set(await rowBottoms('.identity-controls')).size > 1, 'narrow identity controls should wrap naturally');
+    assert.ok(await page.locator('#time-start').evaluate((el) => el.getBoundingClientRect().width >= 240), 'narrow time input remains fully readable');
     assert.equal(await page.locator('#requests-body img, #requests-body script').count(), 0);
     assert.equal(await page.locator('#keys-body img, #keys-body script').count(), 0);
     assert.deepEqual(errors, []);

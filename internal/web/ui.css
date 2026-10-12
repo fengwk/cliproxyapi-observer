@@ -510,6 +510,11 @@ main {
   flex-wrap: wrap;
 }
 
+.range-controls,
+.identity-controls {
+  width: 100%;
+}
+
 .seg {
   display: inline-flex;
   border: 1px solid var(--border-color);
@@ -545,15 +550,15 @@ main {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  flex: 1 1 0;
-  width: 132px;
+  flex: 1 1 150px;
   min-width: 0;
-  max-width: 150px;
+  max-width: 240px;
 }
 
 .time-filter {
-  width: 148px;
-  max-width: 156px;
+  flex: 1 1 240px;
+  width: 240px;
+  max-width: none;
 }
 
 .filter label {
@@ -1054,6 +1059,13 @@ dialog.dialog::backdrop {
 
   .conn input[type='password'] {
     width: 130px;
+  }
+
+  .range-controls .time-filter,
+  .identity-controls .filter {
+    flex-basis: 100%;
+    width: 100%;
+    max-width: none;
   }
 
   .col-secondary {

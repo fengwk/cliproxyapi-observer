@@ -193,9 +193,16 @@
     if (isNaN(d.getTime())) return '—';
     var pad = function (x) { return x < 10 ? '0' + x : String(x); };
     return (
-      d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
+      pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
       pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds())
     );
+  }
+
+  function formatRangeTime(value) {
+    if (!value) return '—';
+    var d = value instanceof Date ? value : new Date(value);
+    if (isNaN(d.getTime())) return '—';
+    return d.getFullYear() + '-' + formatTime(d);
   }
 
   function pad2(value) {
@@ -240,7 +247,7 @@
   }
 
   function nonnegativeInteger(value) {
-    return typeof value === 'number' && isFinite(value) && value >= 0 && Math.floor(value) === value;
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
   }
 
   // 仅完整且自洽的互斥分桶允许计算缓存读占比；含糊输入不从旧 cached_tokens 推断。
@@ -1327,6 +1334,7 @@
     var highlight = -1;
     var outsideBound = false;
     var viewportBound = false;
+    var nextId = 1;
 
     function optionsOf(select) {
       return select && select.options ? Array.prototype.slice.call(select.options) : [];
@@ -1364,34 +1372,65 @@
       highlight = -1;
       if (outsideBound && win.removeEventListener) {
         win.removeEventListener('mousedown', onOutside, true);
+        try { if (win.parent && win.parent !== win) win.parent.removeEventListener('mousedown', onOutside, true); } catch (err) {}
         outsideBound = false;
       }
       if (viewportBound && win.removeEventListener) {
         win.removeEventListener('resize', onViewport);
         win.removeEventListener('scroll', onViewport, true);
+        try {
+          if (win.parent && win.parent !== win) {
+            win.parent.removeEventListener('resize', onViewport);
+            win.parent.removeEventListener('scroll', onViewport, true);
+          }
+        } catch (err) {}
         viewportBound = false;
       }
+    }
+
+    function visibleViewport() {
+      var top = 0;
+      var left = 0;
+      var right = win.innerWidth;
+      var bottom = win.innerHeight;
+      try {
+        if (win.frameElement && win.parent && win.parent !== win) {
+          var frame = win.frameElement.getBoundingClientRect();
+          var parentTop = Math.max(0, -frame.top);
+          var parentLeft = Math.max(0, -frame.left);
+          var parentRight = Math.min(win.innerWidth, win.parent.innerWidth - frame.left);
+          var parentBottom = Math.min(win.innerHeight, win.parent.innerHeight - frame.top);
+          if (parentRight > parentLeft && parentBottom > parentTop) {
+            top = parentTop;
+            left = parentLeft;
+            right = parentRight;
+            bottom = parentBottom;
+          }
+        }
+      } catch (err) { /* 跨源宿主只使用插件自身视口。 */ }
+      return { top: top, left: left, right: right, bottom: bottom };
     }
 
     function placePopup() {
       if (!popup || !active || typeof active.trigger.getBoundingClientRect !== 'function') return;
       var rect = active.trigger.getBoundingClientRect();
+      var view = visibleViewport();
       var margin = 8;
-      var offset = 6;
+      var gap = 6;
       var maxHeight = 240;
-      var width = Math.max(0, Math.min(rect.width, win.innerWidth - margin * 2));
-      var left = Math.min(Math.max(rect.left, margin), Math.max(margin, win.innerWidth - width - margin));
-      var below = win.innerHeight - rect.bottom - margin - offset;
-      var above = rect.top - margin - offset;
+      var width = Math.max(0, Math.min(rect.width, view.right - view.left - margin * 2));
+      var left = Math.min(Math.max(rect.left, view.left + margin), Math.max(view.left + margin, view.right - width - margin));
+      var below = view.bottom - rect.bottom - margin - gap;
+      var above = rect.top - view.top - margin - gap;
       popup.style.left = left + 'px';
       popup.style.width = width + 'px';
       popup.style.maxHeight = Math.max(0, Math.min(maxHeight, below >= maxHeight || below >= above ? below : above)) + 'px';
       if (below >= maxHeight || below >= above) {
-        popup.style.top = (rect.bottom + offset) + 'px';
+        popup.style.top = (rect.bottom + gap) + 'px';
         popup.style.bottom = 'auto';
       } else {
         popup.style.top = 'auto';
-        popup.style.bottom = (win.innerHeight - rect.top + offset) + 'px';
+        popup.style.bottom = (win.innerHeight - rect.top + gap) + 'px';
       }
     }
 
@@ -1426,8 +1465,11 @@
         item.addEventListener('click', function () { commit(index); });
         popup.appendChild(item);
       });
-      if (highlight >= 0) active.trigger.setAttribute('aria-activedescendant', select.id + '-option-' + highlight);
-      else active.trigger.removeAttribute('aria-activedescendant');
+      if (highlight >= 0) {
+        active.trigger.setAttribute('aria-activedescendant', select.id + '-option-' + highlight);
+        var current = popup.childNodes[highlight];
+        if (current && current.scrollIntoView) current.scrollIntoView({ block: 'nearest' });
+      } else active.trigger.removeAttribute('aria-activedescendant');
     }
 
     function commit(index) {
@@ -1449,7 +1491,7 @@
       if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'Home' || key === 'End') {
         event.preventDefault();
         if (!popup) open(record);
-        moveHighlight(record.select, key === 'ArrowUp' || key === 'Home' ? -1 : 1, key === 'Home' || key === 'End');
+        else moveHighlight(record.select, key === 'ArrowUp' || key === 'Home' ? -1 : 1, key === 'Home' || key === 'End');
         paintOptions();
       } else if ((key === 'Enter' || key === ' ') && popup) {
         event.preventDefault();
@@ -1476,18 +1518,33 @@
       record.trigger.setAttribute('aria-controls', popup.id);
       record.trigger.setAttribute('aria-expanded', 'true');
       var selected = optionsOf(record.select).findIndex(function (option) { return option.value === record.select.value && !option.disabled; });
-      highlight = selected >= 0 ? selected : (enabledIndexes(record.select)[0] || -1);
+      var enabled = enabledIndexes(record.select);
+      highlight = selected >= 0 ? selected : (enabled.length ? enabled[0] : -1);
       paintOptions();
       placePopup();
       if (!outsideBound) {
         win.addEventListener('mousedown', onOutside, true);
+        try {
+          if (win.parent && win.parent !== win) win.parent.addEventListener('mousedown', onOutside, true);
+        } catch (err) { /* 跨源宿主不能监听父级点击。 */ }
         outsideBound = true;
       }
       if (!viewportBound) {
         win.addEventListener('resize', onViewport);
         win.addEventListener('scroll', onViewport, true);
+        try {
+          if (win.parent && win.parent !== win) {
+            win.parent.addEventListener('resize', onViewport);
+            win.parent.addEventListener('scroll', onViewport, true);
+          }
+        } catch (err) { /* 跨源宿主不能监听父级几何变化。 */ }
         viewportBound = true;
       }
+    }
+
+    function labelFor(select) {
+      if (!select.id || !doc.querySelector) return null;
+      return doc.querySelector('label[for="' + select.id + '"]');
     }
 
     function recordFor(select) {
@@ -1526,9 +1583,22 @@
         record.trigger.appendChild(icon);
         record.wrap.appendChild(record.trigger);
         select.classList.add('select-native');
-        if (!select.hasAttribute('tabindex')) select.tabIndex = -1;
+        select.tabIndex = -1;
+        select.setAttribute('aria-hidden', 'true');
+        if (!select.id) select.id = 'observer-select-' + nextId++;
+        select.addEventListener('focus', function () {
+          if (record.trigger && !select.disabled) record.trigger.focus();
+        });
         select.addEventListener('change', function () { syncRecord(record); });
+        if (labelFor(select)) {
+          labelFor(select).addEventListener('click', function (event) {
+            if (select.disabled) return;
+            event.preventDefault();
+            record.trigger.focus();
+          });
+        }
       }
+      if (active === record && popup) paintOptions();
       var compact = select.id === 'key-group-kind' || (select.id && select.id.indexOf('unit-') === 0);
       record.trigger.className = 'btn select-trigger' + (compact ? ' is-compact' : '');
       record.trigger.disabled = !!select.disabled;
@@ -1537,7 +1607,7 @@
       record.trigger.setAttribute('aria-expanded', active === record && popup ? 'true' : 'false');
       if (select.id) record.trigger.id = select.id + '-trigger';
       var labelledBy = select.getAttribute('aria-labelledby');
-      var label = select.id ? doc.querySelector('label[for="' + select.id + '"]') : null;
+      var label = labelFor(select);
       if (labelledBy) record.trigger.setAttribute('aria-labelledby', labelledBy);
       else if (label && label.id) record.trigger.setAttribute('aria-labelledby', label.id);
       else if (label) record.trigger.setAttribute('aria-label', label.textContent || '');
@@ -1878,10 +1948,13 @@
     function showRange() {
       if (!els.rangeLabel) return;
       if (state.bounds) {
-        setText(els.rangeLabel, '已应用范围 ' + formatTime(state.bounds.from) + ' ~ ' + formatTime(state.bounds.to) +
+        setText(els.rangeLabel, '已应用范围 ' + formatRangeTime(state.bounds.from) + ' ~ ' + formatRangeTime(state.bounds.to) +
           '（请求记录受现有保留时长限制，不会补造更早记录）' +
           (state.draftPending ? ' · 时间草稿未应用' : ''));
         els.rangeLabel.className = 'range-label' + (state.draftPending ? ' is-pending' : '');
+      } else if (state.range) {
+        setText(els.rangeLabel, '待应用范围 ' + formatRangeTime(state.range.from) + ' ~ ' + formatRangeTime(state.range.to));
+        els.rangeLabel.className = 'range-label is-pending';
       } else {
         setText(els.rangeLabel, state.draftPending ? '时间草稿未应用' : '');
       }
@@ -1894,7 +1967,6 @@
     function fillDraft(bounds, pending) {
       if (els.timeStart) els.timeStart.value = isoToLocalInput(bounds.from);
       if (els.timeEnd) els.timeEnd.value = isoToLocalInput(bounds.to);
-      state.draftBounds = { ok: true, from: bounds.from, to: bounds.to };
       state.draftPending = pending === true;
       if (els.timeError) setText(els.timeError, '');
       showRange();
@@ -1902,29 +1974,29 @@
 
     function markDraftPending() {
       state.draftPending = true;
-      state.draftBounds = null;
       if (els.timeError) setText(els.timeError, '');
       showRange();
     }
 
-    function applyDraft(resetPage) {
-      var draft = state.draftBounds || currentDraft();
+    function applyDraft() {
+      if (saving) return false;
+      var draft = currentDraft();
       if (!draft.ok) {
         if (els.timeError) setText(els.timeError, draft.message);
         state.draftPending = true;
         showRange();
         return false;
       }
-      state.bounds = { from: draft.from, to: draft.to };
+      state.range = { from: draft.from, to: draft.to };
       state.draftPending = false;
       if (els.timeError) setText(els.timeError, '');
       showRange();
-      if (resetPage) state.offset = 0;
       return true;
     }
 
     function pageActions() {
       var pending = !state.connected || state.loadingPage || state.refreshing || saving;
+      if (els.timeApply) els.timeApply.disabled = !state.connected || saving;
       els.requestsPrev.disabled = pending || state.offset === 0;
       els.requestsNext.disabled = pending || !state.hasMore || state.offset > 2147483647 - REQUEST_PAGE_LIMIT;
       els.identityApply.disabled = pending;
@@ -2065,13 +2137,13 @@
     }
 
     function refreshAll(preserveSettingsStatus) {
-      if (!state.connected || saving || !state.bounds) return;
+      if (!state.connected || saving || !state.range) return;
       abortQuery();
       abortMore();
       var controller = newController();
       queryAbort = controller;
       var token = queryGate.begin();
-      var bounds = { from: state.bounds.from, to: state.bounds.to };
+      var bounds = { from: state.range.from, to: state.range.to };
       state.refreshing = true;
       pageActions();
       showRange();
@@ -2415,13 +2487,17 @@
         if (els.key && typeof els.key.focus === 'function') els.key.focus();
         return;
       }
-      if (!applyDraft(true)) {
+      if (state.connected && state.range && !state.draftPending) {
+        /* 重连沿用当前已验证范围，不在保存中的异步流程里重读可能失焦的输入。 */
+      } else if (!applyDraft()) {
         setStatus(currentDraft().message || '请先填写有效时间范围', 'error');
         return;
       }
-      var applied = { from: state.bounds.from, to: state.bounds.to };
+      var applied = { from: state.range.from, to: state.range.to };
       disconnect();
-      state.bounds = applied;
+      state.bounds = null;
+      state.range = applied;
+      state.offset = 0;
       state.draftPending = false;
       showRange();
       state.key = key;
@@ -2478,7 +2554,7 @@
     if (els.timeStart) els.timeStart.addEventListener('input', markDraftPending);
     if (els.timeEnd) els.timeEnd.addEventListener('input', markDraftPending);
     if (els.timeApply) els.timeApply.addEventListener('click', function () {
-      if (!applyDraft(true)) return;
+      if (saving || !applyDraft()) return;
       if (state.connected) refreshAll();
     });
 
@@ -2548,6 +2624,7 @@
     formatBytes: formatBytes,
     formatDuration: formatDuration,
     formatTime: formatTime,
+    formatRangeTime: formatRangeTime,
     localInputToIso: localInputToIso,
     isoToLocalInput: isoToLocalInput,
     draftRange: draftRange,

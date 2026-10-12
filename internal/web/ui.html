@@ -50,7 +50,7 @@
         </div>
       </section>
       <section class="toolbar card" aria-label="筛选条件">
-        <div class="controls">
+        <div class="controls range-controls">
           <div class="seg" role="group" aria-label="时间范围">
             <button class="btn seg-btn is-active" type="button" data-range="24h">24 小时</button>
             <button class="btn seg-btn" type="button" data-range="7d">7 天</button>
@@ -58,13 +58,15 @@
           </div>
           <div class="filter time-filter">
             <label for="time-start">开始时间</label>
-            <input id="time-start" type="datetime-local" data-testid="time-start" />
+            <input id="time-start" type="datetime-local" step="0.001" data-testid="time-start" />
           </div>
           <div class="filter time-filter">
             <label for="time-end">结束时间</label>
-            <input id="time-end" type="datetime-local" data-testid="time-end" />
+            <input id="time-end" type="datetime-local" step="0.001" data-testid="time-end" />
           </div>
           <button id="time-apply" class="btn btn-secondary" type="button" data-testid="time-apply">应用时间</button>
+        </div>
+        <div class="controls identity-controls">
           <div class="filter">
             <label for="filter-provider">Provider</label>
             <select id="filter-provider" data-testid="filter-provider">
