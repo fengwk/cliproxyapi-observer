@@ -319,9 +319,104 @@ test('自定义时间草稿转 UTC，并拒绝缺失、归一化或起止颠倒'
   assert.equal(ui.draftRange(start, start).ok, false);
 });
 
-test('请求命中率与缓存读占比只使用明确计数', () => {
-  assert.equal(ui.requestHitRate({ requests: 0, cache_hits: 1 }).text, '—');
-  assert.equal(ui.requestHitRate({ requests: 4, cache_hits: 1 }).text, '25.0%');
+test('聚合 Token 缓存命中率与单条缓存读占比', () => {
+  // 1. token weighted 80/1000=8% vs avg40%/request50%
+  const weighted = {
+    requests: 2,
+    cache_accounting: { requests: 2, input_tokens: 1000, cache_read_tokens: 80 }
+  };
+  const wRate = ui.aggregateTokenCacheRate(weighted);
+  assert.equal(wRate.valid, true);
+  assert.equal(wRate.rate, 0.08);
+  assert.equal(wRate.rateText, '8.0%');
+  assert.equal(wRate.coverageText, '完整核算 2/2 请求');
+  assert.match(wRate.title, /80\/1,000/);
+
+  // 2. 部分核算且原始 read 污染仍正确（不使用污染的 raw 字段）
+  const polluted = {
+    requests: 5,
+    input_tokens: 9999999,
+    cache_read_tokens: 8888888,
+    cache_accounting: { requests: 2, input_tokens: 1000, cache_read_tokens: 80 }
+  };
+  const pRate = ui.aggregateTokenCacheRate(polluted);
+  assert.equal(pRate.valid, true);
+  assert.equal(pRate.rateText, '8.0%');
+  assert.equal(pRate.coverageText, '完整核算 2/5 请求');
+
+  // 3. zero input -> ratio null / 显示 —（不能当 0% 未命中）
+  const zeroInput = {
+    requests: 2,
+    cache_accounting: { requests: 2, input_tokens: 0, cache_read_tokens: 0 }
+  };
+  const zRate = ui.aggregateTokenCacheRate(zeroInput);
+  assert.equal(zRate.valid, true);
+  assert.equal(zRate.rate, null);
+  assert.equal(zRate.rateText, '—');
+  assert.equal(zRate.coverageText, '完整核算 2/2 请求');
+  assert.match(zRate.title, /无输入 Token/);
+
+  // 4. no requests -> ratio null / 显示 —
+  const noReq = {
+    requests: 0,
+    cache_accounting: { requests: 0, input_tokens: 0, cache_read_tokens: 0 }
+  };
+  const nRate = ui.aggregateTokenCacheRate(noReq);
+  assert.equal(nRate.valid, true);
+  assert.equal(nRate.rate, null);
+  assert.equal(nRate.rateText, '—');
+  assert.equal(nRate.coverageText, '完整核算 0/0 请求');
+
+  // 5. complete-with-cache-write：缓存写入作为输入分母一部分，不计入分子，不平均单条
+  const writeItem = {
+    requests: 1,
+    cache_accounting: { requests: 1, input_tokens: 1000, cache_read_tokens: 200 }
+  };
+  const wrRate = ui.aggregateTokenCacheRate(writeItem);
+  assert.equal(wrRate.valid, true);
+  assert.equal(wrRate.rateText, '20.0%');
+
+  // 6. 异常与畸形输入拒绝：missing/null/negative/fractional/NaN/Infinity/numeric string/>safe/bad coverage/read>input/zero requests with tokens
+  const invalidCases = [
+    null,
+    undefined,
+    {},
+    { requests: 2 },
+    { requests: 2, cache_accounting: null },
+    { requests: 2, cache_accounting: undefined },
+    { requests: 2, cache_accounting: [] },
+    { requests: -1, cache_accounting: { requests: 0, input_tokens: 0, cache_read_tokens: 0 } },
+    { requests: 2, cache_accounting: { requests: -1, input_tokens: 10, cache_read_tokens: 0 } },
+    { requests: 2, cache_accounting: { requests: 2, input_tokens: -10, cache_read_tokens: 0 } },
+    { requests: 2, cache_accounting: { requests: 2, input_tokens: 10, cache_read_tokens: -5 } },
+    { requests: 2.5, cache_accounting: { requests: 2, input_tokens: 10, cache_read_tokens: 0 } },
+    { requests: 2, cache_accounting: { requests: 1.5, input_tokens: 10, cache_read_tokens: 0 } },
+    { requests: 2, cache_accounting: { requests: 2, input_tokens: 10.5, cache_read_tokens: 0 } },
+    { requests: 2, cache_accounting: { requests: 2, input_tokens: 10, cache_read_tokens: 1.5 } },
+    { requests: NaN, cache_accounting: { requests: 2, input_tokens: 10, cache_read_tokens: 0 } },
+    { requests: 2, cache_accounting: { requests: NaN, input_tokens: 10, cache_read_tokens: 0 } },
+    { requests: 2, cache_accounting: { requests: 2, input_tokens: Infinity, cache_read_tokens: 0 } },
+    { requests: 2, cache_accounting: { requests: 2, input_tokens: 10, cache_read_tokens: Infinity } },
+    { requests: '2', cache_accounting: { requests: 2, input_tokens: 10, cache_read_tokens: 0 } },
+    { requests: 2, cache_accounting: { requests: '2', input_tokens: 10, cache_read_tokens: 0 } },
+    { requests: 2, cache_accounting: { requests: 2, input_tokens: '10', cache_read_tokens: 0 } },
+    { requests: 2, cache_accounting: { requests: 2, input_tokens: 10, cache_read_tokens: '0' } },
+    { requests: Number.MAX_SAFE_INTEGER + 1, cache_accounting: { requests: 0, input_tokens: 0, cache_read_tokens: 0 } },
+    { requests: 10, cache_accounting: { requests: Number.MAX_SAFE_INTEGER + 1, input_tokens: 0, cache_read_tokens: 0 } },
+    { requests: 2, cache_accounting: { requests: 3, input_tokens: 100, cache_read_tokens: 10 } },
+    { requests: 2, cache_accounting: { requests: 2, input_tokens: 50, cache_read_tokens: 60 } },
+    { requests: 2, cache_accounting: { requests: 0, input_tokens: 10, cache_read_tokens: 0 } },
+    { requests: 2, cache_accounting: { requests: 0, input_tokens: 0, cache_read_tokens: 5 } }
+  ];
+  for (const item of invalidCases) {
+    const res = ui.aggregateTokenCacheRate(item);
+    assert.equal(res.valid, false);
+    assert.equal(res.rate, null);
+    assert.equal(res.rateText, '—');
+    assert.equal(res.coverageText, '完整核算未知');
+  }
+
+  // 7. 单条请求 cacheReadShare 严格校验完整与互斥分桶
   const complete = {
     accounting_quality: 'complete', input_tokens: 100, cache_read_tokens: 0,
     cache_creation_tokens: 20, uncached_input_tokens: 80
@@ -338,7 +433,12 @@ test('请求命中率与缓存读占比只使用明确计数', () => {
     { accounting_quality: 'complete', input_tokens: 10, cache_read_tokens: 12, cache_creation_tokens: 0, uncached_input_tokens: -2 },
     { accounting_quality: 'complete', input_tokens: 10, cache_read_tokens: 4, cache_creation_tokens: 4, uncached_input_tokens: 1, cached_tokens: 9 }
   ]) assert.equal(ui.cacheReadShare(item).text, '—');
-  assert.equal(ui.buildGroupRows([{ requests: 2, cache_hits: 1 }])[0].hitRate, '50.0%');
+
+  // 8. buildGroupRows 使用 aggregateTokenCacheRate
+  const gRows = ui.buildGroupRows([{ requests: 2, cache_accounting: { requests: 2, input_tokens: 1000, cache_read_tokens: 80 } }]);
+  assert.equal(gRows[0].hitRate, '8.0%');
+  assert.equal(gRows[0].hitRateSub, '完整核算 2/2 请求');
+
   assert.equal(ui.buildRequestRows([complete])[0].cacheShare, '0.0%');
 });
 
@@ -823,12 +923,38 @@ test('settingsToPatch 同时保留旧 map 与有序规则，压缩后回读等�
   // 空规则数组与缺失在比较时归一。
   assert.equal(ui.patchesMatch({ ...saved, 'price-rules': [] }, { ...saved, 'price-rules': undefined }), true);
 });
-// The percentage is request-level, not a guessed token-level cache ratio.
-test('缓存请求命中率显示分子分母与零请求降级', () => {
-  const cache = ui.buildOverview({ requests: 4, cache_hits: 3 }).find((c) => c.key === 'cache');
-  assert.match(cache.sub, /75.*%/);
-  assert.match(cache.sub, /3\/4.*缓存读 Token > 0/);
-  assert.match(ui.buildOverview({ requests: 0 }).find((c) => c.key === 'cache').sub, /请求命中率 —/);
+// 概览缓存主卡展示 Token 命中率、读写计数与完整核算覆盖
+test('概览 Token 缓存命中率与完整核算覆盖展示及安全降级', () => {
+  const valid = ui.buildOverview({
+    requests: 4,
+    cache_read_tokens: 300,
+    cache_creation_tokens: 100,
+    cache_accounting: { requests: 3, input_tokens: 1000, cache_read_tokens: 250 }
+  }).find((c) => c.key === 'cache');
+  assert.equal(valid.label, '缓存命中率（Token）');
+  assert.equal(valid.value, '25.0%');
+  assert.match(valid.sub, /读 300 \/ 写 100/);
+  assert.match(valid.sub, /完整核算 3\/4 请求/);
+  assert.match(valid.title, /Σ完整cache_read \/ Σ完整input/);
+
+  // zero input
+  const zero = ui.buildOverview({
+    requests: 2,
+    cache_accounting: { requests: 2, input_tokens: 0, cache_read_tokens: 0 }
+  }).find((c) => c.key === 'cache');
+  assert.equal(zero.value, '—');
+  assert.match(zero.sub, /完整核算 2\/2 请求/);
+
+  // invalid / missing accounting
+  const missing = ui.buildOverview({ requests: 4, cache_hits: 3 }).find((c) => c.key === 'cache');
+  assert.equal(missing.value, '—');
+  assert.match(missing.sub, /完整核算未知/);
+  assert.match(missing.title, /完整核算数据缺失或不一致/);
+
+  // no data
+  const noData = ui.buildOverview(null).find((c) => c.key === 'cache');
+  assert.equal(noData.value, '—');
+  assert.equal(noData.sub, '');
 });
 
 // Use current CPA labels without retaining other credential or token fields.

@@ -600,3 +600,97 @@ test('summary 按客户端 key / 凭据 / provider 真实过滤并暴露内嵌�
     await server.close();
   }
 });
+
+test('cache_accounting 聚合契约：全局与过滤、groups/keys/series 一致且不随价格变化而改变', async () => {
+  const server = await mock.startServer();
+  try {
+    const sum = async (query) => (await (await fetch(
+      server.origin + mock.MANAGEMENT_BASE + '/summary' + (query || ''), { headers: AUTH_HEADER }
+    )).json());
+
+    // 1. 全局 summary：totals、groups、client_keys、credentials 均具备 cache_accounting 且自洽
+    const all = await sum('');
+    assert.ok(all.totals.cache_accounting, 'totals 必须包含 cache_accounting');
+    assert.equal(all.totals.cache_accounting.requests, 1082);
+    assert.equal(all.totals.cache_accounting.input_tokens, 4130000);
+    assert.equal(all.totals.cache_accounting.cache_read_tokens, 2100000);
+
+    // 验证 Σgroups.cache_accounting == totals.cache_accounting
+    const groupReqSum = all.groups.reduce((acc, g) => acc + g.cache_accounting.requests, 0);
+    const groupInputSum = all.groups.reduce((acc, g) => acc + g.cache_accounting.input_tokens, 0);
+    const groupReadSum = all.groups.reduce((acc, g) => acc + g.cache_accounting.cache_read_tokens, 0);
+    assert.equal(groupReqSum, all.totals.cache_accounting.requests);
+    assert.equal(groupInputSum, all.totals.cache_accounting.input_tokens);
+    assert.equal(groupReadSum, all.totals.cache_accounting.cache_read_tokens);
+
+    // 未分类模型（gemini）completeRequests 为 0，tokens 必须全部为 0
+    const geminiGroup = all.groups.find((g) => g.model === 'gemini-3-pro');
+    assert.deepEqual(geminiGroup.cache_accounting, { requests: 0, input_tokens: 0, cache_read_tokens: 0 });
+
+    // 验证 Σclient_keys == totals
+    const keyReqSum = all.client_keys.reduce((acc, k) => acc + k.cache_accounting.requests, 0);
+    const keyInputSum = all.client_keys.reduce((acc, k) => acc + k.cache_accounting.input_tokens, 0);
+    const keyReadSum = all.client_keys.reduce((acc, k) => acc + k.cache_accounting.cache_read_tokens, 0);
+    assert.equal(keyReqSum, all.totals.cache_accounting.requests);
+    assert.equal(keyInputSum, all.totals.cache_accounting.input_tokens);
+    assert.equal(keyReadSum, all.totals.cache_accounting.cache_read_tokens);
+
+    // 验证 Σcredentials == totals
+    const credReqSum = all.credentials.reduce((acc, c) => acc + c.cache_accounting.requests, 0);
+    const credInputSum = all.credentials.reduce((acc, c) => acc + c.cache_accounting.input_tokens, 0);
+    const credReadSum = all.credentials.reduce((acc, c) => acc + c.cache_accounting.cache_read_tokens, 0);
+    assert.equal(credReqSum, all.totals.cache_accounting.requests);
+    assert.equal(credInputSum, all.totals.cache_accounting.input_tokens);
+    assert.equal(credReadSum, all.totals.cache_accounting.cache_read_tokens);
+
+    // 验证 series 点均含有合法 cache_accounting
+    assert.ok(all.series.length > 0);
+    for (const pt of all.series) {
+      assert.ok(pt.cache_accounting, 'series point 必须包含 cache_accounting');
+      assert.ok(Number.isSafeInteger(pt.cache_accounting.requests));
+      assert.ok(Number.isSafeInteger(pt.cache_accounting.input_tokens));
+      assert.ok(Number.isSafeInteger(pt.cache_accounting.cache_read_tokens));
+      assert.ok(pt.cache_accounting.requests <= pt.requests);
+      assert.ok(pt.cache_accounting.cache_read_tokens <= pt.cache_accounting.input_tokens);
+    }
+
+    // 2. 筛选后的 summary 计数依然一致
+    const byKey = await sum('?client_key_id=' + mock.CLIENT_KEY_A);
+    assert.deepEqual(byKey.totals.cache_accounting, byKey.client_keys[0].cache_accounting);
+    const filteredGroupReq = byKey.groups.reduce((acc, g) => acc + g.cache_accounting.requests, 0);
+    assert.equal(filteredGroupReq, byKey.totals.cache_accounting.requests);
+
+    const geminiOnly = await sum('?provider=gemini');
+    assert.equal(geminiOnly.totals.requests, 152);
+    assert.deepEqual(geminiOnly.totals.cache_accounting, { requests: 0, input_tokens: 0, cache_read_tokens: 0 });
+
+    // 3. 价格变更前后，cache_accounting 严格不变（不因价格变动而改变）
+    const beforePricing = await sum('');
+    const patchRes = await fetch(server.origin + mock.MANAGEMENT_BASE + '/config', {
+      method: 'PATCH',
+      headers: AUTH_HEADER,
+      body: JSON.stringify({
+        prices: {
+          'gpt-5.1-codex': { input: 10, output: 20, 'cache-read': 5, 'cache-creation': 10 }
+        }
+      })
+    });
+    assert.equal(patchRes.status, 200);
+    const afterPricing = await sum('');
+    assert.notEqual(afterPricing.totals.cost_usd, beforePricing.totals.cost_usd, '成本已随价格变化');
+    assert.deepEqual(afterPricing.totals.cache_accounting, beforePricing.totals.cache_accounting, 'cache_accounting 必须不变');
+    assert.deepEqual(
+      afterPricing.groups.map((g) => g.cache_accounting),
+      beforePricing.groups.map((g) => g.cache_accounting),
+      'groups cache_accounting 必须不变'
+    );
+
+    // 4. 控制器支持注入 null / 覆盖测试
+    server.controls.cacheAccountingOverride = null;
+    const overridden = await sum('');
+    assert.equal(overridden.totals.cache_accounting, null);
+    server.controls.cacheAccountingOverride = undefined;
+  } finally {
+    await server.close();
+  }
+});

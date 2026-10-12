@@ -306,6 +306,7 @@ function buildIdentityGroupRows(activeGroups) {
     FIXTURE_IDENTITIES.forEach((_, i) => {
       const row = buckets[i];
       const input = row[0], uncached = row[1], cacheRead = row[2], cacheCreation = row[3], output = row[4];
+      const isComplete = t.quality === 'complete';
       perIdentity[i].push({
         provider: t.provider,
         model: t.model,
@@ -318,7 +319,9 @@ function buildIdentityGroupRows(activeGroups) {
         cache_creation_tokens: cacheCreation,
         total_tokens: input + output,
         quality: t.quality,
-        complete_requests: t.quality === 'complete' ? requestSplit[i] : 0
+        complete_requests: isComplete ? requestSplit[i] : 0,
+        complete_input_tokens: isComplete ? input : 0,
+        complete_cache_read_tokens: isComplete ? cacheRead : 0
       });
     });
   });
@@ -334,7 +337,8 @@ function aggregateGroups(rows, pricing) {
       g = {
         provider: row.provider, model: row.model, requests: 0, failed_requests: 0,
         input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0,
-        total_tokens: 0, cost: 0, priced: false, unpriced: 0
+        total_tokens: 0, complete_requests: 0, complete_input: 0, complete_read: 0,
+        cost: 0, priced: false, unpriced: 0
       };
       map.set(key, g);
     }
@@ -345,6 +349,9 @@ function aggregateGroups(rows, pricing) {
     g.cache_read_tokens += row.cache_read_tokens;
     g.cache_creation_tokens += row.cache_creation_tokens;
     g.total_tokens += row.total_tokens;
+    g.complete_requests += row.complete_requests;
+    g.complete_input += row.complete_input_tokens;
+    g.complete_read += row.complete_cache_read_tokens;
     // 成本按每行（身份 × 模型）自身的 token 计算后求和，保证与 client_keys /
     // credentials 的逐身份成本一致：totals = Σgroups = Σidentities。
     const cost = computeModelCost(
@@ -361,7 +368,12 @@ function aggregateGroups(rows, pricing) {
       provider: g.provider, model: g.model, requests: g.requests, failed_requests: g.failed_requests,
       input_tokens: g.input_tokens, output_tokens: g.output_tokens,
       cache_read_tokens: g.cache_read_tokens, cache_creation_tokens: g.cache_creation_tokens,
-      total_tokens: g.total_tokens, cost_usd: g.priced ? g.cost : null
+      total_tokens: g.total_tokens, cost_usd: g.priced ? g.cost : null,
+      cache_accounting: {
+        requests: g.complete_requests,
+        input_tokens: g.complete_input,
+        cache_read_tokens: g.complete_read
+      }
     };
     if (g.unpriced > 0) result.unpriced_requests = g.unpriced;
     out.push(result);
@@ -373,7 +385,8 @@ function identityTotals(rows, identity, pricing) {
   const totals = {
     requests: 0, failed_requests: identity.failed_requests,
     input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0,
-    total_tokens: 0, cache_hits: identity.cache_hits
+    total_tokens: 0, cache_hits: identity.cache_hits,
+    cache_accounting: { requests: 0, input_tokens: 0, cache_read_tokens: 0 }
   };
   let cost = 0, priced = false, unpriced = 0;
   rows.forEach((row) => {
@@ -383,6 +396,9 @@ function identityTotals(rows, identity, pricing) {
     totals.cache_read_tokens += row.cache_read_tokens;
     totals.cache_creation_tokens += row.cache_creation_tokens;
     totals.total_tokens += row.total_tokens;
+    totals.cache_accounting.requests += row.complete_requests;
+    totals.cache_accounting.input_tokens += row.complete_input_tokens;
+    totals.cache_accounting.cache_read_tokens += row.complete_cache_read_tokens;
     const c = computeModelCost(
       row.model, row.uncached_input_tokens, row.output_tokens, row.cache_read_tokens,
       row.cache_creation_tokens, row.quality, pricing, BASE_TIME
@@ -435,6 +451,11 @@ function buildSeries(selected, pricing) {
         time: point.time, requests, failed_requests: s[1],
         total_tokens: input + output, input_tokens: input, output_tokens: output,
         cache_read_tokens: cacheRead, cache_creation_tokens: cacheCreation,
+        cache_accounting: {
+          requests: requests,
+          input_tokens: input,
+          cache_read_tokens: cacheRead
+        },
         latency_ns: requests * 900000000, latency_samples: requests,
         ttft_ns: requests * 250000000, ttft_samples: requests,
         cost_usd: cost, unpriced_requests: cost === null ? requests : 0
@@ -446,6 +467,7 @@ function buildSeries(selected, pricing) {
     const merged = {
       time: point.time, requests: 0, failed_requests: 0, total_tokens: 0, input_tokens: 0,
       output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0,
+      cache_accounting: { requests: 0, input_tokens: 0, cache_read_tokens: 0 },
       latency_ns: 0, latency_samples: 0, ttft_ns: 0, ttft_samples: 0, cost_usd: null, unpriced_requests: 0
     };
     let priced = false;
@@ -458,6 +480,9 @@ function buildSeries(selected, pricing) {
       merged.output_tokens += p.output_tokens;
       merged.cache_read_tokens += p.cache_read_tokens;
       merged.cache_creation_tokens += p.cache_creation_tokens;
+      merged.cache_accounting.requests += p.cache_accounting.requests;
+      merged.cache_accounting.input_tokens += p.cache_accounting.input_tokens;
+      merged.cache_accounting.cache_read_tokens += p.cache_accounting.cache_read_tokens;
       merged.latency_ns += p.latency_ns;
       merged.latency_samples += p.latency_samples;
       merged.ttft_ns += p.ttft_ns;
@@ -486,6 +511,7 @@ function buildSummary(pricing, filter) {
   const totals = {
     requests: 0, failed_requests: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 45678,
     cache_read_tokens: 0, cache_creation_tokens: 0, total_tokens: 0, cache_hits: 0,
+    cache_accounting: { requests: 0, input_tokens: 0, cache_read_tokens: 0 },
     latency_ns: 0, latency_samples: 0, ttft_ns: 0, ttft_samples: 0, cost_usd: null, unpriced_requests: 0
   };
   const clientKeys = [];
@@ -501,6 +527,9 @@ function buildSummary(pricing, filter) {
     totals.cache_creation_tokens += t.cache_creation_tokens;
     totals.total_tokens += t.total_tokens;
     totals.cache_hits += t.cache_hits;
+    totals.cache_accounting.requests += t.cache_accounting.requests;
+    totals.cache_accounting.input_tokens += t.cache_accounting.input_tokens;
+    totals.cache_accounting.cache_read_tokens += t.cache_accounting.cache_read_tokens;
     totals.latency_ns += t.latency_ns;
     totals.latency_samples += t.latency_samples;
     totals.ttft_ns += t.ttft_ns;
@@ -775,7 +804,9 @@ function createHandlerState(options) {
     requestsDelayMs: 0,
     totalRequestsCount: TOTAL_FIXTURE_REQUESTS,
     customRequestsItems: null,
-    credentialFiles: defaultCredentialFiles()
+    credentialFiles: defaultCredentialFiles(),
+    cacheAccountingOverride: undefined,
+    summaryOverride: null
   };
 
   const counters = {
@@ -803,6 +834,8 @@ function createHandlerState(options) {
     controls.totalRequestsCount = TOTAL_FIXTURE_REQUESTS;
     controls.customRequestsItems = null;
     controls.credentialFiles = defaultCredentialFiles();
+    controls.cacheAccountingOverride = undefined;
+    controls.summaryOverride = null;
 
     counters.validations = 0;
     counters.validateFailures = 0;
@@ -822,6 +855,12 @@ function createHandlerState(options) {
       const pathname = url.pathname;
 
       // 1. Mock Control 接口
+      if (pathname === '/favicon.ico') {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
       if (pathname === '/__mock/control') {
         if (req.method === 'POST') {
           const body = await readJsonBody(req);
@@ -942,12 +981,19 @@ function createHandlerState(options) {
           switch (endpoint) {
             case 'summary':
               counters.summaryReads += 1;
-              return json(res, 200, buildSummary(effectiveSettings, {
+              const summaryData = buildSummary(effectiveSettings, {
                 provider: url.searchParams.get('provider') || '',
                 model: url.searchParams.get('model') || '',
                 client_key_id: url.searchParams.get('client_key_id') || '',
                 auth_index: url.searchParams.get('auth_index') || ''
-              }));
+              });
+              if (controls.cacheAccountingOverride !== undefined) {
+                summaryData.totals.cache_accounting = controls.cacheAccountingOverride;
+              }
+              if (controls.summaryOverride) {
+                Object.assign(summaryData, controls.summaryOverride);
+              }
+              return json(res, 200, summaryData);
             case 'requests': {
               counters.requestsReads += 1;
               if (controls.simulateRequests500) {

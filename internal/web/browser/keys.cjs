@@ -67,13 +67,14 @@ async function main() {
       [['', '全部'], ['unknown', '未归属（含旧记录）']]
     );
 
-    // 1. 上游凭据展示短名称截断，title 暴露完整凭据名称；缓存命中率带分子分母并显式标注。
+    // 1. 上游凭据展示短名称截断，title 暴露完整凭据名称；Token 缓存命中率展示百分比与完整核算覆盖。
     assert.match(await page.locator('#requests-body').textContent(), /工作账户（fake-fi…/);
     assert.match(await page.locator('#requests-body').textContent(), /备用账户（fake-fi…/);
     assert.ok(await page.locator('#requests-body td[title="工作账户（fake-file-a.json）"]').count() > 0);
     assert.ok(await page.locator('#requests-body td[title="备用账户（fake-file-b.json）"]').count() > 0);
-    assert.match(await page.locator('[data-metric="cache"]').textContent(), /请求命中率.*812\/1,234/);
-    results.push('current CPA labels with auth file names and explicit request-level cache ratio');
+    assert.match(await page.locator('[data-metric="cache"]').textContent(), /50\.8%/);
+    assert.match(await page.locator('[data-metric="cache"]').textContent(), /完整核算.*1,082\/1,234/);
+    results.push('current CPA labels with auth file names and explicit token cache ratio with coverage');
 
     // 2. 请求表点击完整指纹：只显示 12 位前缀，筛选使用完整 64 位。
     const keyCell = page.locator('#requests-body td.cell-clickable').first();

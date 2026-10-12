@@ -268,13 +268,58 @@
     };
   }
 
-  function requestHitRate(source) {
-    var requests = counter(source, 'requests');
-    var hits = counter(source, 'cache_hits');
-    if (!(requests > 0)) return { text: '—', title: '请求命中率 = cache_hits / requests（无请求）' };
+  // 仅完全合规的 cache_accounting 计算 token-weighted 缓存命中率与覆盖；
+  // 严格校验 numbers/finite/nonnegative safe integer，read <= input，completeRequests <= source.requests，
+  // 且 completeRequests == 0 时 tokens 只能为 0；输入为 0 时比率为 null（显示“—”）。
+  function aggregateTokenCacheRate(source) {
+    var unsupported = {
+      valid: false,
+      rate: null,
+      rateText: '—',
+      completeRequests: null,
+      totalRequests: null,
+      completeInputTokens: null,
+      completeReadTokens: null,
+      coverageText: '完整核算未知',
+      title: '完整核算数据缺失或不一致'
+    };
+    if (!source || typeof source !== 'object' || Array.isArray(source)) return unsupported;
+    var totalRequests = source.requests;
+    if (!nonnegativeInteger(totalRequests)) return unsupported;
+
+    var ca = source.cache_accounting;
+    if (!ca || typeof ca !== 'object' || Array.isArray(ca)) return unsupported;
+
+    var compReq = ca.requests;
+    var compInput = ca.input_tokens;
+    var compRead = ca.cache_read_tokens;
+
+    if (!nonnegativeInteger(compReq) || !nonnegativeInteger(compInput) || !nonnegativeInteger(compRead)) {
+      return unsupported;
+    }
+    if (compReq > totalRequests) return unsupported;
+    if (compRead > compInput) return unsupported;
+    if (compReq === 0 && (compInput !== 0 || compRead !== 0)) return unsupported;
+
+    var coverageText = '完整核算 ' + formatInt(compReq) + '/' + formatInt(totalRequests) + ' 请求';
+    var rate = compInput > 0 ? (compRead / compInput) : null;
+    var rateText = rate !== null ? formatRate(rate) : '—';
+    var title = '缓存命中率（Token）= Σ完整cache_read / Σ完整input（' +
+      (compInput > 0
+        ? (formatInt(compRead) + '/' + formatInt(compInput))
+        : (formatInt(compRead) + '/' + formatInt(compInput) + '；无输入 Token')) +
+      '）';
+
     return {
-      text: formatRate(hits / requests),
-      title: '请求命中率 = cache_hits / requests（' + formatInt(hits) + '/' + formatInt(requests) + '；缓存读 Token > 0）'
+      valid: true,
+      rate: rate,
+      rateText: rateText,
+      completeRequests: compReq,
+      totalRequests: totalRequests,
+      completeInputTokens: compInput,
+      completeReadTokens: compRead,
+      coverageText: coverageText,
+      title: title
     };
   }
 
@@ -315,7 +360,6 @@
     var total = counter(source, 'total_tokens');
     var cacheRead = counter(source, 'cache_read_tokens');
     var cacheCreation = counter(source, 'cache_creation_tokens');
-    var cacheHits = counter(source, 'cache_hits');
     var latency = counter(source, 'latency_ns');
     var latencySamples = counter(source, 'latency_samples');
     var ttft = counter(source, 'ttft_ns');
@@ -323,6 +367,7 @@
     var unpriced = counter(source, 'unpriced_requests');
     var cost = nullCost(source);
     var hasData = source !== null && source !== undefined;
+    var cacheRate = aggregateTokenCacheRate(source);
 
     return [
       {
@@ -346,13 +391,13 @@
       },
       {
         key: 'cache',
-        label: '缓存 Token',
-        value: hasData ? formatCompact(cacheRead + cacheCreation) : '—',
+        label: '缓存命中率（Token）',
+        value: hasData ? cacheRate.rateText : '—',
         sub: hasData
           ? '读 ' + formatCompact(cacheRead) + ' / 写 ' + formatCompact(cacheCreation) +
-            ' · 请求命中率 ' + (requests > 0 ? formatRate(cacheHits / requests) : '—') +
-            '（' + formatInt(cacheHits) + '/' + formatInt(requests) + '；缓存读 Token > 0）'
-          : ''
+            ' · ' + cacheRate.coverageText
+          : '',
+        title: hasData ? cacheRate.title : ''
       },
       {
         key: 'latency',
@@ -387,6 +432,7 @@
     for (var i = 0; i < list.length; i++) {
       var g = list[i];
       if (!g || typeof g !== 'object' || Array.isArray(g)) continue;
+      var rate = aggregateTokenCacheRate(g);
       rows.push({
         provider: toStr(g.provider) || '—',
         model: toStr(g.model) || '—',
@@ -396,8 +442,9 @@
         output: formatCompact(counter(g, 'output_tokens')),
         cacheRead: formatCompact(counter(g, 'cache_read_tokens')),
         cacheCreation: formatCompact(counter(g, 'cache_creation_tokens')),
-        hitRate: requestHitRate(g).text,
-        hitTitle: requestHitRate(g).title,
+        hitRate: rate.rateText,
+        hitRateSub: rate.coverageText,
+        hitTitle: rate.title,
         cost: aggregateCost(g),
         costUnpriced: nullCost(g) === null || counter(g, 'unpriced_requests') > 0,
         failedRaw: counter(g, 'failed_requests')
@@ -751,6 +798,7 @@
       var tile = doc.createElement('div');
       tile.className = 'metric';
       tile.setAttribute('data-metric', toStr(c.key));
+      if (c.title) tile.title = c.title;
       var label = doc.createElement('div');
       label.className = 'metric-label';
       setText(label, c.label);
@@ -787,9 +835,19 @@
       tr.appendChild(cell(doc, 'num col-secondary', r.output));
       tr.appendChild(cell(doc, 'num col-secondary', r.cacheRead));
       tr.appendChild(cell(doc, 'num col-secondary', r.cacheCreation));
-      var hit = cell(doc, 'num col-secondary', r.hitRate);
-      hit.title = r.hitTitle;
-      tr.appendChild(hit);
+      var hitTd = doc.createElement('td');
+      hitTd.className = 'num col-secondary';
+      hitTd.title = r.hitTitle;
+      var hitMain = doc.createElement('span');
+      setText(hitMain, r.hitRate);
+      hitTd.appendChild(hitMain);
+      if (r.hitRateSub) {
+        var hitSub = doc.createElement('span');
+        hitSub.className = 'muted';
+        setText(hitSub, r.hitRateSub);
+        hitTd.appendChild(hitSub);
+      }
+      tr.appendChild(hitTd);
       tr.appendChild(cell(doc, 'num' + (r.costUnpriced ? ' warn' : ''), r.cost));
       tbody.appendChild(tr);
     }
@@ -2116,13 +2174,24 @@
         td.appendChild(button); tr.appendChild(td);
         var requests = counter(group, 'requests');
         var cards = buildOverview(group);
+        var groupRate = aggregateTokenCacheRate(group);
         tr.appendChild(cell(doc, 'num', formatInt(requests)));
         tr.appendChild(cell(doc, 'num', formatInt(counter(group, 'failed_requests')) + ' / ' +
           (requests > 0 ? formatRate(counter(group, 'failed_requests') / requests) : '—')));
         tr.appendChild(cell(doc, 'num', cards[2].value + '（入 ' + formatCompact(counter(group, 'input_tokens')) + ' / 出 ' + formatCompact(counter(group, 'output_tokens')) + '）'));
-        tr.appendChild(cell(doc, 'num', formatCompact(counter(group, 'cache_read_tokens')) + ' / ' +
+        var cacheTd = doc.createElement('td');
+        cacheTd.className = 'num';
+        cacheTd.title = groupRate.title;
+        var cacheMain = doc.createElement('span');
+        setText(cacheMain, formatCompact(counter(group, 'cache_read_tokens')) + ' / ' +
           formatCompact(counter(group, 'cache_creation_tokens')) + ' · ' +
-          (requests > 0 ? formatRate(counter(group, 'cache_hits') / requests) : '—')));
+          groupRate.rateText);
+        cacheTd.appendChild(cacheMain);
+        var cacheSub = doc.createElement('span');
+        cacheSub.className = 'muted';
+        setText(cacheSub, groupRate.coverageText);
+        cacheTd.appendChild(cacheSub);
+        tr.appendChild(cacheTd);
         tr.appendChild(cell(doc, 'num', cards[4].value));
         tr.appendChild(cell(doc, 'num', cards[5].value));
         tr.appendChild(cell(doc, 'num', aggregateCost(group)));
@@ -2645,7 +2714,7 @@
     isoToLocalInput: isoToLocalInput,
     draftRange: draftRange,
     cacheReadShare: cacheReadShare,
-    requestHitRate: requestHitRate,
+    aggregateTokenCacheRate: aggregateTokenCacheRate,
     createSelectController: createSelectController,
     refreshSelects: function (win, doc) {
       if (win && win.__observerSelects) win.__observerSelects.refresh();
