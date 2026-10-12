@@ -148,22 +148,42 @@ type requestPage struct {
 	HasMore bool              `json:"has_more"`
 }
 
+type cacheAccountingView struct {
+	Requests        uint64 `json:"requests"`
+	InputTokens     uint64 `json:"input_tokens"`
+	CacheReadTokens uint64 `json:"cache_read_tokens"`
+}
+
 // summaryView mirrors the observer Summary wire shape.
 type summaryView struct {
 	Totals struct {
-		Requests         uint64  `json:"requests"`
-		InputTokens      uint64  `json:"input_tokens"`
-		OutputTokens     uint64  `json:"output_tokens"`
-		CacheReadTokens  uint64  `json:"cache_read_tokens"`
-		TotalTokens      uint64  `json:"total_tokens"`
-		CacheHits        uint64  `json:"cache_hits"`
-		UnpricedRequests uint64  `json:"unpriced_requests"`
-		CostUSD          float64 `json:"cost_usd"`
+		Requests         uint64              `json:"requests"`
+		InputTokens      uint64              `json:"input_tokens"`
+		OutputTokens     uint64              `json:"output_tokens"`
+		CacheReadTokens  uint64              `json:"cache_read_tokens"`
+		TotalTokens      uint64              `json:"total_tokens"`
+		CacheHits        uint64              `json:"cache_hits"`
+		UnpricedRequests uint64              `json:"unpriced_requests"`
+		CostUSD          float64             `json:"cost_usd"`
+		CacheAccounting  cacheAccountingView `json:"cache_accounting"`
 	} `json:"totals"`
 	Groups []struct {
-		Provider string `json:"provider"`
-		Model    string `json:"model"`
+		Provider        string              `json:"provider"`
+		Model           string              `json:"model"`
+		CacheAccounting cacheAccountingView `json:"cache_accounting"`
 	} `json:"groups"`
+	Series []struct {
+		Time            time.Time           `json:"time"`
+		CacheAccounting cacheAccountingView `json:"cache_accounting"`
+	} `json:"series"`
+	ClientKeys []struct {
+		ID              string              `json:"id"`
+		CacheAccounting cacheAccountingView `json:"cache_accounting"`
+	} `json:"client_keys"`
+	Credentials []struct {
+		ID              string              `json:"id"`
+		CacheAccounting cacheAccountingView `json:"cache_accounting"`
+	} `json:"credentials"`
 }
 
 func (h *harness) fetchRequests(t *testing.T) requestPage {
@@ -354,6 +374,34 @@ func TestSummaryPreservesFullModelIdentity(t *testing.T) {
 	}
 	if summary.Totals.CacheHits != requests {
 		t.Errorf("summary cache_hits = %d, want %d", summary.Totals.CacheHits, requests)
+	}
+	// The real native/API path must expose 4/10 = 40% token reuse, not the
+	// fixture's 100% request-level hit count, even when no price is configured.
+	wantCache := cacheAccountingView{
+		Requests: requests, InputTokens: requests * fixturePromptTokens, CacheReadTokens: requests * fixtureCachedTokens,
+	}
+	if summary.Totals.CacheAccounting != wantCache {
+		t.Errorf("summary cache_accounting = %+v, want %+v", summary.Totals.CacheAccounting, wantCache)
+	}
+	for _, group := range summary.Groups {
+		if group.CacheAccounting != wantCache {
+			t.Errorf("group cache_accounting = %+v, want %+v", group.CacheAccounting, wantCache)
+		}
+	}
+	var seriesCache cacheAccountingView
+	for _, point := range summary.Series {
+		seriesCache.Requests += point.CacheAccounting.Requests
+		seriesCache.InputTokens += point.CacheAccounting.InputTokens
+		seriesCache.CacheReadTokens += point.CacheAccounting.CacheReadTokens
+	}
+	if seriesCache != wantCache {
+		t.Errorf("series cache_accounting sum = %+v, want %+v", seriesCache, wantCache)
+	}
+	if len(summary.ClientKeys) != 1 || len(summary.Credentials) != 1 {
+		t.Fatalf("cache key views = %d/%d, want 1/1", len(summary.ClientKeys), len(summary.Credentials))
+	}
+	if summary.ClientKeys[0].CacheAccounting != wantCache || summary.Credentials[0].CacheAccounting != wantCache {
+		t.Errorf("key cache_accounting differs from totals: %+v / %+v", summary.ClientKeys, summary.Credentials)
 	}
 	if summary.Totals.UnpricedRequests != requests {
 		t.Errorf("summary unpriced_requests = %d, want %d", summary.Totals.UnpricedRequests, requests)

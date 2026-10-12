@@ -442,6 +442,11 @@ func TestMigration_PartialRequestsMixed(t *testing.T) {
 	if sum.Totals.Requests != 5 {
 		t.Errorf("Summary Requests want 5, got %d", sum.Totals.Requests)
 	}
+	// Only retained complete rows may supply the historical cache ratio.
+	wantCache := CacheAccounting{Requests: 2, InputTokens: 150, CacheReadTokens: 30}
+	if sum.Totals.CacheAccounting == nil || *sum.Totals.CacheAccounting != wantCache {
+		t.Errorf("partial legacy cache accounting = %+v, want %+v", sum.Totals.CacheAccounting, wantCache)
+	}
 	// 5 total requests - 2 complete = 3 unpriced
 	if sum.Totals.UnpricedRequests != 3 {
 		t.Errorf("Summary UnpricedRequests want 3, got %d", sum.Totals.UnpricedRequests)
@@ -517,6 +522,10 @@ func TestMigration_PartialNoRequestsDetails(t *testing.T) {
 	}
 	if sum.Totals.Requests != 3 {
 		t.Errorf("Summary Requests want 3, got %d", sum.Totals.Requests)
+	}
+	// Missing request details cannot turn unknown historical input into misses.
+	if sum.Totals.CacheAccounting == nil || *sum.Totals.CacheAccounting != (CacheAccounting{}) {
+		t.Errorf("unrecoverable legacy cache accounting = %+v, want empty partition", sum.Totals.CacheAccounting)
 	}
 	if sum.Totals.UnpricedRequests != 3 {
 		t.Errorf("Summary UnpricedRequests want 3, got %d", sum.Totals.UnpricedRequests)

@@ -39,7 +39,7 @@ jobs:
         run: go test -race ./...
 
       - name: UI tests
-        run: node --test internal/web/ui.test.cjs
+        run: node --test internal/web/ui.test.cjs internal/web/browser/mock-server.test.cjs
 
       - name: Automation script tests
         env:

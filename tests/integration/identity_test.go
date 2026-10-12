@@ -105,9 +105,23 @@ func TestRequestKeyIdentitiesAndRestart(t *testing.T) {
 			t.Fatal("listed fixture credential has no display name")
 		}
 	}
-	status, _, _ = h.managementRequest(t, http.MethodGet, "/v0/management/plugins/"+pluginID+"/summary?client_key_id="+first.ClientKeyID)
+	status, _, raw = h.managementRequest(t, http.MethodGet, "/v0/management/plugins/"+pluginID+"/summary?client_key_id="+first.ClientKeyID)
 	if status != http.StatusOK {
 		t.Fatal("summary key filtering failed")
+	}
+	// Cache accounting follows the selected identity through the real API.
+	var filtered summaryView
+	if err := json.Unmarshal(raw, &filtered); err != nil {
+		t.Fatalf("decode filtered summary: %v", err)
+	}
+	n := filtered.Totals.Requests
+	wantCache := cacheAccountingView{
+		Requests: n, InputTokens: n * fixturePromptTokens, CacheReadTokens: n * fixtureCachedTokens,
+	}
+	if n == 0 || filtered.Totals.CacheAccounting != wantCache ||
+		len(filtered.ClientKeys) != 1 || filtered.ClientKeys[0].ID != first.ClientKeyID ||
+		filtered.ClientKeys[0].CacheAccounting != wantCache {
+		t.Fatalf("filtered cache accounting does not match identity: %+v", filtered)
 	}
 	h.Stop()
 	db, err := os.ReadFile(h.dbPath)

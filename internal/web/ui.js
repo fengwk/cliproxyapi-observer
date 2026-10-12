@@ -268,9 +268,7 @@
     };
   }
 
-  // 仅完全合规的 cache_accounting 计算 token-weighted 缓存命中率与覆盖；
-  // 严格校验 numbers/finite/nonnegative safe integer，read <= input，completeRequests <= source.requests，
-  // 且 completeRequests == 0 时 tokens 只能为 0；输入为 0 时比率为 null（显示“—”）。
+  // 分子分母必须来自同一完整核算分区，不回退到全量原始计数；零输入不是缓存未命中。
   function aggregateTokenCacheRate(source) {
     var unsupported = {
       valid: false,

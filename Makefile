@@ -45,7 +45,7 @@ vet:
 
 test: vet
 	go test ./...
-	node --test internal/web/ui.test.cjs
+	node --test internal/web/ui.test.cjs internal/web/browser/mock-server.test.cjs
 
 race:
 	go test -race ./...

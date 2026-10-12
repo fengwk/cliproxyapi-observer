@@ -1,20 +1,7 @@
 'use strict';
 
-/*
- * Observer 聚合缓存 Token 命中率与完整核算覆盖的浏览器端精确回归。
- *
- * 验证目标：
- *  - 概览缓存主卡为「缓存命中率（Token）」，主值为 token-weighted 百分比，
- *    sub 显示读/写计数及「完整核算 X/Y 请求」，tooltip 为精确公式 Σ完整cache_read / Σ完整input。
- *  - 模型表（Groups）和 Key 分组表主 rate 同步使用该公式，可见换行显示覆盖，标题明确 Token。
- *  - 请求表统一缓存命中率/读占比语义（单条 read/input），不称写入为 hit。
- *  - 路由拦截模拟边界：
- *      - zero input => 显示“—”，绝不能当作 0% 未命中。
- *      - missing / null / 不一致 / 越界 => 比率“—”且覆盖为“完整核算未知”，不回退原始字段。
- *      - 部分核算且原始 read 污染 => 依然精确采用完整子集计算比率。
- *  - 3 主题（light / white / dark）× 1280px 桌面与 390px 窄屏截图输出，且无页面横向溢出。
- *  - 全程 0 浏览器控制台错误、0 pageerror、0 CSP 违规。
- */
+// Local mock only: verify weighted cache rates, coverage, invalid/zero input
+// fallbacks and three-theme desktop/mobile layout in real Chromium.
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -22,7 +9,8 @@ const path = require('node:path');
 const { chromium } = require('playwright');
 const mock = require('./mock-server.cjs');
 
-const OUT = process.argv[2] || path.join(process.env.TMPDIR || '/tmp', 'observer-cache-rate-evidence');
+const OUT = process.argv[2];
+if (!OUT) throw new Error('output directory required');
 const CHROMIUM_PATH = process.env.CHROMIUM_PATH || '/usr/bin/chromium';
 
 const results = [];
@@ -44,15 +32,17 @@ async function withStep(name, fn) {
   }
 }
 
-async function connect(page, secret) {
+function watchErrors(page) {
   page.on('dialog', (d) => { browserErrors.push('Forbidden native dialog: ' + d.message()); });
   page.on('pageerror', (err) => { browserErrors.push('Pageerror: ' + err.message); });
   page.on('console', (msg) => {
-    if (msg.type() === 'error' && !msg.text().includes('favicon.ico')) {
+    if (msg.type() === 'error') {
       browserErrors.push('Console error: ' + msg.text());
     }
   });
+}
 
+async function connect(page, secret) {
   await page.locator('#mgmt-key').fill(secret);
   await page.locator('#connect').click();
   await page.waitForFunction(() => {
@@ -75,6 +65,7 @@ async function main() {
     // -------------------------------------------------------------------------
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     const page = await context.newPage();
+    watchErrors(page);
     await page.goto(server.resourceURL, { waitUntil: 'load' });
     await connect(page, mock.SECRET);
 
@@ -180,6 +171,7 @@ async function main() {
     // -------------------------------------------------------------------------
     const edgeContext = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     const edgePage = await edgeContext.newPage();
+    watchErrors(edgePage);
 
     await withStep('边界 1：zero input => ratio 为“—”，不当作 0% 未命中', async () => {
       await edgePage.route('**/summary*', async (route) => {
@@ -302,6 +294,7 @@ async function main() {
             colorScheme
           });
           const p = await ctx.newPage();
+          watchErrors(p);
           await p.goto(server.resourceURL, { waitUntil: 'load' });
           await connect(p, mock.SECRET);
 
@@ -313,9 +306,10 @@ async function main() {
             await p.evaluate(() => document.documentElement.removeAttribute('data-theme'));
           }
 
-          // 等待动画和布局稳定
+          // 等待主题过渡和布局稳定，避免截图落在颜色的中间帧。
           await p.evaluate(() => new Promise((resolve) =>
             requestAnimationFrame(() => requestAnimationFrame(resolve))));
+          await p.waitForFunction(() => document.getAnimations().every((a) => a.playState !== 'running'));
 
           // 严格检测页面横向溢出
           const overflow = await p.evaluate(() =>
