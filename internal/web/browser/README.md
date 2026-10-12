@@ -25,6 +25,10 @@
   light/white/dark × 1280/390 截图与 `price-rules-results.json`。
 - `ui-polish.cjs`：时间草稿、固定 UTC 查询窗口、失败分页恢复、严格缓存占比、
   下拉键盘与禁用分组、长 iframe 定位、三主题 768px 布局及 44px 触控目标。
+- `cache-rate.cjs`：真实 Chromium 聚合缓存 Token 命中率（`Σ完整cache_read / Σ完整input`）
+  主指标与完整核算覆盖展示回归，包括概览主卡、模型分组与 Key 分组可见换行覆盖、
+  单条请求语义对齐、零输入降级为“—”（非 0%）、不一致/越界降级为“完整核算未知”、
+  部分核算隔离原始 read 污染，以及 3 主题 × 1280px / 390px 截图与无横向溢出断言。
 - `mock-server.test.cjs`：Node mock 合约回归。mock CSP 直接读取
   `internal/plugin/management.go` 的 `cspPolicy`，不会使用另一套策略。
 
@@ -50,6 +54,8 @@ NODE_PATH="$tmp/node_modules" CHROMIUM_PATH=/usr/bin/chromium \
 node internal/web/browser/price-rules.cjs "$tmp/price-rules-evidence"
 NODE_PATH="$tmp/node_modules" CHROMIUM_PATH=/usr/bin/chromium \
 node internal/web/browser/ui-polish.cjs "$tmp/polish-evidence"
+NODE_PATH="$tmp/node_modules" CHROMIUM_PATH=/usr/bin/chromium \
+node internal/web/browser/cache-rate.cjs "$tmp/cache-rate-evidence"
 node --test internal/web/ui.test.cjs internal/web/browser/mock-server.test.cjs
 ```
 
@@ -92,7 +98,7 @@ node --test internal/web/ui.test.cjs internal/web/browser/mock-server.test.cjs
 | 客户端 key / 上游凭据筛选 | 概览、趋势、分组与请求记录同源过滤；概览数值随身份变化；`offset` 重置为 0 |
 | 统一筛选工具栏 | 时间快捷、起止时间和应用时间位于独立范围行；Provider、模型、客户端 key、auth 与应用筛选位于独立身份行。桌面两行各自底部对齐，时间输入至少 240px；390px 各行自然换行且无横向溢出；无 `form` 与命名序列化入口 |
 | 时间草稿 | 24 小时 / 7 天 / 30 天只填写草稿。应用时间把本地输入精确转换为 UTC `from`/`to` 并重置第 1 页；非法草稿不发请求。刷新失败保留上次成功记录、页码和窗口，随后翻页仍使用该窗口 |
-| 缓存展示 | 请求命中率 = `cache_hits / requests`，无请求为“—”。缓存读占比 = `cache_read_tokens / input_tokens`，仅 complete、非负安全整数、分桶自洽且输入大于 0；否则“—” |
+| 缓存指标与完整核算覆盖 | 聚合主指标为 token-weighted 缓存命中率（`Σ完整cache_read / Σ完整input`），缓存写入计入输入分母，sub 显示读/写计数与可见完整核算覆盖（`完整核算 X/Y 请求`，输入为 0 显示“—”而非 0% 未命中，不一致/越界显示“完整核算未知”）；模型表和 Key 表标题明确 Token 并可见换行展示覆盖；单条请求列统一语义为“缓存读占比”（单条 `read / input`），不称写入为 hit |
 | 选择增强 | 原生 select 仍是唯一值来源；可见触发器为 combobox，单一 fixed listbox 支持点击、方向键、Enter、Escape 和 Tab。菜单按插件与父视口可见交集定位，刷新或重连不残留菜单 |
 | 完整指纹与凭据名称 | 客户端 key 为下拉选择（全部 / 未归属 / 已出现指纹，只显示 12 位前缀，无需手填），内部按完整 64 位指纹过滤，同一连接内已出现的指纹保留在候选中（重连后清空），点击请求行或分组身份同样按完整指纹过滤；上游凭据列更名为 auth，与客户端 key 一并截断超长文本（>12 字符）并通过 title hover 呈现完整凭据/指纹；模型列直接展示模型名称，无别名/核算/流式多行堆叠 |
 | Key 分组与维度切换 | `client_keys` / `credentials` 身份数组，未归属 id 为空；点击整行按完整 id 过滤，切换维度立即反映 |
@@ -127,6 +133,14 @@ node --test internal/web/ui.test.cjs internal/web/browser/mock-server.test.cjs
   不会与规则双写。价格在查询时按当前生效设置（first-match 规则，未命中回落 `prices`
   map）动态计算，不保留快照；更新规则后历史请求与 summary 成本立即反映。容量表单单位为
   MiB，转换结果必须为精确整数 bytes；不隐式裁剪越界数值。
+
+## 缓存聚合契约与核算覆盖（cache_accounting）
+
+- **后端契约**：`summary.totals`，以及各 `groups`、`series`、`client_keys`、`credentials` 聚合 Counters 包含：
+  `cache_accounting: { requests: <complete请求数>, input_tokens: <同集总输入uncached+cacheRead+cacheWrite>, cache_read_tokens: <同集缓存读> }` 或 `null`（不一致/不可安全得出）。
+- **核算覆盖定义**：`coverage = 完整核算 Requests / 全部 Requests`（包括完整 0 输入记录），不是仅统计“有 usage 字段的请求”或“命中的请求”。
+- **比率公式**：`Σ完整 cache_read / Σ完整 input`（token-weighted），缓存写入仅作为分母的一部分，不进行单条百分比平均。若 `input_tokens === 0`，比率显示 `—`，绝不作为 `0.0%` 未命中。
+- **前端严格校验**：校验嵌套字段为严格有限非负安全整数；`completeRequests <= source.requests`，`read <= input`，`completeRequests === 0` 时 tokens 只能为 0；缺失、null 或不一致时比率显示 `—`、覆盖显示 `完整核算未知`，绝不回退到全量未清洗原始 token 字段或旧 `cache_hits` 字段。
 
 mock 控制可直接使用 `startServer()` 返回的 `controls` / `counters`，或本地
 `POST /__mock/control` 与 `GET /__mock/counters`。支持校验失败、写入失败、配置回读失败、

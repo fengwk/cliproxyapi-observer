@@ -758,6 +758,14 @@ th.num {
   text-align: right;
 }
 
+td > .muted {
+  display: block;
+  font-size: 11px;
+  line-height: 1.25;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+}
+
 .empty-row td {
   color: var(--text-tertiary);
   text-align: center;

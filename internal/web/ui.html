@@ -137,7 +137,7 @@
                 <th class="num col-secondary">输出</th>
                 <th class="num col-secondary">缓存读</th>
                 <th class="num col-secondary">缓存写</th>
-                <th class="num col-secondary">请求命中率</th>
+                <th class="num col-secondary" title="缓存命中率（Token）= Σ完整cache_read / Σ完整input">缓存命中率（Token）</th>
                 <th class="num">成本</th>
               </tr>
             </thead>
@@ -162,7 +162,7 @@
                 <th>客户端 key</th>
                 <th>auth</th>
                 <th class="num col-secondary">Token</th>
-                <th class="num col-secondary">缓存读占比</th>
+                <th class="num col-secondary" title="缓存读占比 = cache_read_tokens / input_tokens（单条）">缓存读占比</th>
                 <th class="num">延迟</th>
                 <th class="num col-secondary">TTFT</th>
                 <th class="num col-secondary">TPS</th>
@@ -189,7 +189,7 @@
         </div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Key</th><th class="num">请求</th><th class="num">失败 / 失败率</th><th class="num">Token（输入 / 输出）</th><th class="num">缓存读 / 写 · 请求命中率</th><th class="num">平均延迟</th><th class="num">平均 TTFT</th><th class="num">成本</th></tr></thead>
+            <thead><tr><th>Key</th><th class="num">请求</th><th class="num">失败 / 失败率</th><th class="num">Token（输入 / 输出）</th><th class="num" title="缓存命中率（Token）= Σ完整cache_read / Σ完整input">缓存读 / 写 · 缓存命中率（Token）</th><th class="num">平均延迟</th><th class="num">平均 TTFT</th><th class="num">成本</th></tr></thead>
             <tbody id="keys-body"></tbody>
           </table>
         </div>
