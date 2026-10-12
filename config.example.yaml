@@ -29,6 +29,7 @@ plugins:
       body-retention: "24h"
       # Bodies are opt-in: capture stays off unless an operator enables it.
       capture-bodies: false
+      # Body caps must be positive; an explicit 0 (or negative) is rejected.
       max-body-bytes: 1048576
       max-body-storage-bytes: 268435456
       flush: "1s"

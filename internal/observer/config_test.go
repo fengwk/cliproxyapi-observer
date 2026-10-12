@@ -95,6 +95,9 @@ func TestParseConfigRejectsInvalid(t *testing.T) {
 		"zero stats days":               "stats-retention-days: 0",
 		"negative stats days":           "stats-retention-days: -3",
 		"negative max body bytes":       "max-body-bytes: -1",
+		"zero max body bytes":           "max-body-bytes: 0",
+		"negative max body storage":     "max-body-storage-bytes: -1",
+		"zero max body storage":         "max-body-storage-bytes: 0",
 		"per-body exceeds storage":      "max-body-bytes: 4096\nmax-body-storage-bytes: 1024",
 		"negative price":                "prices:\n  m:\n    input: -1",
 		"nan price":                     "prices:\n  m:\n    input: .nan",
@@ -125,6 +128,25 @@ func TestNormalizeConfigAcceptsZeroValue(t *testing.T) {
 	}
 	if cfg.DataPath != defaultDataPath || cfg.FlushInterval != defaultFlushInterval {
 		t.Errorf("defaults not applied: %+v", cfg)
+	}
+}
+
+// The YAML entry point owns explicit-value validation: a present but nonpositive
+// body cap is rejected, while an absent key keeps the documented default. This
+// is distinct from normalizeConfig, where a hand-built zero still means default.
+func TestParseConfigExplicitBodyCaps(t *testing.T) {
+	for _, raw := range []string{"max-body-bytes: 0", "max-body-storage-bytes: 0"} {
+		if _, err := ParseConfig([]byte(raw)); err == nil {
+			t.Errorf("ParseConfig(%q) accepted an explicit zero, want error", raw)
+		}
+	}
+	cfg, err := ParseConfig([]byte("capture-bodies: true"))
+	if err != nil {
+		t.Fatalf("ParseConfig with absent caps: %v", err)
+	}
+	if cfg.MaxBodyBytes != defaultMaxBodyBytes || cfg.MaxBodyStorageBytes != defaultMaxBodyStorageBytes {
+		t.Errorf("absent caps = %d/%d, want defaults %d/%d",
+			cfg.MaxBodyBytes, cfg.MaxBodyStorageBytes, defaultMaxBodyBytes, defaultMaxBodyStorageBytes)
 	}
 }
 

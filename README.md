@@ -232,8 +232,8 @@ POST /v0/management/plugins/cliproxyapi-observer/validate
 | `request-retention` | `24h` | 请求元数据保留时长 |
 | `body-retention` | `24h` | 正文保留时长，可缩短，不得超过 24h |
 | `capture-bodies` | `false` | 是否采集正文（敏感，默认关闭） |
-| `max-body-bytes` | `1048576` | 单条正文上限 |
-| `max-body-storage-bytes` | `268435456` | 正文总存储上限 |
+| `max-body-bytes` | `1048576` | 单条正文上限，须为正数（显式 `0` 或负值报错） |
+| `max-body-storage-bytes` | `268435456` | 正文总存储上限，须为正数（显式 `0` 或负值报错） |
 | `flush` | `1s` | 异步写批次间隔（默认批次 1s / 100 事件） |
 | `compact-interval` | `15m` | 自动压缩周期，范围 `1m..24h`（始终启用，无需开关） |
 | `compact-min-bytes` | `8388608` | 触发自动压缩的最小可回收页面字节数，范围 `64KiB..8GiB` |

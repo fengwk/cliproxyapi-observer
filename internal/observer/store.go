@@ -1010,22 +1010,30 @@ func (s *Store) cleanupBodiesTx(tx *bolt.Tx, now time.Time) (int64, error) {
 	if ib == nil || bb == nil || mb == nil {
 		return 0, nil
 	}
-	nowNanos := now.UnixNano()
-	retentionNS := int64(s.cfg.BodyRetention)
+	retention := s.cfg.BodyRetention
+	// Reconfiguration can mix persisted deadlines that are not in creation
+	// order. Check every entry against both its original and current expiry.
 	var removed int64
 	c := ib.Cursor()
 	for key, value := c.First(); key != nil; key, value = c.Next() {
-		createdAt, ok := decodeBodyIndexCreated(key)
-		if !ok {
+		if _, ok := decodeBodyIndexCreated(key); !ok {
 			if err := c.Delete(); err != nil {
 				return removed, err
 			}
 			continue
 		}
-		if createdAt.UnixNano()+retentionNS > nowNanos {
-			break
-		}
 		requestID := string(key[8:])
+		meta, ok := decodeBodyMeta(mb.Get([]byte(requestID)))
+		if !ok {
+			return removed, fmt.Errorf("corrupt body metadata")
+		}
+		deadline := meta.createdAt.Add(retention)
+		if meta.expiresAt.Before(deadline) {
+			deadline = meta.expiresAt
+		}
+		if deadline.After(now) {
+			continue
+		}
 		size, _ := decodeBodyIndexSize(value)
 		if err := deleteBodyTx(bb, mb, tbb, refs, requestID); err != nil {
 			return removed, err
@@ -1192,6 +1200,10 @@ drainLoop:
 // s.bodyBytes is owned by this goroutine; it is only committed on success.
 func (s *Store) writeBatch(usage []Request, bodies []pendingBody) error {
 	bodyBytes := s.bodyBytes
+	// Per-body rejections are counted inside the transaction but published
+	// only after it commits: a rollback must not double-count them on top of
+	// the whole-batch loss the flush error path already reports.
+	var droppedBodies int64
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		rb := tx.Bucket(bucketRequests)
 		sb := tx.Bucket(bucketStats)
@@ -1234,11 +1246,12 @@ func (s *Store) writeBatch(usage []Request, bodies []pendingBody) error {
 			}
 		}
 		for _, item := range bodies {
-			bytes, err := s.putBodyTx(bb, mb, ib, tbb, refs, item, &bodyBytes)
+			bytes, dropped, err := s.putBodyTx(bb, mb, ib, tbb, refs, item, &bodyBytes)
 			if err != nil {
 				return err
 			}
 			bodyBytes = bytes
+			droppedBodies += dropped
 		}
 		return nil
 	})
@@ -1246,30 +1259,31 @@ func (s *Store) writeBatch(usage []Request, bodies []pendingBody) error {
 		return err
 	}
 	s.bodyBytes = bodyBytes
+	if droppedBodies > 0 {
+		s.droppedBodies.Add(uint64(droppedBodies))
+	}
 	return nil
 }
 
 // putBodyTx stores a redacted body, maintaining the metadata, eviction index
 // and trace association, and evicts the oldest bodies when the cap is exceeded.
-func (s *Store) putBodyTx(bb, mb, ib, tbb, refs *bolt.Bucket, item pendingBody, bodyBytes *int64) (int64, error) {
+// It returns total stored bytes and a rejection count, published only on commit.
+func (s *Store) putBodyTx(bb, mb, ib, tbb, refs *bolt.Bucket, item pendingBody, bodyBytes *int64) (int64, int64, error) {
 	if !json.Valid(item.body) {
-		s.droppedBodies.Add(1)
-		return *bodyBytes, nil
+		return *bodyBytes, 1, nil
 	}
 	content, redacted, err := redactBody(item.body)
 	if err != nil {
 		// Fail closed: never persist a body we could not fully re-encode.
-		s.droppedBodies.Add(1)
-		return *bodyBytes, nil
+		return *bodyBytes, 1, nil
 	}
 	if len(content) > s.cfg.MaxBodyBytes {
-		s.droppedBodies.Add(1)
-		return *bodyBytes, nil
+		return *bodyBytes, 1, nil
 	}
 	requestID := []byte(item.requestID)
 	if mb.Get(requestID) != nil {
 		// Already captured; capture once per execution.
-		return *bodyBytes, nil
+		return *bodyBytes, 0, nil
 	}
 
 	createdAt := item.capturedAt
@@ -1280,7 +1294,7 @@ func (s *Store) putBodyTx(bb, mb, ib, tbb, refs *bolt.Bucket, item pendingBody, 
 	size := int64(len(content))
 
 	if err := bb.Put(requestID, content); err != nil {
-		return *bodyBytes, err
+		return *bodyBytes, 0, err
 	}
 	if err := mb.Put(requestID, encodeBodyMeta(bodyMeta{
 		createdAt: createdAt,
@@ -1289,20 +1303,20 @@ func (s *Store) putBodyTx(bb, mb, ib, tbb, refs *bolt.Bucket, item pendingBody, 
 		redacted:  redacted,
 		traceID:   item.traceID,
 	})); err != nil {
-		return *bodyBytes, err
+		return *bodyBytes, 0, err
 	}
 	if err := ib.Put(bodyIndexKey(createdAt, item.requestID), encodeBodyIndexValue(size)); err != nil {
-		return *bodyBytes, err
+		return *bodyBytes, 0, err
 	}
 	if err := recordTraceBody(tbb, refs, item.traceID, item.requestID); err != nil {
-		return *bodyBytes, err
+		return *bodyBytes, 0, err
 	}
 	*bodyBytes += size
 
 	if err := s.evictBodiesTx(bb, mb, ib, tbb, refs, bodyBytes); err != nil {
-		return *bodyBytes, err
+		return *bodyBytes, 0, err
 	}
-	return *bodyBytes, nil
+	return *bodyBytes, 0, nil
 }
 
 // evictBodiesTx enforces the current cap in oldest-first order. Accounting is

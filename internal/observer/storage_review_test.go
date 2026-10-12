@@ -80,6 +80,223 @@ func TestReopenBodyRetentionReadBoundary(t *testing.T) {
 	}
 }
 
+// Extending the retention knob must not extend an already persisted body
+// expiry: the sweeper deletes the old body at its original deadline while a
+// body captured after the change stays readable.
+func TestCleanupHonorsPersistedBodyExpiry(t *testing.T) {
+	cfg := testConfig(t, func(c *Config) {
+		c.CaptureBodies = true
+		c.BodyRetention = time.Minute
+		c.FlushInterval = time.Hour
+	})
+	s, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Truncate(time.Second)
+	clk := &clock{t: at}
+	s.setNow(clk.now)
+	if !captureTrace(s, "old-body", "trace-old", `{"owner":"old"}`) {
+		t.Fatal("capture old rejected")
+	}
+	flushAll(t, s)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen before the original 1m deadline, extending retention to 24h.
+	clk.advance(30 * time.Second)
+	cfg.BodyRetention = 24 * time.Hour
+	s, err = Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.setNow(clk.now)
+	if !captureTrace(s, "new-body", "trace-new", `{"owner":"new"}`) {
+		t.Fatal("capture new rejected")
+	}
+	flushAll(t, s)
+	live, err := s.Body("new-body")
+	if err != nil {
+		t.Fatalf("Body(new-body) before deadline: %v", err)
+	}
+
+	// Cross the old body's persisted deadline; the new body is still live.
+	clk.set(at.Add(2 * time.Minute))
+	if err := s.runCleanup(); err != nil {
+		t.Fatalf("runCleanup: %v", err)
+	}
+	flushAll(t, s)
+
+	if _, err := s.Body("old-body"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("expired old body read = %v, want ErrNotFound", err)
+	}
+	if _, err := s.Body("new-body"); err != nil {
+		t.Errorf("unexpired new body read = %v, want content", err)
+	}
+	for _, tc := range []struct {
+		bucket []byte
+		want   int
+	}{
+		{bucketBodies, 1}, {bucketBodyMeta, 1}, {bucketBodyIndex, 1},
+		{bucketTraceBody, 1}, {bucketTraceBodyRefs, 1},
+	} {
+		if got := bucketCount(t, s, tc.bucket); got != tc.want {
+			t.Errorf("%s count = %d, want %d", tc.bucket, got, tc.want)
+		}
+	}
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		mb := tx.Bucket(bucketBodyMeta)
+		if mb.Get([]byte("old-body")) != nil {
+			t.Error("expired body metadata not physically deleted")
+		}
+		if mb.Get([]byte("new-body")) == nil {
+			t.Error("live body metadata was deleted")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if s.bodyBytes != live.SizeBytes {
+		t.Errorf("bodyBytes = %d, want %d", s.bodyBytes, live.SizeBytes)
+	}
+}
+
+// A later-created body can expire before an earlier-created one when the
+// retention knob changed between captures. The sweeper must evaluate every
+// index entry instead of stopping at the first still-live record.
+func TestCleanupMixedBodyRetentionScansAllEntries(t *testing.T) {
+	cfg := testConfig(t, func(c *Config) {
+		c.CaptureBodies = true
+		c.BodyRetention = 24 * time.Hour
+		c.FlushInterval = time.Hour
+	})
+	s, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Truncate(time.Second)
+	clk := &clock{t: at}
+	s.setNow(clk.now)
+	if !captureTrace(s, "long-body", "trace-long", `{"ttl":"long"}`) {
+		t.Fatal("capture long rejected")
+	}
+	flushAll(t, s)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second, later body is captured under a 1m window; then 24h returns.
+	clk.advance(30 * time.Second)
+	cfg.BodyRetention = time.Minute
+	s, err = Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.setNow(clk.now)
+	if !captureTrace(s, "short-body", "trace-short", `{"ttl":"short"}`) {
+		t.Fatal("capture short rejected")
+	}
+	flushAll(t, s)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.BodyRetention = 24 * time.Hour
+	s, err = Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.setNow(clk.now)
+
+	// Past the short body's persisted expiry, well within the long window.
+	clk.set(at.Add(2 * time.Minute))
+	if err := s.runCleanup(); err != nil {
+		t.Fatalf("runCleanup: %v", err)
+	}
+	flushAll(t, s)
+
+	if _, err := s.Body("long-body"); err != nil {
+		t.Errorf("live long-TTL body = %v, want content", err)
+	}
+	if _, err := s.Body("short-body"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("expired short-TTL body = %v, want ErrNotFound", err)
+	}
+	for _, name := range [][]byte{bucketBodies, bucketBodyMeta, bucketBodyIndex, bucketTraceBody, bucketTraceBodyRefs} {
+		if got := bucketCount(t, s, name); got != 1 {
+			t.Errorf("%s count = %d, want 1 (only the long-TTL body)", name, got)
+		}
+	}
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		mb := tx.Bucket(bucketBodyMeta)
+		if mb.Get([]byte("short-body")) != nil {
+			t.Error("expired short-TTL body metadata survived")
+		}
+		if mb.Get([]byte("long-body")) == nil {
+			t.Error("live long-TTL body metadata was deleted")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Per-body rejections must be counted exactly once: a committed batch
+// publishes only the bodies it rejected, while a rolled-back batch is counted
+// by the whole-batch loss path and must not also carry its local tally.
+func TestBatchCountsLostBodiesOnce(t *testing.T) {
+	t.Run("committed-batch-counts-only-rejected-bodies", func(t *testing.T) {
+		s := openTestStore(t, func(c *Config) {
+			c.CaptureBodies = true
+			c.FlushInterval = time.Hour
+		})
+		if !captureBody(s, "bad-body", `{"broken": `) {
+			t.Fatal("capture invalid rejected")
+		}
+		if !captureBody(s, "good-body", `{"good":true}`) {
+			t.Fatal("capture valid rejected")
+		}
+		flushAll(t, s)
+		if got := s.Status().DroppedBodies; got != 1 {
+			t.Errorf("DroppedBodies = %d, want 1", got)
+		}
+		if _, err := s.Body("good-body"); err != nil {
+			t.Errorf("valid body not stored: %v", err)
+		}
+	})
+
+	t.Run("rolled-back-batch-counts-whole-batch-once", func(t *testing.T) {
+		s := openTestStore(t, func(c *Config) {
+			c.CaptureBodies = true
+			c.FlushInterval = time.Hour
+		})
+		// A nested bucket at a body key makes bbolt Put fail deterministically,
+		// so the batch that also holds an invalid body rolls back as a whole.
+		if err := s.db.Update(func(tx *bolt.Tx) error {
+			_, err := tx.Bucket(bucketBodies).CreateBucket([]byte("fault-body"))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if !captureBody(s, "bad-body", `{"broken": `) || !captureBody(s, "fault-body", `{"valid":true}`) {
+			t.Fatal("capture rejected")
+		}
+		if err := s.Flush(context.Background()); !errors.Is(err, bolt.ErrIncompatibleValue) {
+			t.Fatalf("Flush = %v, want ErrIncompatibleValue", err)
+		}
+		// Two observations are lost exactly once; the invalid body must not be
+		// counted again by the rollback.
+		if got := s.Status().DroppedBodies; got != 2 {
+			t.Errorf("DroppedBodies = %d, want 2", got)
+		}
+		if got := s.Status().WriteErrors; got != 1 {
+			t.Errorf("WriteErrors = %d, want 1", got)
+		}
+	})
+}
+
 // Startup must enforce a reduced byte cap, with no new captures or Flush.
 func TestReopenLowerBodyStorageCap(t *testing.T) {
 	cfg := testConfig(t, func(c *Config) {

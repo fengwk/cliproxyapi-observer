@@ -133,9 +133,18 @@ func ParseConfig(raw []byte) (Config, error) {
 			cfg.CaptureBodies = *in.CaptureBodies
 		}
 		if in.MaxBodyBytes != nil {
+			// Config owns explicit-value validation: an explicit zero or
+			// negative is a configuration error, not a request to fall back
+			// to the default.
+			if *in.MaxBodyBytes < 1 {
+				return Config{}, fmt.Errorf("max-body-bytes must be positive, got %d", *in.MaxBodyBytes)
+			}
 			cfg.MaxBodyBytes = *in.MaxBodyBytes
 		}
 		if in.MaxBodyStorageBytes != nil {
+			if *in.MaxBodyStorageBytes < 1 {
+				return Config{}, fmt.Errorf("max-body-storage-bytes must be positive, got %d", *in.MaxBodyStorageBytes)
+			}
 			cfg.MaxBodyStorageBytes = *in.MaxBodyStorageBytes
 		}
 		if strings.TrimSpace(in.Flush) != "" {
