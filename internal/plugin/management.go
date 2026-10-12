@@ -582,7 +582,7 @@ func statsRange(cfg observer.Config) time.Duration {
 
 // parseQuery builds an observation query from management query parameters.
 //
-// The range defaults to the last 24h. When align is set (summary) the bounds are
+// The window defaults to 24h. When align is set (summary) the bounds are
 // snapped to whole minutes so the returned Summary.From/To are minute-aligned,
 // and the default upper bound is the next minute boundary so the current minute
 // is included. Validate the requested interval before bucket alignment so
@@ -597,9 +597,6 @@ func (m *Manager) parseQuery(values url.Values, maxRange time.Duration, align, w
 	}
 	if to.IsZero() {
 		to = upper
-	}
-	if to.After(upper) {
-		return observer.Query{}, &httpError{status: http.StatusBadRequest, message: "'to' must not be in the future"}
 	}
 
 	from, err := parseTimeParam(values.Get("from"))

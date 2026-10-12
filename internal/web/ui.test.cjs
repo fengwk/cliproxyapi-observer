@@ -319,6 +319,16 @@ test('自定义时间草稿转 UTC，并拒绝缺失、归一化或起止颠倒'
   assert.equal(ui.draftRange(start, start).ok, false);
 });
 
+// The UI preserves future bounds; server time is not a client-side ceiling.
+test('未来时间草稿允许应用并保留输入窗口', () => {
+  const from = '2099-12-30T00:00:00.000Z';
+  const to = '2099-12-31T00:00:00.000Z';
+  const range = ui.draftRange(ui.isoToLocalInput(from), ui.isoToLocalInput(to));
+  assert.equal(range.ok, true);
+  assert.equal(range.from, from);
+  assert.equal(range.to, to);
+});
+
 test('聚合 Token 缓存命中率与单条缓存读占比', () => {
   // 1. token weighted 80/1000=8% vs avg40%/request50%
   const weighted = {

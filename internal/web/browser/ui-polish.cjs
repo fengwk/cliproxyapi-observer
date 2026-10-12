@@ -165,6 +165,29 @@ async function main() {
     assert.notEqual(new Date(converted[0]).getUTCHours(), 8);
     results.push('manual datetime-local values convert exactly to the requested UTC bounds');
 
+    // Future end times remain part of the applied, fixed query window.
+    const futureBounds = await page.evaluate(() => {
+      const now = Date.now();
+      return {
+        from: window.ObserverUI.isoToLocalInput(new Date(now - 3600000).toISOString()),
+        to: window.ObserverUI.isoToLocalInput(new Date(now + 3600000).toISOString())
+      };
+    });
+    await page.locator('#time-start').fill(futureBounds.from);
+    await page.locator('#time-end').fill(futureBounds.to);
+    await page.locator('#time-apply').click();
+    await page.locator('#conn-status').filter({ hasText: '已更新' }).waitFor();
+    const futureQuery = calls.filter((url) => url.pathname.endsWith('/summary')).at(-1);
+    const futureTo = futureQuery.searchParams.get('to');
+    assert.equal(Date.parse(futureTo) > Date.now(), true);
+    assert.equal(await page.locator('#time-error').textContent(), '');
+    assert.equal((await page.locator('#range-label').textContent()).includes(
+      await page.evaluate((value) => window.ObserverUI.formatRangeTime(value), futureTo)), true);
+    await page.locator('#refresh').click();
+    await page.locator('#conn-status').filter({ hasText: '已更新' }).waitFor();
+    assert.equal(calls.filter((url) => url.pathname.endsWith('/requests')).at(-1).searchParams.get('to'), futureTo);
+    results.push('future end times are applied and preserved on refresh without a client ceiling');
+
     const embed = await browser.newPage({ viewport: { width: 1280, height: 500 } });
     await embed.goto(server.embedURL);
     const frame = embed.frames().find((item) => item.url().includes('/ui'));

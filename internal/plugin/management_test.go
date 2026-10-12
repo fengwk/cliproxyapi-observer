@@ -170,13 +170,70 @@ func TestSummaryMinuteAlignedBoundsAndValidation(t *testing.T) {
 	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/summary", empty); resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("empty summary status = %d, want 400", resp.StatusCode)
 	}
-	// A future upper bound is rejected.
+	// Future upper bounds are valid and keep the explicitly requested window.
 	future := url.Values{"to": {managementNow.Add(time.Hour).Format(time.RFC3339)}}
-	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/summary", future); resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("future summary status = %d, want 400", resp.StatusCode)
+	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/summary", future); resp.StatusCode != http.StatusOK {
+		t.Errorf("future summary status = %d, want 200", resp.StatusCode)
+	}
+	query, _ = opener.last().lastQuery()
+	if !query.To.Equal(managementNow.Add(time.Hour)) {
+		t.Errorf("future upper bound was changed: %+v", query)
 	}
 	if resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/summary", url.Values{"from": {"not-a-time"}}); resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("malformed summary status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// Both routes accept future bounds without clamping them to the current clock,
+// while empty/reversed intervals stay invalid before minute alignment.
+func TestFutureQueryBounds(t *testing.T) {
+	cfg := observerConfigFixture()
+	cfg.StatsRetentionDays = 1
+	opener := &fakeOpener{cfg: cfg}
+	m := registeredManager(t, opener)
+	now := managementNow.Add(37*time.Second + 123*time.Millisecond)
+	m.now = func() time.Time { return now }
+
+	for _, route := range []string{"summary", "requests"} {
+		for _, tc := range []struct {
+			name   string
+			from   time.Time
+			to     time.Time
+			status int
+		}{
+			{"past-through-future", now.Add(-time.Hour), now.Add(time.Hour), http.StatusOK},
+			{"future-only", now.Add(time.Hour), now.Add(2 * time.Hour), http.StatusOK},
+			{"default-from-future-to", time.Time{}, now.Add(time.Hour), http.StatusOK},
+			{"far-future-default-window", time.Time{}, now.Add(4000 * 24 * time.Hour), http.StatusOK},
+			{"exact-24h-through-future", now.Add(-12 * time.Hour), now.Add(12 * time.Hour), http.StatusOK},
+			{"future-empty", now.Add(time.Hour), now.Add(time.Hour), http.StatusBadRequest},
+			{"future-reversed", now.Add(2 * time.Hour), now.Add(time.Hour), http.StatusBadRequest},
+		} {
+			t.Run(route+"/"+tc.name, func(t *testing.T) {
+				values := url.Values{"to": {tc.to.Format(time.RFC3339Nano)}}
+				if !tc.from.IsZero() {
+					values.Set("from", tc.from.Format(time.RFC3339Nano))
+				}
+				resp := callManagement(t, m, http.MethodGet, "/v0/management/plugins/cliproxyapi-observer/"+route, values)
+				if resp.StatusCode != tc.status {
+					t.Fatalf("status = %d, want %d: %s", resp.StatusCode, tc.status, resp.Body)
+				}
+				if tc.status != http.StatusOK {
+					return
+				}
+				wantFrom, wantTo := tc.from, tc.to
+				if wantFrom.IsZero() {
+					wantFrom = wantTo.Add(-defaultQueryWindow)
+				}
+				if route == "summary" {
+					wantFrom, wantTo = wantFrom.Truncate(time.Minute), alignUp(wantTo)
+				}
+				got, ok := opener.last().lastQuery()
+				if !ok || !got.From.Equal(wantFrom) || !got.To.Equal(wantTo) {
+					t.Fatalf("forwarded bounds = %+v, want %s .. %s", got, wantFrom, wantTo)
+				}
+			})
+		}
 	}
 }
 

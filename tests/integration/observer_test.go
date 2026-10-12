@@ -598,7 +598,10 @@ func TestQueryRangesAcceptedAndBounded(t *testing.T) {
 		{"summary 7d", "/summary", "?from=" + at(-7*24*time.Hour), http.StatusOK},
 		{"summary 30d", "/summary", "?from=" + at(-30*24*time.Hour), http.StatusOK},
 		{"beyond retention", "/requests", "?from=" + at(-4000*24*time.Hour), http.StatusBadRequest},
-		{"future upper", "/requests", "?to=" + at(time.Hour), http.StatusBadRequest},
+		{"requests future upper", "/requests", "?to=" + at(time.Hour), http.StatusOK},
+		{"summary future upper", "/summary", "?to=" + at(time.Hour), http.StatusOK},
+		{"requests future-only", "/requests", "?from=" + at(time.Hour) + "&to=" + at(2*time.Hour), http.StatusOK},
+		{"summary future-only", "/summary", "?from=" + at(time.Hour) + "&to=" + at(2*time.Hour), http.StatusOK},
 		{"empty range", "/requests", "?from=" + at(0) + "&to=" + at(0), http.StatusBadRequest},
 		{"inverted range", "/summary", "?from=" + at(0) + "&to=" + at(-time.Hour), http.StatusBadRequest},
 	}
@@ -620,6 +623,35 @@ func TestQueryRangesAcceptedAndBounded(t *testing.T) {
 	}
 	if len(page.Items) == 0 {
 		t.Errorf("7d request window returned no retained observations")
+	}
+
+	// Future-ended windows must include existing records, not be silently
+	// shifted to the future or rejected by the real native management path.
+	status, _, body = h.managementRequest(t, http.MethodGet, "/v0/management/plugins/"+pluginID+"/requests?from="+at(-time.Hour)+"&to="+at(time.Hour))
+	if status != http.StatusOK || json.Unmarshal(body, &page) != nil || len(page.Items) == 0 {
+		t.Fatalf("future-ended requests lost observed records: status %d body %s", status, truncate(body, 200))
+	}
+	status, _, body = h.managementRequest(t, http.MethodGet, "/v0/management/plugins/"+pluginID+"/summary?from="+at(-time.Hour)+"&to="+at(time.Hour))
+	var futureSummary struct {
+		To time.Time `json:"to"`
+		summaryView
+	}
+	if status != http.StatusOK || json.Unmarshal(body, &futureSummary) != nil || futureSummary.Totals.Requests == 0 {
+		t.Fatalf("future-ended summary lost observed records: status %d body %s", status, truncate(body, 200))
+	}
+	if !futureSummary.To.After(now) {
+		t.Errorf("requested future summary bound was clamped: %s", futureSummary.To)
+	}
+
+	// A wholly future interval is valid but cannot invent request observations.
+	status, _, body = h.managementRequest(t, http.MethodGet, "/v0/management/plugins/"+pluginID+"/requests?from="+at(time.Hour)+"&to="+at(2*time.Hour))
+	if status != http.StatusOK || json.Unmarshal(body, &page) != nil || len(page.Items) != 0 || page.HasMore {
+		t.Fatalf("future-only requests must be empty: status %d body %s", status, truncate(body, 200))
+	}
+	status, _, body = h.managementRequest(t, http.MethodGet, "/v0/management/plugins/"+pluginID+"/summary?from="+at(time.Hour)+"&to="+at(2*time.Hour))
+	var emptySummary summaryView
+	if status != http.StatusOK || json.Unmarshal(body, &emptySummary) != nil || emptySummary.Totals.Requests != 0 {
+		t.Fatalf("future-only summary must be empty: status %d body %s", status, truncate(body, 200))
 	}
 }
 
