@@ -406,7 +406,7 @@ async function main() {
       // A previously retained complete request acquires a price after settings save.
       const initialClaudeRow = page.locator('#requests-body tr:has-text("claude-opus-4-1")').first();
       assert.ok(await initialClaudeRow.isVisible());
-      const initialClaudeCost = await initialClaudeRow.locator('td').nth(9).textContent();
+      const initialClaudeCost = await initialClaudeRow.locator('td').nth(10).textContent();
       assert.equal(initialClaudeCost, '未定价');
 
       // Verify initial summary total cost
@@ -431,10 +431,10 @@ async function main() {
         const rows = Array.from(document.querySelectorAll('#requests-body tr'));
         const r = rows.find((el) => el.textContent.includes('claude-opus-4-1'));
         if (!r) return false;
-        const c = r.querySelectorAll('td')[9];
+        const c = r.querySelectorAll('td')[10];
         return c && c.textContent.includes('$');
       });
-      const updatedClaudeCost = await page.locator('#requests-body tr:has-text("claude-opus-4-1")').first().locator('td').nth(9).textContent();
+      const updatedClaudeCost = await page.locator('#requests-body tr:has-text("claude-opus-4-1")').first().locator('td').nth(10).textContent();
       assert.match(updatedClaudeCost, /\$/);
 
       // Assert summary total cost has updated dynamically
@@ -448,7 +448,7 @@ async function main() {
         const rows = Array.from(document.querySelectorAll('#groups-body tr'));
         const r = rows.find((el) => el.textContent.includes('claude-opus-4-1'));
         if (!r) return false;
-        const c = r.querySelectorAll('td')[8];
+        const c = r.querySelectorAll('td')[9];
         return c && c.textContent.includes('$');
       });
     });

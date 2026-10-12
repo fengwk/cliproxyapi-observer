@@ -56,6 +56,15 @@
             <button class="btn seg-btn" type="button" data-range="7d">7 天</button>
             <button class="btn seg-btn" type="button" data-range="30d">30 天</button>
           </div>
+          <div class="filter time-filter">
+            <label for="time-start">开始时间</label>
+            <input id="time-start" type="datetime-local" data-testid="time-start" />
+          </div>
+          <div class="filter time-filter">
+            <label for="time-end">结束时间</label>
+            <input id="time-end" type="datetime-local" data-testid="time-end" />
+          </div>
+          <button id="time-apply" class="btn btn-secondary" type="button" data-testid="time-apply">应用时间</button>
           <div class="filter">
             <label for="filter-provider">Provider</label>
             <select id="filter-provider" data-testid="filter-provider">
@@ -84,7 +93,10 @@
           </div>
           <button id="identity-apply" class="btn btn-secondary" type="button" disabled>应用筛选</button>
         </div>
-        <span id="range-label" class="range-label" data-testid="range-label"></span>
+        <div class="toolbar-meta">
+          <span id="time-error" class="time-error" role="alert" aria-live="polite"></span>
+          <span id="range-label" class="range-label" data-testid="range-label"></span>
+        </div>
         <p id="credential-status" class="settings-note" role="status"></p>
       </section>
 
@@ -123,6 +135,7 @@
                 <th class="num col-secondary">输出</th>
                 <th class="num col-secondary">缓存读</th>
                 <th class="num col-secondary">缓存写</th>
+                <th class="num col-secondary">请求命中率</th>
                 <th class="num">成本</th>
               </tr>
             </thead>
@@ -135,6 +148,7 @@
         <div class="card-header">
           <h2>请求记录</h2>
           <span id="requests-note" class="muted"></span>
+          <p class="muted">请求记录受现有保留时长限制；选择更早的时间不会补造已过期记录。</p>
         </div>
         <div class="table-scroll">
           <table>
@@ -146,6 +160,7 @@
                 <th>客户端 key</th>
                 <th>auth</th>
                 <th class="num col-secondary">Token</th>
+                <th class="num col-secondary">缓存读占比</th>
                 <th class="num">延迟</th>
                 <th class="num col-secondary">TTFT</th>
                 <th class="num col-secondary">TPS</th>

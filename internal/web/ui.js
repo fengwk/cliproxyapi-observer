@@ -193,9 +193,82 @@
     if (isNaN(d.getTime())) return '—';
     var pad = function (x) { return x < 10 ? '0' + x : String(x); };
     return (
-      pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
+      d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
       pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds())
     );
+  }
+
+  function pad2(value) {
+    return value < 10 ? '0' + value : String(value);
+  }
+
+  // datetime-local 没有时区；按浏览器本地日历解释，再转成 UTC ISO。
+  function localInputToIso(value) {
+    var text = toStr(value).trim();
+    var match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/.exec(text);
+    if (!match) return '';
+    var year = Number(match[1]);
+    var month = Number(match[2]);
+    var day = Number(match[3]);
+    var hour = Number(match[4]);
+    var minute = Number(match[5]);
+    var second = match[6] === undefined ? 0 : Number(match[6]);
+    var milli = match[7] === undefined ? 0 : Number((match[7] + '00').slice(0, 3));
+    var date = new Date(year, month - 1, day, hour, minute, second, milli);
+    if (isNaN(date.getTime()) || date.getFullYear() !== year || date.getMonth() !== month - 1 ||
+        date.getDate() !== day || date.getHours() !== hour || date.getMinutes() !== minute ||
+        date.getSeconds() !== second || date.getMilliseconds() !== milli) return '';
+    return date.toISOString();
+  }
+
+  function isoToLocalInput(value) {
+    var date = value instanceof Date ? value : new Date(value);
+    if (isNaN(date.getTime())) return '';
+    var base = date.getFullYear() + '-' + pad2(date.getMonth() + 1) + '-' + pad2(date.getDate()) +
+      'T' + pad2(date.getHours()) + ':' + pad2(date.getMinutes()) + ':' + pad2(date.getSeconds());
+    var fraction = date.getMilliseconds();
+    return fraction ? base + '.' + (fraction < 10 ? '00' : fraction < 100 ? '0' : '') + fraction : base;
+  }
+
+  // 草稿必须两端都有且严格开始早于结束；非法或被日历归一化的值不产生查询范围。
+  function draftRange(startValue, endValue) {
+    var from = localInputToIso(startValue);
+    var to = localInputToIso(endValue);
+    if (!from || !to) return { ok: false, message: '请填写有效的开始和结束时间' };
+    if (!(Date.parse(from) < Date.parse(to))) return { ok: false, message: '开始时间必须早于结束时间' };
+    return { ok: true, from: from, to: to, message: '' };
+  }
+
+  function nonnegativeInteger(value) {
+    return typeof value === 'number' && isFinite(value) && value >= 0 && Math.floor(value) === value;
+  }
+
+  // 仅完整且自洽的互斥分桶允许计算缓存读占比；含糊输入不从旧 cached_tokens 推断。
+  function cacheReadShare(item) {
+    var it = item || {};
+    var unsupported = { text: '—', title: '核算质量不支持缓存读占比' };
+    if (toStr(it.accounting_quality).trim() !== EXACT_ACCOUNTING) return unsupported;
+    var input = it.input_tokens;
+    var read = it.cache_read_tokens;
+    var write = it.cache_creation_tokens;
+    var uncached = it.uncached_input_tokens;
+    if (!nonnegativeInteger(input) || !nonnegativeInteger(read) || !nonnegativeInteger(write) ||
+        !nonnegativeInteger(uncached) || input <= 0 || input < read || input - read < write ||
+        input - read - write !== uncached) return unsupported;
+    return {
+      text: formatRate(read / input),
+      title: '缓存读占比 = cache_read_tokens / input_tokens（' + formatInt(read) + '/' + formatInt(input) + '）'
+    };
+  }
+
+  function requestHitRate(source) {
+    var requests = counter(source, 'requests');
+    var hits = counter(source, 'cache_hits');
+    if (!(requests > 0)) return { text: '—', title: '请求命中率 = cache_hits / requests（无请求）' };
+    return {
+      text: formatRate(hits / requests),
+      title: '请求命中率 = cache_hits / requests（' + formatInt(hits) + '/' + formatInt(requests) + '；缓存读 Token > 0）'
+    };
   }
 
   function truncateText(value, maxLen) {
@@ -316,6 +389,8 @@
         output: formatCompact(counter(g, 'output_tokens')),
         cacheRead: formatCompact(counter(g, 'cache_read_tokens')),
         cacheCreation: formatCompact(counter(g, 'cache_creation_tokens')),
+        hitRate: requestHitRate(g).text,
+        hitTitle: requestHitRate(g).title,
         cost: aggregateCost(g),
         costUnpriced: nullCost(g) === null || counter(g, 'unpriced_requests') > 0,
         failedRaw: counter(g, 'failed_requests')
@@ -331,6 +406,7 @@
       var it = list[i] || {};
       var cacheRead = counter(it, 'cache_read_tokens');
       var cacheCreation = counter(it, 'cache_creation_tokens');
+      var share = cacheReadShare(it);
       var cost = nullCost(it);
       var quality = toStr(it.accounting_quality).trim();
       var tps = it.tps === null || it.tps === undefined ? null : Number(it.tps);
@@ -349,6 +425,8 @@
           '（入 ' + formatCompact(counter(it, 'input_tokens')) +
           ' / 出 ' + formatCompact(counter(it, 'output_tokens')) +
           ' / 缓存 ' + formatCompact(cacheRead + cacheCreation) + '）',
+        cacheShare: share.text,
+        cacheShareTitle: share.title,
         latency: formatLatency(it.latency_ns),
         ttft: formatLatency(it.ttft_ns),
         tps: formatTps(tps),
@@ -688,7 +766,7 @@
     clearChildren(tbody);
     var rows = buildGroupRows(groups);
     if (!rows.length) {
-      tbody.appendChild(emptyRow(doc, 9, '暂无数据'));
+      tbody.appendChild(emptyRow(doc, 10, '暂无数据'));
       return rows;
     }
     for (var i = 0; i < rows.length; i++) {
@@ -702,6 +780,9 @@
       tr.appendChild(cell(doc, 'num col-secondary', r.output));
       tr.appendChild(cell(doc, 'num col-secondary', r.cacheRead));
       tr.appendChild(cell(doc, 'num col-secondary', r.cacheCreation));
+      var hit = cell(doc, 'num col-secondary', r.hitRate);
+      hit.title = r.hitTitle;
+      tr.appendChild(hit);
       tr.appendChild(cell(doc, 'num' + (r.costUnpriced ? ' warn' : ''), r.cost));
       tbody.appendChild(tr);
     }
@@ -719,7 +800,7 @@
     clearChildren(tbody);
     var rows = buildRequestRows(items, credentials);
     if (!rows.length) {
-      tbody.appendChild(emptyRow(doc, 12, '暂无数据'));
+      tbody.appendChild(emptyRow(doc, 13, '暂无数据'));
       return rows;
     }
     for (var i = 0; i < rows.length; i++) {
@@ -753,6 +834,9 @@
       authCell.title = r.credential;
       tr.appendChild(authCell);
       tr.appendChild(cell(doc, 'num col-secondary', r.tokens));
+      var shareCell = cell(doc, 'num col-secondary', r.cacheShare);
+      shareCell.title = r.cacheShareTitle;
+      tr.appendChild(shareCell);
       tr.appendChild(cell(doc, 'num', r.latency));
       tr.appendChild(cell(doc, 'num col-secondary', r.ttft));
       tr.appendChild(cell(doc, 'num col-secondary', r.tps));
@@ -1236,6 +1320,257 @@
     };
   }
 
+  function createSelectController(win, doc) {
+    var records = [];
+    var popup = null;
+    var active = null;
+    var highlight = -1;
+    var outsideBound = false;
+    var viewportBound = false;
+
+    function optionsOf(select) {
+      return select && select.options ? Array.prototype.slice.call(select.options) : [];
+    }
+
+    function enabledIndexes(select) {
+      var indexes = [];
+      optionsOf(select).forEach(function (option, index) {
+        if (!option.disabled) indexes.push(index);
+      });
+      return indexes;
+    }
+
+    function moveHighlight(select, direction, edge) {
+      var indexes = enabledIndexes(select);
+      if (!indexes.length) return;
+      if (edge) {
+        highlight = direction < 0 ? indexes[0] : indexes[indexes.length - 1];
+        return;
+      }
+      var position = indexes.indexOf(highlight);
+      if (position < 0) highlight = indexes[0];
+      else highlight = indexes[(position + direction + indexes.length) % indexes.length];
+    }
+
+    function closePopup(restoreFocus) {
+      if (popup && popup.parentNode) popup.parentNode.removeChild(popup);
+      popup = null;
+      if (active && active.trigger) {
+        active.trigger.setAttribute('aria-expanded', 'false');
+        active.trigger.removeAttribute('aria-activedescendant');
+        if (restoreFocus && typeof active.trigger.focus === 'function') active.trigger.focus();
+      }
+      active = null;
+      highlight = -1;
+      if (outsideBound && win.removeEventListener) {
+        win.removeEventListener('mousedown', onOutside, true);
+        outsideBound = false;
+      }
+      if (viewportBound && win.removeEventListener) {
+        win.removeEventListener('resize', onViewport);
+        win.removeEventListener('scroll', onViewport, true);
+        viewportBound = false;
+      }
+    }
+
+    function placePopup() {
+      if (!popup || !active || typeof active.trigger.getBoundingClientRect !== 'function') return;
+      var rect = active.trigger.getBoundingClientRect();
+      var margin = 8;
+      var offset = 6;
+      var maxHeight = 240;
+      var width = Math.max(0, Math.min(rect.width, win.innerWidth - margin * 2));
+      var left = Math.min(Math.max(rect.left, margin), Math.max(margin, win.innerWidth - width - margin));
+      var below = win.innerHeight - rect.bottom - margin - offset;
+      var above = rect.top - margin - offset;
+      popup.style.left = left + 'px';
+      popup.style.width = width + 'px';
+      popup.style.maxHeight = Math.max(0, Math.min(maxHeight, below >= maxHeight || below >= above ? below : above)) + 'px';
+      if (below >= maxHeight || below >= above) {
+        popup.style.top = (rect.bottom + offset) + 'px';
+        popup.style.bottom = 'auto';
+      } else {
+        popup.style.top = 'auto';
+        popup.style.bottom = (win.innerHeight - rect.top + offset) + 'px';
+      }
+    }
+
+    function onOutside(event) {
+      if (!active || !popup) return;
+      var target = event.target;
+      if (active.wrap && active.wrap.contains && active.wrap.contains(target)) return;
+      if (popup.contains && popup.contains(target)) return;
+      closePopup(false);
+    }
+
+    function onViewport() {
+      if (!active || !active.select || !active.select.isConnected) closePopup(false);
+      else placePopup();
+    }
+
+    function paintOptions() {
+      if (!popup || !active) return;
+      clearChildren(popup);
+      var select = active.select;
+      optionsOf(select).forEach(function (option, index) {
+        var item = doc.createElement('button');
+        item.type = 'button';
+        item.className = 'select-option' + (option.value === select.value ? ' is-selected' : '') +
+          (index === highlight ? ' is-highlighted' : '');
+        item.id = select.id + '-option-' + index;
+        item.setAttribute('role', 'option');
+        item.setAttribute('aria-selected', option.value === select.value ? 'true' : 'false');
+        item.disabled = !!option.disabled;
+        setText(item, option.textContent || option.label || option.value || '');
+        item.addEventListener('mousedown', function (event) { event.preventDefault(); });
+        item.addEventListener('click', function () { commit(index); });
+        popup.appendChild(item);
+      });
+      if (highlight >= 0) active.trigger.setAttribute('aria-activedescendant', select.id + '-option-' + highlight);
+      else active.trigger.removeAttribute('aria-activedescendant');
+    }
+
+    function commit(index) {
+      if (!active) return;
+      var select = active.select;
+      var option = optionsOf(select)[index];
+      if (!option || option.disabled) return;
+      var changed = select.value !== option.value;
+      select.value = option.value;
+      closePopup(true);
+      syncRecord(recordFor(select));
+      if (changed) select.dispatchEvent(new win.Event('change', { bubbles: true }));
+    }
+
+    function onTriggerKey(event) {
+      var record = recordFor(event.currentTarget && event.currentTarget.selectSource);
+      if (!record || record.select.disabled) return;
+      var key = event.key;
+      if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'Home' || key === 'End') {
+        event.preventDefault();
+        if (!popup) open(record);
+        moveHighlight(record.select, key === 'ArrowUp' || key === 'Home' ? -1 : 1, key === 'Home' || key === 'End');
+        paintOptions();
+      } else if ((key === 'Enter' || key === ' ') && popup) {
+        event.preventDefault();
+        commit(highlight);
+      } else if (key === 'Escape' && popup) {
+        event.preventDefault();
+        closePopup(true);
+      } else if (key === 'Tab' && popup) {
+        closePopup(false);
+      }
+    }
+
+    function open(record) {
+      if (!record || record.select.disabled) return;
+      if (active && active !== record) closePopup(false);
+      active = record;
+      if (!popup) {
+        popup = doc.createElement('div');
+        popup.className = 'select-popup';
+        popup.setAttribute('role', 'listbox');
+        doc.body.appendChild(popup);
+      }
+      popup.id = record.select.id + '-listbox';
+      record.trigger.setAttribute('aria-controls', popup.id);
+      record.trigger.setAttribute('aria-expanded', 'true');
+      var selected = optionsOf(record.select).findIndex(function (option) { return option.value === record.select.value && !option.disabled; });
+      highlight = selected >= 0 ? selected : (enabledIndexes(record.select)[0] || -1);
+      paintOptions();
+      placePopup();
+      if (!outsideBound) {
+        win.addEventListener('mousedown', onOutside, true);
+        outsideBound = true;
+      }
+      if (!viewportBound) {
+        win.addEventListener('resize', onViewport);
+        win.addEventListener('scroll', onViewport, true);
+        viewportBound = true;
+      }
+    }
+
+    function recordFor(select) {
+      for (var i = 0; i < records.length; i++) if (records[i].select === select) return records[i];
+      return null;
+    }
+
+    function syncRecord(record) {
+      if (!record) return;
+      var select = record.select;
+      if (!select.isConnected) {
+        if (active === record) closePopup(false);
+        if (record.wrap && record.wrap.parentNode) record.wrap.parentNode.removeChild(record.wrap);
+        records.splice(records.indexOf(record), 1);
+        return;
+      }
+      if (!record.wrap) {
+        record.wrap = doc.createElement('span');
+        record.wrap.className = 'select-wrap';
+        select.parentNode.insertBefore(record.wrap, select);
+        record.wrap.appendChild(select);
+        record.trigger = doc.createElement('button');
+        record.trigger.type = 'button';
+        record.trigger.selectSource = select;
+        record.trigger.addEventListener('click', function () {
+          if (active === record && popup) closePopup(false);
+          else open(record);
+        });
+        record.trigger.addEventListener('keydown', onTriggerKey);
+        var label = doc.createElement('span');
+        label.className = 'select-trigger-text';
+        var icon = doc.createElement('span');
+        icon.className = 'select-chevron';
+        icon.setAttribute('aria-hidden', 'true');
+        record.trigger.appendChild(label);
+        record.trigger.appendChild(icon);
+        record.wrap.appendChild(record.trigger);
+        select.classList.add('select-native');
+        if (!select.hasAttribute('tabindex')) select.tabIndex = -1;
+        select.addEventListener('change', function () { syncRecord(record); });
+      }
+      var compact = select.id === 'key-group-kind' || (select.id && select.id.indexOf('unit-') === 0);
+      record.trigger.className = 'btn select-trigger' + (compact ? ' is-compact' : '');
+      record.trigger.disabled = !!select.disabled;
+      record.trigger.setAttribute('role', 'combobox');
+      record.trigger.setAttribute('aria-haspopup', 'listbox');
+      record.trigger.setAttribute('aria-expanded', active === record && popup ? 'true' : 'false');
+      if (select.id) record.trigger.id = select.id + '-trigger';
+      var labelledBy = select.getAttribute('aria-labelledby');
+      var label = select.id ? doc.querySelector('label[for="' + select.id + '"]') : null;
+      if (labelledBy) record.trigger.setAttribute('aria-labelledby', labelledBy);
+      else if (label && label.id) record.trigger.setAttribute('aria-labelledby', label.id);
+      else if (label) record.trigger.setAttribute('aria-label', label.textContent || '');
+      else if (select.getAttribute('aria-label')) record.trigger.setAttribute('aria-label', select.getAttribute('aria-label'));
+      var described = select.getAttribute('aria-describedby');
+      if (described) record.trigger.setAttribute('aria-describedby', described);
+      else record.trigger.removeAttribute('aria-describedby');
+      var selected = optionsOf(select).filter(function (option) { return option.value === select.value; })[0];
+      var text = selected ? (selected.textContent || selected.label || selected.value || '') : '';
+      setText(record.trigger.firstChild, text);
+      record.trigger.title = text;
+      if (select.disabled && active === record) closePopup(false);
+    }
+
+    function refresh() {
+      var selects = doc.querySelectorAll ? doc.querySelectorAll('select') : [];
+      var seen = [];
+      for (var i = 0; i < selects.length; i++) {
+        var select = selects[i];
+        if (!select.isConnected) continue;
+        var record = recordFor(select) || { select: select };
+        if (!recordFor(select)) records.push(record);
+        seen.push(select);
+        syncRecord(record);
+      }
+      records.slice().forEach(function (record) {
+        if (seen.indexOf(record.select) < 0) syncRecord(record);
+      });
+    }
+
+    return { refresh: refresh, close: function () { closePopup(false); } };
+  }
+
   function startDashboard(win, doc) {
     var els = {
       key: doc.getElementById('mgmt-key'),
@@ -1243,6 +1578,10 @@
       refresh: doc.getElementById('refresh'),
       status: doc.getElementById('conn-status'),
       rangeLabel: doc.getElementById('range-label'),
+      timeStart: doc.getElementById('time-start'),
+      timeEnd: doc.getElementById('time-end'),
+      timeApply: doc.getElementById('time-apply'),
+      timeError: doc.getElementById('time-error'),
       banner: doc.getElementById('banner'),
       provider: doc.getElementById('filter-provider'),
       model: doc.getElementById('filter-model'),
@@ -1282,11 +1621,14 @@
       if (state) renderChart(els.chart, state.series);
     });
     theme.start();
+    var selects = createSelectController(win, doc);
+    win.__observerSelects = selects;
 
     var state = {
       key: '',
       connected: false,
-      range: DEFAULT_RANGE,
+      range: null,
+      draftPending: false,
       provider: '',
       model: '',
       offset: 0,
@@ -1383,6 +1725,7 @@
         var fields = els.settingsBody.querySelectorAll('input, select, button');
         for (var i = 0; i < fields.length; i++) fields[i].disabled = saving || !state.connected;
       }
+      selects.refresh();
     }
 
     function markDirty() {
@@ -1514,6 +1857,7 @@
       models.sort();
       for (var a = 0; a < providers.length; a++) els.provider.appendChild(optionEl(doc, providers[a], providers[a]));
       for (var b = 0; b < models.length; b++) els.model.appendChild(optionEl(doc, models[b], models[b]));
+      selects.refresh();
     }
 
     function applySummary(summary) {
@@ -1528,9 +1872,55 @@
       renderChart(els.chart, series);
       setText(els.trendNote, series.length ? series.length + ' 个采样点' : '');
       updateFacets(s.groups);
-      if (s.from && s.to) {
-        setText(els.rangeLabel, '范围 ' + formatTime(s.from) + ' ~ ' + formatTime(s.to));
+      showRange();
+    }
+
+    function showRange() {
+      if (!els.rangeLabel) return;
+      if (state.bounds) {
+        setText(els.rangeLabel, '已应用范围 ' + formatTime(state.bounds.from) + ' ~ ' + formatTime(state.bounds.to) +
+          '（请求记录受现有保留时长限制，不会补造更早记录）' +
+          (state.draftPending ? ' · 时间草稿未应用' : ''));
+        els.rangeLabel.className = 'range-label' + (state.draftPending ? ' is-pending' : '');
+      } else {
+        setText(els.rangeLabel, state.draftPending ? '时间草稿未应用' : '');
       }
+    }
+
+    function currentDraft() {
+      return draftRange(els.timeStart && els.timeStart.value, els.timeEnd && els.timeEnd.value);
+    }
+
+    function fillDraft(bounds, pending) {
+      if (els.timeStart) els.timeStart.value = isoToLocalInput(bounds.from);
+      if (els.timeEnd) els.timeEnd.value = isoToLocalInput(bounds.to);
+      state.draftBounds = { ok: true, from: bounds.from, to: bounds.to };
+      state.draftPending = pending === true;
+      if (els.timeError) setText(els.timeError, '');
+      showRange();
+    }
+
+    function markDraftPending() {
+      state.draftPending = true;
+      state.draftBounds = null;
+      if (els.timeError) setText(els.timeError, '');
+      showRange();
+    }
+
+    function applyDraft(resetPage) {
+      var draft = state.draftBounds || currentDraft();
+      if (!draft.ok) {
+        if (els.timeError) setText(els.timeError, draft.message);
+        state.draftPending = true;
+        showRange();
+        return false;
+      }
+      state.bounds = { from: draft.from, to: draft.to };
+      state.draftPending = false;
+      if (els.timeError) setText(els.timeError, '');
+      showRange();
+      if (resetPage) state.offset = 0;
+      return true;
     }
 
     function pageActions() {
@@ -1587,6 +1977,7 @@
         els.clientKey.appendChild(option);
       });
       els.clientKey.value = selectedKey;
+      selects.refresh();
     }
 
     function applyIdentityFilter() {
@@ -1674,16 +2065,16 @@
     }
 
     function refreshAll(preserveSettingsStatus) {
-      if (!state.connected || saving) return;
+      if (!state.connected || saving || !state.bounds) return;
       abortQuery();
       abortMore();
       var controller = newController();
       queryAbort = controller;
       var token = queryGate.begin();
-      var bounds = rangeBounds(state.range, Date.now());
+      var bounds = { from: state.bounds.from, to: state.bounds.to };
       state.refreshing = true;
       pageActions();
-      setText(els.rangeLabel, '范围 ' + formatTime(bounds.from) + ' ~ ' + formatTime(bounds.to));
+      showRange();
       setStatus('加载中…', '');
 
       var common = { from: bounds.from, to: bounds.to, provider: state.provider, model: state.model };
@@ -1728,7 +2119,7 @@
           if (err && err.auth) { handleAuthFailure(err); return; }
           state.refreshing = false;
           pageActions();
-          if (state.bounds) setText(els.rangeLabel, '范围 ' + formatTime(state.bounds.from) + ' ~ ' + formatTime(state.bounds.to));
+          showRange();
           setStatus('加载失败：' + ((err && err.message) || '未知错误'), 'error');
         });
     }
@@ -2013,21 +2404,30 @@
 
     function connect() {
       var key = els.key && els.key.value ? els.key.value.trim() : '';
-      disconnect();
       if (!isAllowedTransport(loc)) {
+        disconnect();
         setStatus('仅允许 HTTPS 或本机回环地址发送管理密钥', 'error');
         return;
       }
       if (!key) {
+        disconnect();
         setStatus('请输入管理密钥', 'error');
         if (els.key && typeof els.key.focus === 'function') els.key.focus();
         return;
       }
+      if (!applyDraft(true)) {
+        setStatus(currentDraft().message || '请先填写有效时间范围', 'error');
+        return;
+      }
+      var applied = { from: state.bounds.from, to: state.bounds.to };
+      disconnect();
+      state.bounds = applied;
+      state.draftPending = false;
+      showRange();
       state.key = key;
       state.connected = true;
       state.offset = 0;
       state.items = [];
-      state.bounds = null;
       state.hasMore = false;
       state.clientKeyID = ''; state.authIndex = '';
       state.credentials = Object.create(null);
@@ -2065,16 +2465,22 @@
     var bindSeg = function (button) {
       button.addEventListener('click', function () {
         var range = button.getAttribute('data-range');
-        if (!range) return;
-        state.range = range;
+        if (!RANGE_MS[range]) return;
+        fillDraft(rangeBounds(range, Date.now()), true);
         for (var i = 0; i < segButtons.length; i++) {
           if (segButtons[i] === button) segButtons[i].className = 'btn seg-btn is-active';
           else segButtons[i].className = 'btn seg-btn';
         }
-        if (state.connected) refreshAll();
       });
     };
     for (var s = 0; s < segButtons.length; s++) bindSeg(segButtons[s]);
+    fillDraft(rangeBounds(DEFAULT_RANGE, Date.now()), false);
+    if (els.timeStart) els.timeStart.addEventListener('input', markDraftPending);
+    if (els.timeEnd) els.timeEnd.addEventListener('input', markDraftPending);
+    if (els.timeApply) els.timeApply.addEventListener('click', function () {
+      if (!applyDraft(true)) return;
+      if (state.connected) refreshAll();
+    });
 
     var onFilterChange = function () {
       state.provider = els.provider.value || '';
@@ -2107,6 +2513,7 @@
     }
 
     renderChart(els.chart, []);
+    selects.refresh();
   }
 
   var api = {
@@ -2141,6 +2548,15 @@
     formatBytes: formatBytes,
     formatDuration: formatDuration,
     formatTime: formatTime,
+    localInputToIso: localInputToIso,
+    isoToLocalInput: isoToLocalInput,
+    draftRange: draftRange,
+    cacheReadShare: cacheReadShare,
+    requestHitRate: requestHitRate,
+    createSelectController: createSelectController,
+    refreshSelects: function (win, doc) {
+      if (win && win.__observerSelects) win.__observerSelects.refresh();
+    },
     truncateText: truncateText,
     counter: counter,
     buildOverview: buildOverview,

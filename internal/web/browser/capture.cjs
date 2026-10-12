@@ -278,6 +278,7 @@ async function reviewCases(browser, server) {
       return route.continue();
     });
     await page.locator('[data-range="7d"]').click();
+    await page.locator('#time-apply').click();
     await page.waitForFunction(() => {
       const p = document.getElementById('requests-page');
       return p && p.textContent.includes('1');
@@ -624,8 +625,10 @@ async function main() {
         armed = true;
         calls = 0;
         await frame.locator('[data-range="7d"]').click();
+        await frame.locator('#time-apply').click();
         await call1Entered.promise;
         await frame.locator('[data-range="24h"]').click();
+        await frame.locator('#time-apply').click();
         await call2Finished.promise;
         call1Release.resolve();
         await ready(frame);

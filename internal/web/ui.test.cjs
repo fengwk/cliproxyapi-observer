@@ -306,6 +306,42 @@ test('buildGroupRows 处理畸形数据并按请求量排序', () => {
   assert.equal(rows[2].model, 'm2');
 });
 
+test('自定义时间草稿转 UTC，并拒绝缺失、归一化或起止颠倒', () => {
+  const start = ui.isoToLocalInput('2026-01-02T00:00:00.000Z');
+  const end = ui.isoToLocalInput('2026-01-03T00:00:00.000Z');
+  const range = ui.draftRange(start, end);
+  assert.equal(range.ok, true);
+  assert.equal(range.from, '2026-01-02T00:00:00.000Z');
+  assert.equal(range.to, '2026-01-03T00:00:00.000Z');
+  assert.equal(ui.draftRange('2026-02-31T00:00', end).ok, false);
+  assert.equal(ui.draftRange('', end).ok, false);
+  assert.equal(ui.draftRange(end, start).ok, false);
+  assert.equal(ui.draftRange(start, start).ok, false);
+});
+
+test('请求命中率与缓存读占比只使用明确计数', () => {
+  assert.equal(ui.requestHitRate({ requests: 0, cache_hits: 1 }).text, '—');
+  assert.equal(ui.requestHitRate({ requests: 4, cache_hits: 1 }).text, '25.0%');
+  const complete = {
+    accounting_quality: 'complete', input_tokens: 100, cache_read_tokens: 0,
+    cache_creation_tokens: 20, uncached_input_tokens: 80
+  };
+  assert.equal(ui.cacheReadShare(complete).text, '0.0%');
+  assert.match(ui.cacheReadShare(complete).title, /cache_read_tokens \/ input_tokens/);
+  assert.equal(ui.cacheReadShare({
+    accounting_quality: 'complete', input_tokens: 100, cache_read_tokens: 25,
+    cache_creation_tokens: 25, uncached_input_tokens: 50
+  }).text, '25.0%');
+  for (const item of [
+    { accounting_quality: 'unclassified', input_tokens: 100, cache_read_tokens: 20, cache_creation_tokens: 0, uncached_input_tokens: 80 },
+    { accounting_quality: 'complete', input_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0, uncached_input_tokens: 0 },
+    { accounting_quality: 'complete', input_tokens: 10, cache_read_tokens: 12, cache_creation_tokens: 0, uncached_input_tokens: -2 },
+    { accounting_quality: 'complete', input_tokens: 10, cache_read_tokens: 4, cache_creation_tokens: 4, uncached_input_tokens: 1, cached_tokens: 9 }
+  ]) assert.equal(ui.cacheReadShare(item).text, '—');
+  assert.equal(ui.buildGroupRows([{ requests: 2, cache_hits: 1 }])[0].hitRate, '50.0%');
+  assert.equal(ui.buildRequestRows([complete])[0].cacheShare, '0.0%');
+});
+
 test('buildRequestRows 标注 null TPS / 未定价 / 未知核算', () => {
   const rows = ui.buildRequestRows([
     {
@@ -573,17 +609,20 @@ test('ui 按钮遵循共享 Management Center 契约', () => {
   assert.ok(base, '.btn 基础规则必须存在');
   assert.match(base[1], /display:\s*inline-flex/);
   assert.match(base[1], /gap:\s*8px/);
-  assert.match(base[1], /padding:\s*10px 14px/);
+  assert.match(base[1], /min-height:\s*34px/);
+  assert.match(base[1], /padding:\s*6px 12px/);
   assert.match(base[1], /border-radius:\s*var\(--radius-md\)/);
-  assert.match(base[1], /font-size:\s*16px/);
+  assert.match(base[1], /font-size:\s*13px/);
   assert.match(base[1], /font-weight:\s*600/);
-  assert.match(base[1], /line-height:\s*1\.5/);
+  assert.match(base[1], /line-height:\s*20px/);
   assert.match(base[1], /white-space:\s*nowrap/);
 
   const small = css.match(/\.btn-sm\s*\{([^}]*)\}/);
   assert.ok(small, '.btn-sm 规则必须存在');
-  assert.match(small[1], /padding:\s*8px 10px/);
-  assert.match(small[1], /font-size:\s*14px/);
+  assert.match(small[1], /min-height:\s*28px/);
+  assert.match(small[1], /padding:\s*3px 9px/);
+  assert.match(small[1], /font-size:\s*12px/);
+  assert.match(small[1], /line-height:\s*20px/);
   assert.equal(/font-weight/.test(small[1]), false, 'btn-sm 不得覆盖字重');
 
   assert.match(css, /\.btn-danger\s*\{[^}]*background-color:\s*var\(--error-color\)/);

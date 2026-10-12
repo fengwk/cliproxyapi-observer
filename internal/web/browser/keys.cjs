@@ -255,9 +255,9 @@ async function main() {
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
     results.push('single consolidated filter toolbar, one aligned desktop row, no form serialization');
 
-    // 10b. 共享按钮契约：所有按钮带 .btn；常规控件 46px/16px/600/10×14/半径 8，
-    // 紧凑 btn-sm 39px/14px/600/8×10；段控保留 .btn 基础（同字号字重、拼接圆角）；
-    // 禁用态与键盘焦点可见轮廓符合 Management Center 设计语言。
+    // 10b. 共享按钮契约：所有按钮带 .btn；常规控件至少 34px/13px/600/6×12/行高 20/半径 8，
+    // 紧凑 btn-sm 至少 28px/12px/600/3×9；段控保留 .btn 基础（同字号字重、拼接圆角）；
+    // 禁用态与键盘焦点可见轮廓符合 CPA 设计语言。
     const contract = await page.evaluate(() => {
       const round = (v) => Math.round(parseFloat(v));
       const snap = (el) => {
@@ -269,6 +269,7 @@ async function main() {
           fontWeight: s.fontWeight,
           padTop: round(s.paddingTop),
           padRight: round(s.paddingRight),
+          lineHeight: round(s.lineHeight),
           radius: round(s.borderTopLeftRadius),
           height: Math.round(r.height),
           opacity: s.opacity,
@@ -290,39 +291,42 @@ async function main() {
     });
     for (const b of contract.normals) {
       assert.equal(b.hasBtn, true, b.sel + ' 必须带 .btn');
-      assert.equal(b.fontSize, 16, b.sel + ' 常规字号 16px');
+      assert.equal(b.fontSize, 13, b.sel + ' 常规字号 13px');
       assert.equal(b.fontWeight, '600', b.sel + ' 常规字重 600');
-      assert.equal(b.padTop, 10, b.sel + ' 常规纵向内边距 10px');
-      assert.equal(b.padRight, 14, b.sel + ' 常规横向内边距 14px');
+      assert.equal(b.padTop, 6, b.sel + ' 常规纵向内边距 6px');
+      assert.equal(b.padRight, 12, b.sel + ' 常规横向内边距 12px');
+      assert.equal(b.lineHeight, 20, b.sel + ' 常规行高 20px');
       assert.equal(b.radius, 8, b.sel + ' 圆角 8px');
-      assert.equal(b.height, 46, b.sel + ' 常规高度 46px');
+      assert.ok(b.height >= 34, b.sel + ' 常规高度至少 34px');
     }
     assert.ok(contract.smalls.length > 0, '应存在紧凑操作按钮');
     for (const b of contract.smalls) {
       assert.equal(b.hasBtn, true, '紧凑按钮必须带 .btn');
-      assert.equal(b.fontSize, 14);
+      assert.equal(b.fontSize, 12);
       assert.equal(b.fontWeight, '600');
-      assert.equal(b.padTop, 8);
-      assert.equal(b.padRight, 10);
+      assert.equal(b.padTop, 3);
+      assert.equal(b.padRight, 9);
+      assert.equal(b.lineHeight, 20);
       assert.equal(b.radius, 8);
-      assert.equal(b.height, 39);
+      assert.ok(b.height >= 28, '紧凑高度至少 28px');
     }
     assert.equal(contract.segments.length, 3);
     for (const b of contract.segments) {
       assert.equal(b.hasBtn, true, '段控必须保留 .btn');
-      assert.equal(b.fontSize, 16, '段控字号与 .btn 一致');
+      assert.equal(b.fontSize, 13, '段控字号与 .btn 一致');
       assert.equal(b.fontWeight, '600', '段控字重与 .btn 一致');
-      assert.equal(b.padTop, 10);
-      assert.equal(b.padRight, 14);
+      assert.equal(b.padTop, 6);
+      assert.equal(b.padRight, 12);
+      assert.equal(b.lineHeight, 20);
       assert.equal(b.radius, 0, '段控拼接圆角');
-      assert.equal(b.groupHeight, 46, '段控组高 46px');
+      assert.ok(b.groupHeight >= 34, '段控组高至少 34px');
     }
     assert.equal(contract.disabled.flag, true, '#requests-prev 第一页应为禁用');
     assert.equal(contract.disabled.opacity, '0.6', '禁用态降低不透明度');
     assert.equal(contract.disabled.cursor, 'not-allowed', '禁用态使用 not-allowed 光标');
 
     // 键盘焦点必须显示可见轮廓（按 .btn:focus-visible 契约）。
-    await page.locator('#filter-auth').focus();
+    await page.locator('#filter-auth-trigger').focus();
     await page.keyboard.press('Tab');
     const focusState = await page.evaluate(() => {
       const el = document.activeElement;
@@ -414,6 +418,7 @@ async function main() {
     await idle(page);
     stepCalls = calls.length;
     await page.locator('.seg-btn[data-range="7d"]').click();
+    await page.locator('#time-apply').click();
     await idle(page);
     assert.equal(await page.locator('#filter-client-key').inputValue(), mock.CLIENT_KEY_A);
     assert.equal(calls.slice(stepCalls).some((url) => url.pathname.endsWith('/requests') &&
@@ -493,6 +498,7 @@ async function main() {
     assert.equal(await page.locator('#filter-client-key option').first().textContent(), '全部');
     // 恢复时间范围为默认 24h，供后续响应式与截图使用。
     await page.locator('.seg-btn[data-range="24h"]').click();
+    await page.locator('#time-apply').click();
     await idle(page);
     results.push('discovered candidates persist within a connection but are cleared on reconnect');
 

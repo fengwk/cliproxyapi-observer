@@ -205,7 +205,7 @@ textarea {
 }
 
 .brand-title {
-  font-size: 16px;
+  font-size: 20px;
   font-weight: 700;
   white-space: nowrap;
 }
@@ -225,7 +225,7 @@ textarea {
 
 .conn input[type='password'] {
   width: 180px;
-  padding: 7px 10px;
+  padding: 6px 10px;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   background-color: var(--bg-secondary);
@@ -260,15 +260,16 @@ textarea {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 10px 14px;
+  min-height: 34px;
+  padding: 6px 12px;
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   background-color: var(--bg-secondary);
   color: var(--text-primary);
   font: inherit;
-  font-size: 16px;
+  font-size: 13px;
   font-weight: 600;
-  line-height: 1.5;
+  line-height: 20px;
   white-space: nowrap;
   cursor: pointer;
   transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
@@ -318,8 +319,10 @@ textarea {
 }
 
 .btn-sm {
-  padding: 8px 10px;
-  font-size: 14px;
+  min-height: 28px;
+  padding: 3px 9px;
+  font-size: 12px;
+  line-height: 20px;
 }
 
 .btn:disabled {
@@ -414,7 +417,7 @@ main {
 }
 
 .settings input:not([type='checkbox']), .settings select {
-  padding: 7px 8px;
+  padding: 6px 8px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
@@ -467,9 +470,9 @@ main {
 .card {
   background-color: var(--bg-primary);
   border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow);
-  padding: 14px;
+  padding: 16px;
 }
 
 .card-header {
@@ -483,8 +486,8 @@ main {
 
 .card-header h2 {
   margin: 0;
-  font-size: 15px;
-  font-weight: 700;
+  font-size: 16px;
+  font-weight: 650;
 }
 
 .muted {
@@ -503,7 +506,7 @@ main {
 .toolbar .controls {
   display: flex;
   align-items: flex-end;
-  gap: 10px 12px;
+  gap: 8px 8px;
   flex-wrap: wrap;
 }
 
@@ -542,9 +545,15 @@ main {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  flex: 1 1 150px;
+  flex: 1 1 0;
+  width: 132px;
   min-width: 0;
-  max-width: 240px;
+  max-width: 150px;
+}
+
+.time-filter {
+  width: 148px;
+  max-width: 156px;
 }
 
 .filter label {
@@ -553,11 +562,19 @@ main {
 }
 
 .filter input,
+.filter select,
+.settings input:not([type='checkbox']),
+.settings select,
+.conn input[type='password'] {
+  min-height: 34px;
+}
+
+.filter input,
 .filter select {
   width: 100%;
   min-width: 0;
   max-width: 100%;
-  padding: 7px 8px;
+  padding: 6px 8px;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   background-color: var(--bg-secondary);
@@ -571,12 +588,32 @@ main {
   box-shadow: 0 0 0 3px var(--count-badge-bg);
 }
 
-#identity-apply {
+#identity-apply,
+#time-apply {
   flex: none;
+  align-self: flex-end;
 }
 
+.toolbar-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 16px;
+  min-height: 0;
+}
+
+.time-error {
+  color: var(--error-color);
+  font-size: 12px;
+}
+
+.time-error:empty,
 #credential-status:empty {
   display: none;
+}
+
+.range-label.is-pending {
+  color: var(--warning-color);
 }
 
 .range-label {
@@ -873,6 +910,135 @@ dialog.dialog::backdrop {
 
 .dialog-error {
   color: var(--error-color);
+}
+
+/* ---------- 原生 select 的 CPA 风格增强 ---------- */
+
+.select-native {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.select-wrap {
+  position: relative;
+  display: inline-flex;
+  width: 100%;
+  min-width: 0;
+}
+
+.select-trigger {
+  width: 100%;
+  justify-content: space-between;
+  min-height: 34px;
+  padding: 0 12px;
+  border-color: var(--border-color);
+  background-color: var(--bg-primary);
+  box-shadow: var(--shadow);
+  font-weight: 500;
+}
+
+.select-trigger.is-compact {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  box-shadow: none;
+}
+
+.select-trigger:hover:not(:disabled) {
+  border-color: var(--border-hover);
+}
+
+.select-trigger:focus-visible,
+.select-trigger[aria-expanded='true'] {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: var(--shadow), 0 0 0 3px rgba(139, 134, 128, 0.18);
+}
+
+.select-trigger-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.select-chevron {
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--text-secondary);
+  flex: none;
+}
+
+.select-trigger[aria-expanded='true'] .select-chevron {
+  transform: rotate(180deg);
+  transition: transform 0.2s ease;
+}
+
+.select-popup {
+  position: fixed;
+  z-index: 2010;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  overflow-y: auto;
+  max-height: 240px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  background: var(--bg-primary);
+  box-shadow: var(--shadow-lg);
+}
+
+.select-option {
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.select-option:hover,
+.select-option.is-highlighted {
+  background: var(--bg-secondary);
+}
+
+.select-option.is-selected {
+  border-color: rgba(139, 134, 128, 0.5);
+  background: rgba(139, 134, 128, 0.1);
+  font-weight: 600;
+}
+
+.select-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (pointer: coarse) {
+  .btn,
+  .filter input,
+  .filter select,
+  .conn input[type='password'],
+  .settings input:not([type='checkbox']),
+  .settings select,
+  .select-trigger {
+    min-height: 44px;
+  }
 }
 
 /* ---------- 移动端 ---------- */

@@ -203,20 +203,20 @@ async function main() {
       assert.match(contract.del.cls, /(^|\s)btn-danger(\s|$)/);
       assert.match(contract.del.cls, /(^|\s)btn-sm(\s|$)/);
       assert.equal(contract.del.cls.includes('price-delete'), false, '删除按钮不得再带 price-delete');
-      assert.equal(contract.del.fontSize, 14);
+      assert.equal(contract.del.fontSize, 12);
       assert.equal(contract.del.fontWeight, '600');
-      assert.equal(contract.del.height, 39);
+      assert.ok(contract.del.height >= 28);
       assert.equal(contract.del.radius, 8);
       assert.equal(contract.del.bg, 'rgb(198, 87, 70)', '危险按钮使用 error 语义色');
       assert.equal(contract.del.color, 'rgb(255, 255, 255)');
       // 行内次要操作 = btn-secondary btn-sm，紧凑高度 39。
       assert.match(contract.move.cls, /(^|\s)btn-secondary(\s|$)/);
       assert.match(contract.move.cls, /(^|\s)btn-sm(\s|$)/);
-      assert.equal(contract.move.height, 39);
-      // 常规主操作 = btn btn-secondary，46px / 16px。
+      assert.ok(contract.move.height >= 28);
+      // 常规主操作 = btn btn-secondary，至少 34px / 13px。
       assert.match(contract.add.cls, /(^|\s)btn-secondary(\s|$)/);
-      assert.equal(contract.add.height, 46);
-      assert.equal(contract.add.fontSize, 16);
+      assert.ok(contract.add.height >= 34);
+      assert.equal(contract.add.fontSize, 13);
       // 未保存时保存按钮禁用：降低不透明度并阻止光标。
       assert.equal(contract.saveDisabled, true);
       assert.equal(contract.save.opacity, '0.6');
