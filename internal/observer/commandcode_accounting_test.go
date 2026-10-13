@@ -244,8 +244,7 @@ func TestCommandCodeRejectsInvalidRawCounters(t *testing.T) {
 	}
 }
 
-// A failed commandcode request with zero usage must never be repaired into
-// invented tokens or a fabricated complete classification.
+// A failed commandcode request with zero usage must never invent tokens.
 func TestCommandCodeFailedZeroUsageNotInvented(t *testing.T) {
 	record := commandCodeRecord(ccSubsetModel, pluginapi.UsageDetail{})
 	record.Failed = true
