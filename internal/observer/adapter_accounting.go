@@ -7,27 +7,51 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
-// The compatibility is deliberately narrow: only the exact upstream provider,
-// executor implementation and model namespace below are reinterpreted. Every
-// other record keeps whatever accounting the SDK derived for it.
+// The compatibility is deliberately narrow: only these exact upstream providers,
+// the shared native executor implementation and their own model namespaces are
+// reinterpreted. Every other record keeps whatever accounting the SDK derived.
 const (
+	// adapterExecutor is the single executor implementation shared by the native
+	// plugin adapters whose raw callback counters the observer may repair.
+	adapterExecutor = "executorAdapter"
+
 	openCodeGoProvider    = "opencode-go"
-	openCodeGoExecutor    = "executorAdapter"
+	openCodeGoExecutor    = adapterExecutor
 	openCodeGoModelPrefix = "opencode-go/"
+
+	commandCodeProvider    = "commandcode"
+	commandCodeModelPrefix = "commandcode/"
 )
 
-// isOpenCodeCompatTarget reports whether a usage record belongs to the cohort
-// whose canonical accounting the observer may reconstruct from raw counters.
-// A bare "opencode-go/" model has no native id and is not a model.
-func isOpenCodeCompatTarget(provider, executor, model string) bool {
-	return provider == openCodeGoProvider && executor == openCodeGoExecutor &&
-		strings.HasPrefix(model, openCodeGoModelPrefix) && len(model) > len(openCodeGoModelPrefix)
+// isAdapterCompatTarget reports whether a usage record belongs to one of the
+// exact adapter cohorts whose canonical accounting the observer may reconstruct
+// from raw counters. The executor must be the shared adapter implementation and
+// the model must carry a non-empty native id inside the cohort's own namespace;
+// a bare "<provider>/" prefix has no native id and is not a model.
+func isAdapterCompatTarget(provider, executor, model string) bool {
+	if executor != adapterExecutor {
+		return false
+	}
+	switch provider {
+	case openCodeGoProvider:
+		return hasNativeModelID(model, openCodeGoModelPrefix)
+	case commandCodeProvider:
+		return hasNativeModelID(model, commandCodeModelPrefix)
+	default:
+		return false
+	}
 }
 
-// recoverOpenCodeBreakdown rebuilds a canonical, mutually exclusive token
-// breakdown from the raw callback counters of an opencode-go adapter record.
+// hasNativeModelID reports whether model lives inside prefix and carries a
+// non-empty native id after it.
+func hasNativeModelID(model, prefix string) bool {
+	return strings.HasPrefix(model, prefix) && len(model) > len(prefix)
+}
+
+// recoverAdapterBreakdown rebuilds a canonical, mutually exclusive token
+// breakdown from the raw callback counters of a native adapter record.
 //
-// The host parses this provider's output with OpenAI, OpenAI Responses or
+// The host parses these providers' output with OpenAI, OpenAI Responses or
 // Anthropic Messages semantics but the observer cannot see which one was used,
 // so both candidate normalizations are tried:
 //
@@ -39,7 +63,7 @@ func isOpenCodeCompatTarget(provider, executor, model string) bool {
 // recovered only when the raw counters uniquely determine the result: a single
 // valid candidate, or several identical ones. The raw callback total stays
 // authoritative, so the SDK's unknown-provider lower bound is never used here.
-func recoverOpenCodeBreakdown(raw pluginapi.UsageDetail) (usage.TokenBreakdown, bool) {
+func recoverAdapterBreakdown(raw pluginapi.UsageDetail) (usage.TokenBreakdown, bool) {
 	// Every raw counter must be non-negative; a negative value is malformed and
 	// must never be repaired into fabricated billing.
 	for _, v := range []int64{

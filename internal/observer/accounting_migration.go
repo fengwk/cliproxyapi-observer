@@ -15,32 +15,39 @@ import (
 // separate leaves the existing stats/key-stats sequence markers untouched.
 var bucketAccountingMeta = []byte("accounting_meta")
 
-// accountingMigrationSequence is the completion marker value. bbolt starts a
-// bucket sequence at 0, so 1 unambiguously means "already repaired once".
-const accountingMigrationSequence = 1
+// accountingMigrationSequence is the completion marker value. Version 1
+// repaired the opencode-go adapter cohort; version 2 additionally repairs the
+// commandcode adapter cohort, so a database marked 1 is rescanned exactly once.
+// The guard accepts any marker at or above this value so a database written by
+// a newer version is never downgraded or rescanned.
+const accountingMigrationSequence = 2
 
 // persistedCounterWords is the number of 64-bit words stored by encodeCounters:
 // the 13 original usage/latency metrics plus the complete-accounting count and
 // the four billable buckets. Cost and unpriced counts are never persisted.
 const persistedCounterWords = 18
 
-// migrateAccounting performs the one-time historical repair of retained usage
-// that was persisted as unclassified before the protocol-aware compatibility
-// existed. It runs after the legacy stats/key-stats migrations and before the
-// writer starts, and commits everything in a single transaction.
+// migrateAccounting performs the historical repair of retained usage that was
+// persisted as unclassified before the protocol-aware compatibility existed. It
+// runs after the legacy stats/key-stats migrations and before the writer starts,
+// and commits everything in a single transaction. Version 1 repaired only the
+// opencode-go adapter cohort; version 2 additionally repairs the commandcode
+// adapter cohort, so an existing v1 database is rescanned once.
 //
-// Only records that are exactly opencode-go / executorAdapter / opencode-go/*,
-// still carry their raw usage and were unclassified are considered. When the
-// raw counters no longer determine a canonical breakdown, the record is left
-// unclassified; only genuinely corrupt records fail and roll the transaction
-// back.
+// Only records that are an exact adapter compat target (see
+// isAdapterCompatTarget), still carry their raw usage and were unclassified are
+// considered. When the raw counters no longer determine a canonical breakdown,
+// the record is left unclassified; only genuinely corrupt records fail and roll
+// the transaction back.
 func (s *Store) migrateAccounting() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		am, err := tx.CreateBucketIfNotExists(bucketAccountingMeta)
 		if err != nil {
 			return fmt.Errorf("create accounting metadata bucket: %w", err)
 		}
-		if am.Sequence() == accountingMigrationSequence {
+		// A marker at or above the current version means an equal or newer
+		// repair already ran; never rescan or downgrade it.
+		if am.Sequence() >= accountingMigrationSequence {
 			return nil
 		}
 		rb := tx.Bucket(bucketRequests)
@@ -66,8 +73,8 @@ func (s *Store) migrateAccounting() error {
 			case !bytes.Equal(keyCopy, encodeRequestKey(r.Time, r.Sequence)):
 				return fmt.Errorf("retained request key mismatch during accounting migration")
 			case r.AccountingQuality == string(usage.TokenAccountingQualityUnclassified) &&
-				isOpenCodeCompatTarget(r.Provider, r.Executor, r.Model):
-				if recovered, ok := recoverOpenCodeBreakdown(r.RawUsage); ok {
+				isAdapterCompatTarget(r.Provider, r.Executor, r.Model):
+				if recovered, ok := recoverAdapterBreakdown(r.RawUsage); ok {
 					next := r
 					storeBreakdown(&next, recovered)
 					next.GenerationNS = generationNS(next.LatencyNS, next.TTFTNS)
@@ -95,7 +102,7 @@ func (s *Store) migrateAccounting() error {
 // replaceAccountingContribution reconciles the global minute row and the
 // identity/input-length key row with a request whose accounting was just
 // repaired. The pre- and post-repair contributions differ only in the input
-// total (Anthropic moves a request to a longer input bucket) and in the
+// total (an Anthropic-style record moves to a longer input bucket) and in the
 // complete/billable partitions, so the aggregates are adjusted by that exact
 // difference instead of being rebuilt.
 //

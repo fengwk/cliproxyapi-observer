@@ -296,11 +296,13 @@ cost_usd = (uncached_input * input_price + cache_read * cache_read_price
 已过期且无法恢复的部分保持未定价，不猜测成本，也不从短保留期明细重建长期流量总数。
 升级有持久标记，后续重开或查询不再扫描全量请求。
 
-首次安装 OpenCode Go 记账兼容修复时，另执行一次原子迁移：仅对仍有原始用量且
+首次安装原生 adapter 记账兼容修复时，另执行一次原子迁移：仅对仍有原始用量且
 能唯一恢复计费分量的请求，修复明细及其 global/Key 聚合贡献；不重复累计请求、失败
 或延迟。Anthropic 的输入规范化包含缓存，迁移同步调整输入长度分组，确保阶梯定价一致。
 已过期只剩聚合、原始用量有歧义或缺少精确聚合贡献的部分仍为未定价，不猜测或重建流量。
-修复有独立持久标记，重开不会重复补算；金额仍按当前生效价格查询计算。
+修复使用带版本的独立持久标记（v1 覆盖 opencode-go，v2 追加 commandcode）；从 v1 升级
+到 v2 会重扫一次以补齐 commandcode，标记版本不因重开或旧版本而降级；金额仍按当前生效
+价格查询计算。
 
 首次启用 Key/阶梯统计时，另在一个原子事务中将旧聚合复制到“未归属”维度，不从
 短保留期请求猜测历史 key。旧聚合没有单次输入长度；若有可能命中的输入阈值规则，
@@ -338,12 +340,15 @@ CPA 的文件索引基于其凭据身份；更换文件位置或身份可能产�
 OpenCode Provider 的凭据绑定执行路径在本地 CPA v8.0.15/v8.0.23 双插件联调中，
 流式与非流式请求均进入 Observer，提供商为 `opencode-go`，模型保留
 `opencode-go/<model>` 全名；按插件 ID `cliproxyapi-opencode-provider` 过滤会匹配不到这些记录。
-CPA 解析器会按插件输出协议解析用量，但原生 usage 回调不传完整 `TokenBreakdown`。
-Observer 对精确的 `opencode-go` / `executorAdapter` / `opencode-go/<model>` 增加兼容：
+CommandCode 原生插件同样以 `commandcode` 为提供商、模型保留 `commandcode/<native>` 全名，
+共用同一 `executorAdapter` 实现。CPA 解析器会按插件输出协议解析用量，但原生 usage 回调
+不传完整 `TokenBreakdown`。Observer 仅对两个精确 cohort（`opencode-go` 与 `commandcode`
+各自搭配 `executorAdapter` 及其自身模型命名空间）增加兼容：
 依据原始计数与总量，验证 OpenAI/Responses（缓存包含于输入）和 Anthropic Messages
 （输入不含缓存、输出已含 reasoning）两种分解；只有唯一合法结果或完全相同的合法结果
 才恢复完整记账，并计算非零费用及 TPS。负数、矛盾总量、缺少总量或不明缓存别名保持
-`unclassified`；其他提供商和执行器行为不变，不按模型名称猜协议。
+`unclassified`；两个 cohort 精确隔离、不跨命名空间匹配，其他提供商和执行器行为不变，
+不按模型名称猜协议。
 
 费用以 **CPA 回调报告的用量** 为依据。SDK 跨协议转换可能丢失缓存创建或 reasoning
 细分字段，Observer 不会凭空恢复转换前未传出的字段。未命中价格规则且没有默认价的

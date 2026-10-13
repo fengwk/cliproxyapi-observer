@@ -30,14 +30,15 @@ func NormalizeUsage(record pluginapi.UsageRecord) Request {
 	ensured := usage.EnsureTokenBreakdownForProvider(detail, record.Provider, record.ExecutorType)
 	breakdown := ensured.TokenBreakdown
 
-	// Observer-only compatibility for the opencode-go adapter: the host passes
-	// raw callback counters without a breakdown, so reconstruct a canonical one
-	// when the raw values uniquely determine it. Only this exact provider,
-	// executor and model namespace are reinterpreted; every other record keeps
+	// Observer-only compatibility for the native adapter cohorts (opencode-go
+	// and commandcode): the host passes raw callback counters without a
+	// breakdown, so reconstruct a canonical one when the raw values uniquely
+	// determine it. Only these exact providers, the shared executor and each
+	// cohort's own model namespace are reinterpreted; every other record keeps
 	// the SDK's accounting untouched.
 	if breakdown.Quality == usage.TokenAccountingQualityUnclassified &&
-		isOpenCodeCompatTarget(record.Provider, record.ExecutorType, record.Model) {
-		if recovered, ok := recoverOpenCodeBreakdown(record.Detail); ok {
+		isAdapterCompatTarget(record.Provider, record.ExecutorType, record.Model) {
+		if recovered, ok := recoverAdapterBreakdown(record.Detail); ok {
 			breakdown = recovered
 		}
 	}

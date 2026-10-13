@@ -242,8 +242,8 @@ func TestOpenCodeOtherProviderUnaffected(t *testing.T) {
 	}
 }
 
-// isOpenCodeCompatTarget must stay narrow: exact provider, exact executor, and a
-// non-empty native id inside the opencode-go/ namespace.
+// isAdapterCompatTarget must stay narrow: exact provider, the shared executor,
+// and a non-empty native id inside each cohort's own namespace.
 func TestOpenCodeCompatTargetIsolation(t *testing.T) {
 	cases := []struct {
 		provider, executor, model string
@@ -256,10 +256,15 @@ func TestOpenCodeCompatTargetIsolation(t *testing.T) {
 		{openCodeGoProvider, "executor", "opencode-go/glm", false},
 		{openCodeGoExecutor, openCodeGoExecutor, "opencode-go/glm", false},
 		{"opencode-go-x", openCodeGoExecutor, "opencode-go/glm", false},
+		{commandCodeProvider, adapterExecutor, "commandcode/deepseek/deepseek-v4.1-flash", true},
+		{commandCodeProvider, adapterExecutor, "commandcode/", false},
+		{commandCodeProvider, adapterExecutor, "opencode-go/glm", false},
+		{openCodeGoProvider, adapterExecutor, "commandcode/glm", false},
+		{commandCodeProvider, "executor", "commandcode/glm", false},
 	}
 	for _, tc := range cases {
-		if got := isOpenCodeCompatTarget(tc.provider, tc.executor, tc.model); got != tc.want {
-			t.Errorf("isOpenCodeCompatTarget(%q,%q,%q) = %v, want %v",
+		if got := isAdapterCompatTarget(tc.provider, tc.executor, tc.model); got != tc.want {
+			t.Errorf("isAdapterCompatTarget(%q,%q,%q) = %v, want %v",
 				tc.provider, tc.executor, tc.model, got, tc.want)
 		}
 	}
