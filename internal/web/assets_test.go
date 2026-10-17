@@ -52,7 +52,7 @@ func TestAssetKnownNamesAndContentTypes(t *testing.T) {
 }
 
 func TestAssetUnknownName(t *testing.T) {
-	for _, name := range []string{"", "ui.txt", "../ui.js", "ui.js/../assets.go", "assets.go", "settings.css", "settings.js"} {
+	for _, name := range []string{"", "ui.txt", "../ui.js", "ui.js/../assets.go", "assets.go", "settings.css", "settings.js", "models.js", "  models.js \n"} {
 		if body, contentType, ok := Asset(name); ok || body != nil || contentType != "" {
 			t.Fatalf("Asset(%q) = (%v, %q, %v), want not found", name, body, contentType, ok)
 		}
@@ -124,6 +124,7 @@ func TestJSAssetsAreTextSafeAndSelfContained(t *testing.T) {
 	}{
 		{"ui.js", uiJS},
 		{"settings.js", settingsJS},
+		{"models.js", modelsJS},
 	} {
 		source := string(file.body)
 		for _, needle := range []string{
@@ -212,30 +213,66 @@ func TestCancelControlsAreExplicit(t *testing.T) {
 	}
 }
 
-// /ui.js 是固定端点：Asset 必须按 settings.js + "\n" + ui.js 的顺序返回 bundle，
-// 且不额外暴露 settings.js 资源。
-func TestUIAssetBundlesSettingsBeforeUI(t *testing.T) {
+// /ui.js 是固定端点：Asset 必须按 settings.js + "\n" + models.js + "\n" + ui.js
+// 的顺序返回 bundle，且不额外暴露 settings.js / models.js 资源。
+func TestUIAssetBundlesSettingsAndModelsBeforeUI(t *testing.T) {
 	body, contentType := requireAsset(t, "ui.js")
 	if contentType != ContentTypeJS {
 		t.Fatalf("ui.js content type = %q, want %q", contentType, ContentTypeJS)
 	}
-	want := make([]byte, 0, len(settingsJS)+1+len(uiJS))
+	if len(modelsJS) == 0 {
+		t.Fatal("models.js must be embedded in the binary")
+	}
+	want := make([]byte, 0, len(settingsJS)+len(modelsJS)+2+len(uiJS))
 	want = append(want, settingsJS...)
+	want = append(want, '\n')
+	want = append(want, modelsJS...)
 	want = append(want, '\n')
 	want = append(want, uiJS...)
 	if !bytes.Equal(body, want) {
-		t.Fatal("ui.js asset must be settings.js + newline + ui.js")
+		t.Fatal("ui.js asset must be settings.js + newline + models.js + newline + ui.js")
 	}
 
 	source := string(body)
 	compact := compactSource(source)
 	settingsAt := strings.Index(compact, compactSource("window.ObserverSettings = ObserverSettings"))
+	modelsAt := strings.Index(compact, compactSource("window.ObserverModels = ObserverModels"))
 	uiAt := strings.Index(compact, compactSource("window.ObserverUI = {"))
-	if settingsAt < 0 || uiAt < 0 || settingsAt >= uiAt {
-		t.Fatalf("ui.js bundle order invalid: settings at %d, UI at %d", settingsAt, uiAt)
+	if settingsAt < 0 || modelsAt < 0 || uiAt < 0 || !(settingsAt < modelsAt && modelsAt < uiAt) {
+		t.Fatalf("ui.js bundle order invalid: settings at %d, models at %d, UI at %d", settingsAt, modelsAt, uiAt)
 	}
-	if _, _, ok := Asset("settings.js"); ok {
-		t.Fatal("settings.js must not be exposed as a separate asset endpoint")
+	for _, name := range []string{"settings.js", "models.js"} {
+		if _, _, ok := Asset(name); ok {
+			t.Fatalf("%s must not be exposed as a separate asset endpoint", name)
+		}
+	}
+}
+
+// UI 只能调用管理 API 已注册的固定 query-ID 路由；旧动态路径不得残留，
+// 否则宿主只会返回 404，且静默保留死兼容路由会误导后续维护。
+func TestUIAssetUsesFixedQueryIDRoutes(t *testing.T) {
+	body, _ := requireAsset(t, "ui.js")
+	source := string(body)
+	for _, route := range []string{
+		`/requests/detail?id=" + encodeURIComponent(`,
+		`/keys?id=" + encodeURIComponent(`,
+		`/keys/rotate?id=" + encodeURIComponent(`,
+		`/keys/reset?id=" + encodeURIComponent(`,
+		`/keys/recover?id=" + encodeURIComponent(`,
+	} {
+		if !containsCode(source, route) {
+			t.Fatalf("ui.js missing fixed query-ID route %q", route)
+		}
+	}
+	for _, legacy := range []string{
+		`/requests/" + encodeURIComponent(`,
+		`/keys/" + k.id`,
+		`/keys/" + encodeURIComponent(k.id) + "/rotate"`,
+		`/keys/" + encodeURIComponent(k.id) + "/reset"`,
+	} {
+		if containsCode(source, legacy) {
+			t.Fatalf("ui.js still builds the removed dynamic route %q", legacy)
+		}
 	}
 }
 

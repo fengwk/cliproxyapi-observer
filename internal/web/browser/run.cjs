@@ -95,7 +95,13 @@ async function step(name, fn) {
 }
 
 function parseArgs(argv) {
-  const args = { reportDir: DEFAULT_REPORT_DIR, chrome: process.env.CHROME_BIN || DEFAULT_CHROME, keepProfile: false };
+  const args = {
+    reportDir: DEFAULT_REPORT_DIR,
+    chrome: process.env.CHROME_BIN || DEFAULT_CHROME,
+    keepProfile: false,
+    baseUrl: '',
+    managementKey: process.env.OBSERVER_MANAGEMENT_KEY || ''
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--report-dir') {
@@ -106,14 +112,24 @@ function parseArgs(argv) {
       args.chrome = argv[++i] || DEFAULT_CHROME;
     } else if (arg.startsWith('--chrome=')) {
       args.chrome = arg.slice('--chrome='.length);
+    } else if (arg === '--base-url') {
+      args.baseUrl = argv[++i] || '';
+    } else if (arg.startsWith('--base-url=')) {
+      args.baseUrl = arg.slice('--base-url='.length);
+    } else if (arg === '--management-key' || arg.startsWith('--management-key=')) {
+      throw new Error('--management-key 已移除；请通过 OBSERVER_MANAGEMENT_KEY 环境变量提供管理密钥');
     } else if (arg === '--keep-profile') {
       args.keepProfile = true;
     } else if (arg === '--help' || arg === '-h') {
       process.stdout.write(
         'Usage: node internal/web/browser/run.cjs [--report-dir ABS] [--chrome PATH] [--keep-profile]\n' +
+          '       OBSERVER_MANAGEMENT_KEY=... node internal/web/browser/run.cjs --base-url URL\n' +
           'Default report dir: ' +
           DEFAULT_REPORT_DIR +
-          '\n'
+          '\n' +
+          '--base-url runs a read-only smoke against a real host.\n' +
+          'Management key is read only from OBSERVER_MANAGEMENT_KEY; CLI key flags are not accepted.\n' +
+          'CDP Fetch interception blocks every non-GET/HEAD/OPTIONS request before it is sent.\n'
       );
       process.exit(0);
     } else {
@@ -593,6 +609,51 @@ async function closeDialog(cdp) {
   return true;
 }
 
+async function keyDialogScrollAudit(cdp) {
+  return cdp.evaluate(
+    pageFn(
+      VISIBLE_SNIPPET +
+        `
+        const dialogs=[...document.querySelectorAll("${DIALOG_ROOT}")].filter(visible);
+        const dialog=dialogs[dialogs.length-1];
+        if(!dialog)return {present:false,reason:'missing-dialog'};
+        const body=dialog.querySelector('.dialog-body')||dialog;
+        const buttons=[...dialog.querySelectorAll('button')].filter(function(button){
+          return visible(button)&&/^(保存|取消)$/.test((button.innerText||'').trim());
+        });
+        const rect=function(el){
+          const r=el.getBoundingClientRect();
+          return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};
+        };
+        const dialogRect=rect(dialog);
+        const inside=function(r){
+          return r.width>0&&r.height>0&&
+            r.left>=dialogRect.left-1&&r.right<=dialogRect.right+1&&
+            r.top>=dialogRect.top-1&&r.bottom<=dialogRect.bottom+1;
+        };
+        const snapshot=function(){
+          return buttons.map(function(button){
+            const r=rect(button);
+            return {text:(button.innerText||'').trim(),rect:r,inside:inside(r)};
+          });
+        };
+        body.scrollTop=0;
+        const top=snapshot();
+        body.scrollTop=body.scrollHeight;
+        const bottom=snapshot();
+        body.scrollTop=0;
+        return {
+          present:true,
+          dialog:dialogRect,
+          body:{clientHeight:body.clientHeight,scrollHeight:body.scrollHeight,scrollTop:body.scrollTop},
+          top:top,
+          bottom:bottom
+        };
+        `
+    )
+  );
+}
+
 async function acceptConfirm(cdp, actionWords = []) {
   await sleep(250);
   const info = await dialogInfo(cdp);
@@ -810,6 +871,171 @@ async function findModelButton(cdp, model, click) {
       Boolean(click)
     )
   );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Key model picker (models.js contract)                                      */
+/* -------------------------------------------------------------------------- */
+
+const MODEL_ROOT_SELECTOR = '.models-root';
+// 不带引号的属性值可直接嵌入双引号包裹的 JS 选择器字符串。
+const DIALOG_ROOT = 'dialog, [role=dialog], [aria-modal=true]';
+
+function modelRootExpression(body, ...args) {
+  return pageFn(
+    VISIBLE_SNIPPET +
+      'const dialogs=[...document.querySelectorAll("' + DIALOG_ROOT + '")].filter(visible);' +
+      'const host=dialogs.length?dialogs[dialogs.length-1]:document;' +
+      'const root=host.querySelector("' + MODEL_ROOT_SELECTOR + '");' +
+      (body || 'return root;'),
+    ...args
+  );
+}
+
+async function modelPickerPresent(cdp) {
+  return cdp.evaluate(modelRootExpression('return !!root;'));
+}
+
+async function waitModelDirectory(cdp, timeout = 15000) {
+  await cdp.waitFor(
+    '(() => {' + VISIBLE_SNIPPET +
+      'const dialogs=[...document.querySelectorAll("' + DIALOG_ROOT + '")].filter(visible);' +
+      'const host=dialogs.length?dialogs[dialogs.length-1]:document;' +
+      'const root=host.querySelector("' + MODEL_ROOT_SELECTOR + '");' +
+      'return !!root && root.getAttribute("aria-busy")==="false";})()',
+    timeout,
+    '模型目录加载完成'
+  );
+}
+
+async function modelPickerState(cdp) {
+  return cdp.evaluate(
+    modelRootExpression(`
+      if(!root)return {present:false};
+      const one=(selector)=>root.querySelector(selector);
+      const items=[...root.querySelectorAll('.models-item')].map(function(item){
+        const box=item.querySelector('input[type="checkbox"]');
+        const text=(item.innerText||'').replace(/\\s+/g,' ').trim();
+        const id=text.replace(/（目录未列出）\\s*$/,'').trim();
+        return {id:id,checked:!!box&&box.checked,missing:/目录未列出/.test(text)};
+      });
+      const warning=one('.models-warning');
+      return {
+        present:true,
+        busy:root.getAttribute('aria-busy'),
+        all:!!one('input[value="all"]')&&one('input[value="all"]').checked,
+        restricted:!!one('input[value="restricted"]')&&one('input[value="restricted"]').checked,
+        panelHidden:!!one('.models-restricted')&&one('.models-restricted').hidden,
+        search:one('input[type="search"]')?one('input[type="search"]').value:null,
+        status:(one('.models-status')&&one('.models-status').innerText)||'',
+        warning:warning?warning.innerText:'',
+        warningVisible:!!warning&&!warning.hidden,
+        items:items,
+        text:(root.innerText||'').slice(0,1200)
+      };
+    `)
+  );
+}
+
+async function setModelMode(cdp, mode) {
+  const result = await cdp.evaluate(
+    modelRootExpression(
+      `
+      if(!root)return {ok:false,reason:'missing'};
+      const radio=root.querySelector('input[type="radio"][value="'+arguments[0]+'"]');
+      if(!radio)return {ok:false,reason:'missing-radio'};
+      if(!radio.checked)radio.click();
+      return {ok:true,value:radio.value,checked:radio.checked};
+      `,
+      mode
+    )
+  );
+  if (!result || !result.ok) throw new Error('无法切换模型选择模式: ' + JSON.stringify(result));
+  await sleep(80);
+}
+
+async function setModelSearch(cdp, value) {
+  const result = await cdp.evaluate(
+    modelRootExpression(
+      `
+      if(!root)return {ok:false,reason:'missing'};
+      const el=root.querySelector('input[type="search"]');
+      if(!el)return {ok:false,reason:'missing-search'};
+      el.focus();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el,String(arguments[0]));
+      el.dispatchEvent(new Event('input',{bubbles:true}));
+      return {ok:true,value:el.value,active:document.activeElement===el};
+      `,
+      value
+    )
+  );
+  if (!result || !result.ok) throw new Error('无法写入模型搜索: ' + JSON.stringify(result));
+  await sleep(60);
+  return result;
+}
+
+async function setModelChecked(cdp, id, checked) {
+  const result = await cdp.evaluate(
+    modelRootExpression(
+      `
+      if(!root)return {ok:false,reason:'missing'};
+      const target=String(arguments[0]);
+      const items=[...root.querySelectorAll('.models-item')];
+      const item=items.find(function(candidate){
+        const text=(candidate.innerText||'').replace(/\\s+/g,' ').replace(/（目录未列出）\\s*$/,'').trim();
+        return text===target;
+      });
+      if(!item)return {ok:false,reason:'missing-model',ids:items.map(function(i){return (i.innerText||'').trim();})};
+      const box=item.querySelector('input[type="checkbox"]');
+      if(!box)return {ok:false,reason:'missing-checkbox'};
+      if(box.checked!==Boolean(arguments[1]))box.click();
+      return {ok:true,id:target,checked:box.checked};
+      `,
+      id,
+      Boolean(checked)
+    )
+  );
+  if (!result || !result.ok) throw new Error('无法勾选模型 ' + id + ': ' + JSON.stringify(result));
+  await sleep(60);
+  return result;
+}
+
+async function addManualModel(cdp, id) {
+  const result = await cdp.evaluate(
+    modelRootExpression(
+      `
+      if(!root)return {ok:false,reason:'missing'};
+      const input=root.querySelector('.models-manual input[type="text"]');
+      const button=root.querySelector('.models-add');
+      if(!input||!button)return {ok:false,reason:'missing-manual'};
+      input.focus();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,String(arguments[0]));
+      input.dispatchEvent(new Event('input',{bubbles:true}));
+      button.click();
+      return {ok:true,value:input.value};
+      `,
+      id
+    )
+  );
+  if (!result || !result.ok) throw new Error('无法手动添加模型: ' + JSON.stringify(result));
+  await sleep(80);
+}
+
+async function refreshModelDirectory(cdp) {
+  const result = await cdp.evaluate(
+    modelRootExpression(
+      `
+      if(!root)return {ok:false,reason:'missing'};
+      const button=root.querySelector('.models-refresh');
+      if(!button)return {ok:false,reason:'missing-refresh'};
+      if(button.disabled)return {ok:false,reason:'disabled'};
+      button.click();
+      return {ok:true};
+      `
+    )
+  );
+  if (!result || !result.ok) throw new Error('无法刷新模型目录: ' + JSON.stringify(result));
+  await sleep(50);
 }
 
 async function applyTheme(cdp, theme) {
@@ -1043,9 +1269,9 @@ async function runApiContract(server) {
 
   await step('mock API: 详情仅在显式请求时读取', async () => {
     const before = server.counters.detailReads;
-    const detail = await apiRequest(server, 'GET', '/requests/req-002');
+    const detail = await apiRequest(server, 'GET', '/requests/detail?id=req-002');
     check(
-      'GET /requests/{id} 返回 redacted 详情',
+      'GET /requests/detail 返回 redacted 详情',
       detail.status === 200 &&
         detail.body.capture_status === 'redacted' &&
         detail.body.headers.Authorization[0] === 'Bearer [redacted]' &&
@@ -1062,7 +1288,7 @@ async function runApiContract(server) {
     return 'detail/summary=ok';
   });
 
-  await step('mock API: Key CRUD 与只在创建/轮换返回明文', async () => {
+  await step('mock API: Key CRUD 使用固定 query-ID 路由且只在创建/轮换返回明文', async () => {
     const created = await apiRequest(server, 'POST', '/keys', {
       body: {
         label: '契约测试 Key',
@@ -1079,15 +1305,110 @@ async function runApiContract(server) {
       created.status
     );
     const id = created.body.key.id;
-    const rotated = await apiRequest(server, 'POST', '/keys/' + encodeURIComponent(id) + '/rotate');
-    check('POST rotate 返回新 secret', rotated.status === 200 && rotated.body.secret !== created.body.secret);
-    const reset = await apiRequest(server, 'POST', '/keys/' + encodeURIComponent(id) + '/reset', {
+    const updated = await apiRequest(server, 'PUT', '/keys?id=' + encodeURIComponent(id), {
+      body: {
+        label: '契约测试 Key（编辑）',
+        enabled: true,
+        expires_at: null,
+        max_concurrent: 2,
+        allowed_models: [],
+        limits: { five_hour: 0, week: 0, month: 0, total: 0 }
+      }
+    });
+    check('PUT /keys?id 更新且默认 all 保持 []', updated.status === 200 && Array.isArray(updated.body.allowed_models) && updated.body.allowed_models.length === 0);
+    const rotated = await apiRequest(server, 'POST', '/keys/rotate?id=' + encodeURIComponent(id));
+    check('POST /keys/rotate?id 返回新 secret', rotated.status === 200 && rotated.body.secret !== created.body.secret);
+    const reset = await apiRequest(server, 'POST', '/keys/reset?id=' + encodeURIComponent(id), {
       body: { windows: ['five_hour', 'total'] }
     });
-    check('POST reset 清零所选窗口', reset.status === 200 && reset.body.used.five_hour === 0 && reset.body.used.total === 0);
-    const revoked = await apiRequest(server, 'DELETE', '/keys/' + encodeURIComponent(id));
-    check('DELETE /keys/{id} 返回 204', revoked.status === 204);
+    check('POST /keys/reset?id 清零所选窗口', reset.status === 200 && reset.body.used.five_hour === 0 && reset.body.used.total === 0);
+    const blockedBefore = JSON.parse(JSON.stringify(server.state.keys.find((key) => key.id === 'key-blocked')));
+    const recovered = await apiRequest(server, 'POST', '/keys/recover?id=key-blocked', {
+      body: { acknowledge: true }
+    });
+    check(
+      'POST /keys/recover?id 显式 acknowledge 且不重置计数器',
+      recovered.status === 200 &&
+        recovered.body.blocked_reason === '' &&
+        JSON.stringify(recovered.body.used) === JSON.stringify(blockedBefore.used) &&
+        JSON.stringify(recovered.body.starts) === JSON.stringify(blockedBefore.starts) &&
+        JSON.stringify(recovered.body.resets) === JSON.stringify(blockedBefore.resets),
+      JSON.stringify(recovered.body)
+    );
+    const revoked = await apiRequest(server, 'DELETE', '/keys?id=' + encodeURIComponent(id));
+    check('DELETE /keys?id 返回 204', revoked.status === 204);
+
+    // 旧动态路由只允许作为负测试出现：必须 404 且没有副作用。
+    const snapshot = JSON.stringify(server.state.keys);
+    for (const legacy of [
+      ['PUT', '/keys/key-alpha'],
+      ['DELETE', '/keys/key-alpha'],
+      ['POST', '/keys/key-alpha/rotate'],
+      ['POST', '/keys/key-alpha/reset'],
+      ['POST', '/keys/key-alpha/recover'],
+      ['GET', '/requests/req-001']
+    ]) {
+      const old = await apiRequest(server, legacy[0], legacy[1]);
+      check('旧动态路由 404: ' + legacy[0] + ' ' + legacy[1], old.status === 404, String(old.status));
+    }
+    check('旧动态路由没有改变 Key 状态', JSON.stringify(server.state.keys) === snapshot);
     return 'keys=ok';
+  });
+
+  await step('mock API: CPA auth-files 模型目录（非 pricing、runtime、失败/延迟）', async () => {
+    const filesResponse = await fetch(server.origin + mock.AUTH_FILES_PATH, {
+      headers: { Authorization: 'Bearer ' + mock.DEFAULT_MANAGEMENT_KEY }
+    });
+    const filesBody = await filesResponse.json();
+    check(
+      'GET auth-files 返回 files[].name 与 runtime',
+      filesResponse.status === 200 &&
+        Array.isArray(filesBody.files) &&
+        filesBody.files.length >= 4 &&
+        filesBody.files.some((file) => file.runtime === true) &&
+        filesBody.files.every((file) => typeof file.name === 'string'),
+      JSON.stringify(filesBody)
+    );
+    check('auth-files 不暴露凭据', !/secret|DO-NOT-LEAK|api_key/i.test(JSON.stringify(filesBody)));
+
+    const ids = [];
+    for (const file of filesBody.files) {
+      const response = await fetch(
+        server.origin + mock.AUTH_FILES_PATH + '/models?name=' + encodeURIComponent(file.name),
+        { headers: { Authorization: 'Bearer ' + mock.DEFAULT_MANAGEMENT_KEY } }
+      );
+      const body = await response.json();
+      check('auth-files/models 返回至少 4 个真实模型: ' + file.name, response.status === 200 && body.models.length >= 4, JSON.stringify(body));
+      for (const model of body.models) ids.push(model.id);
+    }
+    check('模型目录不是 pricing 快照', new Set(ids).size >= 8 && ids.some((id) => !server.state.settings.pricing.prices.some((price) => price.model === id)));
+
+    await fetch(server.origin + '/__mock/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auth_files: { fail_names: ['google-vertex.json'] } })
+    });
+    const failed = await fetch(
+      server.origin + mock.AUTH_FILES_PATH + '/models?name=google-vertex.json',
+      { headers: { Authorization: 'Bearer ' + mock.DEFAULT_MANAGEMENT_KEY } }
+    );
+    check('auth-files 部分失败可注入', failed.status === 502, String(failed.status));
+    await fetch(server.origin + '/__mock/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auth_files: { delay_ms: 150 } })
+    });
+    const started = Date.now();
+    await fetch(server.origin + mock.AUTH_FILES_PATH, {
+      headers: { Authorization: 'Bearer ' + mock.DEFAULT_MANAGEMENT_KEY }
+    });
+    check('auth-files 延迟可注入', Date.now() - started >= 120, String(Date.now() - started) + 'ms');
+    await fetch(server.origin + '/__mock/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auth_files: { delay_ms: 0, fail_names: [], fail_models: false, fail_root: false } })
+    });
+    return 'auth-files=ok';
   });
 
   await step('mock API: settings/prices/compact 全路由', async () => {
@@ -1134,10 +1455,13 @@ function suffixOf(call) {
 
 function callPattern(call) {
   const suffix = suffixOf(call);
-  if (/^\/keys\/[^/]+\/rotate$/.test(suffix)) return 'POST /keys/{id}/rotate';
-  if (/^\/keys\/[^/]+\/reset$/.test(suffix)) return 'POST /keys/{id}/reset';
-  if (/^\/keys\/[^/]+$/.test(suffix)) return call.method + ' /keys/{id}';
-  if (/^\/requests\/[^/]+$/.test(suffix)) return 'GET /requests/{id}';
+  if (suffix === '/keys/rotate') return 'POST /keys/rotate';
+  if (suffix === '/keys/reset') return 'POST /keys/reset';
+  if (suffix === '/keys/recover') return 'POST /keys/recover';
+  if (suffix === '/keys' && (call.method === 'PUT' || call.method === 'DELETE')) {
+    return call.method + ' /keys';
+  }
+  if (suffix === '/requests/detail') return 'GET /requests/detail';
   return call.method + ' ' + (suffix || '/');
 }
 
@@ -1241,6 +1565,7 @@ async function pricingEditorState(cdp) {
       return {
         present:true,
         auto:!!auto&&auto.checked,
+        manualProviderFields:root.querySelectorAll('[data-kind="manual"] input[id*="provider"], [data-kind="manual"] select[id*="provider"]').length,
         prices:[...root.querySelectorAll('[data-kind="manual"]')].map(function(row){
           return {model:field(row,'input[id*="-manual-model-"]'),rates:rates(row)};
         }),
@@ -1248,6 +1573,65 @@ async function pricingEditorState(cdp) {
           return {id:field(row,'input[id*="-rule-id-"]'),model:field(row,'input[id*="-rule-model-"]'),
             threshold:field(row,'input[id*="-rule-threshold-"]'),range:field(row,'input[id*="-rule-range-"]'),
             rates:rates(row)};
+        })
+      };
+      `
+    )
+  );
+}
+
+function pricingCatalogDetailsExpression(action) {
+  return pageFn(
+    `
+    const root=document.querySelector('[data-testid="observer-settings"]');
+    if(!root)return {ok:false,reason:'missing-settings'};
+    const details=[...root.querySelectorAll('details.settings-catalog')].find(function(el){
+      const summary=el.querySelector('summary');
+      return !!summary&&/生效价格明细/.test(summary.innerText);
+    });
+    if(!details)return {ok:false,reason:'missing-catalog'};
+    ${action}
+    return {ok:true,open:details.open};
+    `
+  );
+}
+
+async function openPricingCatalog(cdp) {
+  const result = await cdp.evaluate(pricingCatalogDetailsExpression('details.open=true;'));
+  if (!result || !result.ok) throw new Error('无法展开价格明细: ' + JSON.stringify(result));
+  await cdp.waitFor(
+    `(() => {const root=document.querySelector('[data-testid="observer-settings"]');` +
+      `if(!root)return false;const details=[...root.querySelectorAll('details.settings-catalog')].find(function(el){` +
+      `const summary=el.querySelector('summary');return !!summary&&/生效价格明细/.test(summary.innerText);});` +
+      `return !!details&&details.open&&details.querySelectorAll('tbody tr').length>0;})()`,
+    5000,
+    '价格明细已展开'
+  );
+}
+
+async function closePricingCatalog(cdp) {
+  await cdp
+    .evaluate(pricingCatalogDetailsExpression('details.open=false;'))
+    .catch(() => {});
+  await sleep(30);
+}
+
+async function pricingCatalogState(cdp) {
+  return cdp.evaluate(
+    pageFn(
+      `
+      const root=document.querySelector('[data-testid="observer-settings"]');
+      if(!root)return {present:false};
+      const details=[...root.querySelectorAll('details.settings-catalog')].find(function(el){
+        const summary=el.querySelector('summary');return !!summary&&/生效价格明细/.test(summary.innerText);
+      });
+      if(!details)return {present:false};
+      return {
+        present:true,
+        open:details.open,
+        summary:details.querySelector('summary').innerText.trim(),
+        rows:[...details.querySelectorAll('tbody tr')].map(function(row){
+          return [...row.children].map(function(cell){return cell.innerText.trim();});
         })
       };
       `
@@ -1407,6 +1791,14 @@ function absorbExpectedAuthDiagnostics(since) {
   const expected = phaseErrors.filter((entry) =>
     /401|unauthorized|invalid management key|登录失败|Failed to load resource/i.test(entry.text)
   );
+  expectedDiagnostics.push(...expected);
+  consoleErrors.push(...phaseErrors.filter((entry) => !expected.includes(entry)));
+}
+
+// 负向目录注入（部分失败/中止）会产生网络诊断；只豁免本次注入相关条目。
+function absorbExpectedDiagnostics(since, pattern) {
+  const phaseErrors = consoleErrors.splice(since);
+  const expected = phaseErrors.filter((entry) => pattern.test((entry.text || '') + ' ' + (entry.url || '')));
   expectedDiagnostics.push(...expected);
   consoleErrors.push(...phaseErrors.filter((entry) => !expected.includes(entry)));
 }
@@ -1656,17 +2048,27 @@ async function runBrowserSuite(server, cdp) {
       await gotoPage(cdp, 'requests');
       await waitRequestsLoaded(cdp);
       const before = server.counters.detailReads;
-      const beforeCalls = managementCalls(server).filter((call) => /^\/requests\/[^/]+$/.test(suffixOf(call))).length;
+      const beforeCalls = managementCalls(server).filter(
+        (call) => call.method === 'GET' && suffixOf(call) === '/requests/detail'
+      ).length;
       check('列表渲染后未读取详情', beforeCalls === 0 && before === 0, 'detailCalls=' + beforeCalls);
 
       const clicked = await findModelButton(cdp, mock.XSS.model, true);
       check('日志表恶意模型也是可点击按钮', clicked && clicked.ok, JSON.stringify(clicked));
       const dialog = await waitDialog(cdp, 15000);
       check('点击后出现详情对话框', dialog.present, JSON.stringify(dialog.buttons));
-      const afterCalls = managementCalls(server).filter((call) => /^\/requests\/[^/]+$/.test(suffixOf(call))).length;
+      const afterCalls = managementCalls(server).filter(
+        (call) => call.method === 'GET' && suffixOf(call) === '/requests/detail'
+      ).length;
       check('点击后恰好新增一次详情读取', afterCalls === beforeCalls + 1, 'detailCalls=' + afterCalls);
-      const detailCall = managementCalls(server).filter((call) => /^\/requests\/[^/]+$/.test(suffixOf(call))).pop();
-      check('详情读取的是被点击的恶意记录', detailCall && /\/requests\/req-002$/.test(detailCall.path), detailCall && detailCall.path);
+      const detailCall = managementCalls(server).filter(
+        (call) => call.method === 'GET' && suffixOf(call) === '/requests/detail'
+      ).pop();
+      check(
+        '详情读取的是被点击的恶意记录',
+        detailCall && detailCall.query && detailCall.query.id === 'req-002',
+        detailCall && JSON.stringify(detailCall.query)
+      );
       check(
         '详情对话框有可访问名称',
         Boolean(dialog.name),
@@ -1688,7 +2090,7 @@ async function runBrowserSuite(server, cdp) {
     });
   }
 
-  await step('Key 管理: 列表/创建/编辑/启停/轮换/重置/撤销', async () => {
+  await step('Key 管理: 模型选择器/默认 all/丢失 ID/搜索/部分失败/中止/全动作', async () => {
     await gotoPage(cdp, 'keys');
     keysReady = true;
     await cdp.waitFor(
@@ -1697,75 +2099,345 @@ async function runBrowserSuite(server, cdp) {
       'Key 列表'
     );
     const pageText = await text(cdp, '#content');
-    check('Key 列表展示假 Key', /生产 Key|已过期 Key/.test(pageText), pageText.slice(0, 200));
+    check('Key 列表展示假 Key', /生产 Key|已过期 Key|待恢复计费 Key/.test(pageText), pageText.slice(0, 240));
 
     const injection = await injectionAudit(cdp);
     check('恶意 Key 标签只作为文本', injection.flag === null && injection.injected === 0, JSON.stringify(injection));
-    check('页面保留恶意 Key 标签字面量', pageText.includes(mock.XSS.label), pageText.slice(0, 200));
+    check('页面保留恶意 Key 标签字面量', pageText.includes(mock.XSS.label), pageText.slice(0, 240));
 
     const listAudit = await accessibilityAudit(cdp, '#content');
     check('Key 页面控件均有可访问名称', listAudit.unnamed.length === 0, JSON.stringify(listAudit.unnamed));
 
-    await clickText(cdp, '新建 Key', { selector: '#content button, button' });
-    const form = await waitDialog(cdp);
-    check('新建 Key 打开对话框', form.present);
-    const formAudit = await accessibilityAudit(cdp, 'dialog, [role="dialog"], [aria-modal="true"]');
+    const setKeyField = (label, value) => setFieldByLabel(cdp, label, value, DIALOG_ROOT);
+    const clickSave = () =>
+      clickText(cdp, '保存', {
+        selector: 'dialog button, [role="dialog"] button, [aria-modal="true"] button'
+      });
+    const keyByLabel = (label) => server.state.keys.find((item) => item.label === label);
+    const openNew = async () => {
+      await gotoPage(cdp, 'keys');
+      await clickText(cdp, '新建 Key', { selector: '#content button, button' });
+      const form = await waitDialog(cdp);
+      check('新建 Key 打开对话框', form.present);
+      return form;
+    };
+    const closeSecret = async (secret, what) => {
+      check(what + '后一次性展示假 secret', /^observer_sk_[0-9a-f]{64}$/.test(secret), secret.slice(0, 16) + '…');
+      check(what + ' secret 不出现在 URL', server.calls.every((call) => !call.path.includes('observer_sk_')));
+      await closeDialog(cdp).catch(() => {});
+      await sleep(150);
+      check(what + '后 secret 从页面清除', await secretAbsent(cdp));
+    };
+
+    const form = await openNew();
+    const formAudit = await accessibilityAudit(cdp, DIALOG_ROOT);
     check('Key 表单控件均有可访问名称', formAudit.unnamed.length === 0, JSON.stringify(formAudit.unnamed));
     check('Key 表单对话框有可访问名称', Boolean(form.name), JSON.stringify({ tag: form.tag, role: form.role, name: form.name }));
+    const hasModelLabel = await cdp.evaluate(
+      modelRootExpression('return !!root && root.getAttribute("aria-label")==="允许模型";')
+    );
     for (const label of ['标签', '到期时间', '并发上限', '允许模型', '5小时额度', '周额度', '月额度', '总额度']) {
       const compactText = form.text.replace(/\s+/g, '');
-      check('Key 表单含标签「' + label + '」', compactText.includes(label.replace(/\s+/g, '')), form.text.slice(0, 300));
+      const present =
+        compactText.includes(label.replace(/\s+/g, '')) || (label === '允许模型' && hasModelLabel);
+      check('Key 表单含标签「' + label + '」', present, form.text.slice(0, 300));
+    }
+    check('Key 表单不再使用旧允许模型 textarea', !form.text.includes('每行精确模型'), form.text.slice(0, 300));
+    check('Key 表单挂载 models.js 选择器', await modelPickerPresent(cdp));
+    await waitModelDirectory(cdp);
+    let picker = await modelPickerState(cdp);
+    check(
+      '新建默认“不限模型”（all）且目录提供至少四个模型',
+      picker.present && picker.all === true && picker.restricted === false && picker.items.length >= 4,
+      JSON.stringify({ all: picker.all, restricted: picker.restricted, items: picker.items })
+    );
+    check('默认 all 时受限面板隐藏', picker.panelHidden === true, JSON.stringify(picker.panelHidden));
+
+    const defaultLabel = '自动化默认全部 Key';
+    await setKeyField('标签', defaultLabel);
+    await setKeyField('并发上限', '3');
+    await setKeyField('5小时额度', '5');
+    await setKeyField('周额度', '20');
+    await setKeyField('月额度', '50');
+    await setKeyField('总额度', '100');
+    const createBefore = server.state.counters.keyCreates;
+    await clickSave();
+    const defaultCreate = await waitForCall(
+      server,
+      (call) => call.method === 'POST' && suffixOf(call) === '/keys' && call.request_body && call.request_body.label === defaultLabel,
+      20000,
+      'POST /keys 默认 all'
+    );
+    check('默认 all 创建发送 POST /keys', defaultCreate.status === 201 && server.state.counters.keyCreates === createBefore + 1);
+    check(
+      'default[] 创建保持 allowed_models=[]',
+      Array.isArray(defaultCreate.request_body.allowed_models) && defaultCreate.request_body.allowed_models.length === 0,
+      JSON.stringify(defaultCreate.request_body)
+    );
+    const defaultKey = keyByLabel(defaultLabel);
+    check('mock 创建了 default[] Key', Boolean(defaultKey), server.state.keys.map((item) => item.label).join('|'));
+    await sleep(250);
+    await closeSecret(await waitForSecret(cdp), '默认 Key 创建');
+
+    if (defaultKey) {
+      await cdp.waitFor(
+        '(() => {' + VISIBLE_SNIPPET + 'return document.querySelector("#content").innerText.includes(' + js(defaultLabel) + ');})()',
+        15000,
+        'default[] Key 出现在列表'
+      );
+      await clickInRow(cdp, defaultLabel, '编辑');
+      const editDialog = await waitDialog(cdp);
+      check('编辑 default[] Key 打开对话框', editDialog.present);
+      await waitModelDirectory(cdp);
+      picker = await modelPickerState(cdp);
+      check('编辑 default[] Key 仍为 all', picker.all === true && picker.restricted === false, JSON.stringify(picker));
+      await setKeyField('标签', defaultLabel + '（编辑）');
+      await clickSave();
+      const defaultEdit = await waitForCall(
+        server,
+        (call) => call.method === 'PUT' && suffixOf(call) === '/keys' && call.query.id === defaultKey.id,
+        20000,
+        'PUT /keys?id 默认 all'
+      );
+      check(
+        '编辑 default[] Key 保持 allowed_models=[]',
+        defaultEdit.status === 200 && Array.isArray(defaultEdit.request_body.allowed_models) && defaultEdit.request_body.allowed_models.length === 0,
+        JSON.stringify(defaultEdit.request_body)
+      );
+      await closeDialog(cdp).catch(() => {});
     }
 
-    const createdLabel = '自动化验收 Key';
-    await setFieldByLabel(cdp, '标签', createdLabel, 'dialog, [role="dialog"], [aria-modal="true"]');
-    await setFieldByLabel(cdp, '并发上限', '3', 'dialog, [role="dialog"], [aria-modal="true"]').catch(() => {});
-    await setFieldByLabel(cdp, '允许模型', 'gpt-5-codex\nclaude-opus-4-1', 'dialog, [role="dialog"], [aria-modal="true"]').catch(() => {});
-    await setFieldByLabel(cdp, '5小时额度', '5', 'dialog, [role="dialog"], [aria-modal="true"]').catch(() => {});
-    await setFieldByLabel(cdp, '周额度', '20', 'dialog, [role="dialog"], [aria-modal="true"]').catch(() => {});
-    await setFieldByLabel(cdp, '月额度', '50', 'dialog, [role="dialog"], [aria-modal="true"]').catch(() => {});
-    await setFieldByLabel(cdp, '总额度', '100', 'dialog, [role="dialog"], [aria-modal="true"]').catch(() => {});
-    const createBefore = server.state.counters.keyCreates;
-    await clickText(cdp, '保存', { selector: 'dialog button, [role="dialog"] button, [aria-modal="true"] button' });
-    const createdCall = await waitForCall(
-      server,
-      (call) => call.method === 'POST' && suffixOf(call) === '/keys' && call.request_body && call.request_body.label === createdLabel,
-      20000,
-      'POST /keys'
+    // 旧 textarea 用例改为通过组件勾选两个精确模型，并验证搜索状态不会被勾选重绘破坏。
+    await openNew();
+    await waitModelDirectory(cdp);
+    const restrictedLabel = '自动化验收 Key';
+    await setKeyField('标签', restrictedLabel);
+    await setKeyField('并发上限', '3');
+    await setKeyField('5小时额度', '5');
+    await setKeyField('周额度', '20');
+    await setKeyField('月额度', '50');
+    await setKeyField('总额度', '100');
+    await setModelMode(cdp, 'restricted');
+    picker = await modelPickerState(cdp);
+    check('切换到“仅允许所选模型”显示受限面板', picker.restricted === true && picker.panelHidden === false, JSON.stringify(picker));
+    await setModelSearch(cdp, 'gpt');
+    let searching = await modelPickerState(cdp);
+    check(
+      '模型搜索过滤列表并保留输入',
+      searching.search === 'gpt' && searching.items.length > 0 && searching.items.every((item) => item.id.toLowerCase().includes('gpt')),
+      JSON.stringify(searching.items)
     );
-    check('保存创建 Key 发送 POST /keys', createdCall.status === 201 && server.state.counters.keyCreates === createBefore + 1);
-    const key = server.state.keys.find((item) => item.label === createdLabel);
-    check('mock 创建了 Key', Boolean(key), server.state.keys.map((item) => item.label).join('|'));
-    await sleep(300);
-    const createdSecret = await waitForSecret(cdp);
-    check('创建后一次性展示假 secret', /^observer_sk_[0-9a-f]{64}$/.test(createdSecret), createdSecret.slice(0, 16) + '…');
-    check('secret 不出现在 URL', server.calls.every((call) => !call.path.includes('observer_sk_')));
-    await closeDialog(cdp).catch(() => {});
-    await sleep(150);
-    check('关闭后 secret 从页面清除', await secretAbsent(cdp));
+    await setModelChecked(cdp, 'gpt-5-codex', true);
+    searching = await modelPickerState(cdp);
+    check(
+      '勾选模型后搜索词仍保留',
+      searching.search === 'gpt' && searching.items.find((item) => item.id === 'gpt-5-codex').checked === true,
+      JSON.stringify(searching)
+    );
+    await setModelSearch(cdp, 'claude');
+    await setModelChecked(cdp, 'claude-opus-4-1', true);
+    searching = await modelPickerState(cdp);
+    check(
+      '第二个模型的搜索词保留且已勾选',
+      searching.search === 'claude' && searching.items.find((item) => item.id === 'claude-opus-4-1').checked === true,
+      JSON.stringify(searching)
+    );
+    await setModelSearch(cdp, '');
+    picker = await modelPickerState(cdp);
+    check(
+      '组件恰有两个已选精确模型',
+      picker.items.filter((item) => item.checked).map((item) => item.id).sort().join(',') === 'claude-opus-4-1,gpt-5-codex',
+      JSON.stringify(picker.items.filter((item) => item.checked))
+    );
+    await clickSave();
+    const restrictedCreate = await waitForCall(
+      server,
+      (call) => call.method === 'POST' && suffixOf(call) === '/keys' && call.request_body && call.request_body.label === restrictedLabel,
+      20000,
+      'POST /keys 两个模型'
+    );
+    check(
+      '组件选择两个模型后创建 payload 精确匹配',
+      JSON.stringify(restrictedCreate.request_body.allowed_models) === JSON.stringify(['gpt-5-codex', 'claude-opus-4-1']),
+      JSON.stringify(restrictedCreate.request_body.allowed_models)
+    );
+    const key = keyByLabel(restrictedLabel);
+    check('mock 创建了受限 Key', Boolean(key), server.state.keys.map((item) => item.label).join('|'));
+    await sleep(250);
+    await closeSecret(await waitForSecret(cdp), '受限 Key 创建');
 
     if (key) {
-      const editedLabel = '自动化验收 Key（编辑）';
       await cdp.waitFor(
-        '(() => {' + VISIBLE_SNIPPET + 'return document.querySelector("#content").innerText.includes(' + js(createdLabel) + ');})()',
+        '(() => {' + VISIBLE_SNIPPET + 'return document.querySelector("#content").innerText.includes(' + js(restrictedLabel) + ');})()',
         15000,
-        '新 Key 出现在列表'
+        '受限 Key 出现在列表'
       );
-      await clickInRow(cdp, createdLabel, '编辑');
-      const editDialog = await waitDialog(cdp);
-      check('编辑打开对话框', editDialog.present);
-      await setFieldByLabel(cdp, '标签', editedLabel, 'dialog, [role="dialog"], [aria-modal="true"]');
-      await clickText(cdp, '保存', { selector: 'dialog button, [role="dialog"] button, [aria-modal="true"] button' });
-      const editCall = await waitForCall(
+      await clickInRow(cdp, restrictedLabel, '编辑');
+      await waitDialog(cdp);
+      await waitModelDirectory(cdp);
+      picker = await modelPickerState(cdp);
+      check(
+        '编辑受限 Key 回显 restricted + 两个勾选',
+        picker.restricted === true &&
+          picker.items.filter((item) => item.checked).map((item) => item.id).sort().join(',') === 'claude-opus-4-1,gpt-5-codex',
+        JSON.stringify(picker.items)
+      );
+      await setKeyField('标签', restrictedLabel + '（编辑）');
+      await clickSave();
+      const restrictedEdit = await waitForCall(
         server,
-        (call) => call.method === 'PUT' && suffixOf(call) === '/keys/' + key.id && call.request_body && call.request_body.label === editedLabel,
+        (call) => call.method === 'PUT' && suffixOf(call) === '/keys' && call.query.id === key.id,
         20000,
-        'PUT /keys/{id}'
+        'PUT /keys?id 受限'
       );
-      check('编辑发送 PUT /keys/{id}', editCall.status === 200);
-      await sleep(300);
+      check(
+        '编辑受限 Key 保持两个精确 ID',
+        JSON.stringify(restrictedEdit.request_body.allowed_models) === JSON.stringify(['gpt-5-codex', 'claude-opus-4-1']),
+        JSON.stringify(restrictedEdit.request_body.allowed_models)
+      );
       await closeDialog(cdp).catch(() => {});
+    }
 
+    // 目录已不存在的历史 ID 必须保留并标记，手动精确 ID 也可追加。
+    await gotoPage(cdp, 'keys');
+    await clickInRow(cdp, '历史受限 Key', '编辑');
+    await waitDialog(cdp);
+    await waitModelDirectory(cdp);
+    picker = await modelPickerState(cdp);
+    const retired = picker.items.find((item) => item.id === 'retired-model-v0');
+    check(
+      '编辑保留目录外历史 ID 并标记（目录未列出）',
+      picker.restricted === true && retired && retired.checked === true && retired.missing === true,
+      JSON.stringify(picker.items)
+    );
+    check(
+      '历史 ID 与目录内 ID 同时保持勾选',
+      picker.items.find((item) => item.id === 'gpt-5-codex').checked === true,
+      JSON.stringify(picker.items)
+    );
+    await addManualModel(cdp, 'manual/provider-exact-v9');
+    picker = await modelPickerState(cdp);
+    check(
+      '手动添加精确模型 ID 后自动勾选',
+      picker.items.find((item) => item.id === 'manual/provider-exact-v9') &&
+        picker.items.find((item) => item.id === 'manual/provider-exact-v9').checked === true,
+      JSON.stringify(picker.items)
+    );
+    await clickSave();
+    const legacyEdit = await waitForCall(
+      server,
+      (call) => call.method === 'PUT' && suffixOf(call) === '/keys' && call.query.id === 'key-legacy',
+      20000,
+      'PUT /keys?id 历史'
+    );
+    check(
+      '保存保留丢失 ID 与手动精确 ID',
+      JSON.stringify(legacyEdit.request_body.allowed_models) ===
+        JSON.stringify(['retired-model-v0', 'gpt-5-codex', 'manual/provider-exact-v9']),
+      JSON.stringify(legacyEdit.request_body.allowed_models)
+    );
+    await closeDialog(cdp).catch(() => {});
+
+    // 部分账户目录失败：警告可见、成功模型仍可用，模式和已选不丢，且不泄漏凭据。
+    await fetch(server.origin + '/__mock/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auth_files: { fail_names: ['google-vertex.json'] } })
+    });
+    await openNew();
+    // 目录有 5 分钟缓存；部分失败用例必须点“刷新模型列表”强制绕过缓存。
+    const partialDiagnosticsStart = consoleErrors.length;
+    await refreshModelDirectory(cdp);
+    await waitModelDirectory(cdp);
+    await cdp.waitFor(
+      modelRootExpression(
+        'return !!root && !!root.querySelector(".models-warning") && !root.querySelector(".models-warning").hidden;'
+      ),
+      15000,
+      '部分目录失败警告'
+    );
+    picker = await modelPickerState(cdp);
+    check(
+      '部分目录失败显示警告且保留成功模型',
+      picker.warningVisible === true &&
+        /部分账户/.test(picker.warning) &&
+        picker.items.some((item) => item.id === 'gpt-5-codex') &&
+        picker.items.some((item) => item.id === 'claude-opus-4-1'),
+      JSON.stringify({ warning: picker.warning, items: picker.items })
+    );
+    check(
+      '部分失败不改变默认 all 模式',
+      picker.all === true && picker.restricted === false,
+      JSON.stringify(picker)
+    );
+    check(
+      '模型目录 UI 不包含 auth-file/管理凭据',
+      !/DO-NOT-LEAK|observer-browser-secret|Bearer\s/i.test(picker.text),
+      picker.text
+    );
+    await closeDialog(cdp).catch(() => {});
+    absorbExpectedDiagnostics(partialDiagnosticsStart, /502|auth-files\/models/);
+    await fetch(server.origin + '/__mock/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auth_files: { fail_names: [], delay_ms: 0, fail_models: false, fail_root: false } })
+    });
+
+    // 慢目录中关闭表单必须 abort；迟到响应不得写入 UI 或泄漏凭据。
+    await fetch(server.origin + '/__mock/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auth_files: { delay_ms: 1200 } })
+    });
+    const abortSeq = server.calls.reduce((max, call) => Math.max(max, call.seq || 0), 0);
+    await gotoPage(cdp, 'keys');
+    await clickText(cdp, '新建 Key', { selector: '#content button, button' });
+    await waitDialog(cdp);
+    await cdp.waitFor(
+      '(() => {' + VISIBLE_SNIPPET +
+        'const dialogs=[...document.querySelectorAll("' + DIALOG_ROOT + '")].filter(visible);' +
+        'const host=dialogs.length?dialogs[dialogs.length-1]:document;' +
+        'return !!host.querySelector("' + MODEL_ROOT_SELECTOR + '");})()',
+      5000,
+      '慢目录选择器已挂载'
+    );
+    // 缓存会让打开表单直接完成；强制刷新后立即关闭，才能覆盖真正在途的请求。
+    const abortDiagnosticsStart = consoleErrors.length;
+    await refreshModelDirectory(cdp);
+    await sleep(100);
+    await closeDialog(cdp).catch(() => {});
+    await sleep(1500);
+    const leaked = await cdp.evaluate(
+      pageFn(
+        VISIBLE_SNIPPET +
+          'return {dialog:[...document.querySelectorAll("' + DIALOG_ROOT + '")].some(visible),' +
+          'text:document.body.innerText,' +
+          'secret:/DO-NOT-LEAK|observer-browser-secret|Bearer\\s/i.test(document.body.innerText)};'
+      )
+    );
+    check('中止后无残留模型对话框', leaked.dialog === false, JSON.stringify(leaked.dialog));
+    check('中止后迟到目录响应不泄漏凭据', leaked.secret === false, leaked.text.slice(0, 300));
+    const abortCalls = server.calls.filter((call) => call.seq > abortSeq && call.kind === 'cpa');
+    check(
+      '慢目录请求被浏览器中止或已完成且不携带凭据',
+      abortCalls.every((call) => !('authorization' in call)) &&
+        (abortCalls.length === 0 || abortCalls.some((call) => call.aborted === true) || abortCalls.every((call) => call.status === 200)),
+      JSON.stringify(abortCalls)
+    );
+    absorbExpectedDiagnostics(abortDiagnosticsStart, /ERR_ABORTED|auth-files/);
+    await fetch(server.origin + '/__mock/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auth_files: { delay_ms: 0 } })
+    });
+    await openNew();
+    await waitModelDirectory(cdp);
+    picker = await modelPickerState(cdp);
+    check('中止后重新打开目录恢复正常', picker.present && picker.warningVisible === false && picker.items.length >= 4, JSON.stringify(picker));
+    await closeDialog(cdp).catch(() => {});
+
+    if (key) {
+      const editedLabel = restrictedLabel + '（编辑）';
       const toggle = async (action, enabled) => {
         await cdp.waitFor(
           '(() => {' + VISIBLE_SNIPPET +
@@ -1775,44 +2447,41 @@ async function runBrowserSuite(server, cdp) {
             'return rows.some((row)=>[...row.querySelectorAll("button,[role=button]")].filter(visible)' +
             '.some((b)=>{const t=norm(b.innerText);return t.includes(' + js(action) + ')||/操作|更多|菜单/.test(t);}));})()',
           15000,
-          '编辑后的 Key 出现操作按钮'
+          '受限 Key 出现操作按钮'
         );
         const startSeq = server.calls.reduce((max, call) => Math.max(max, call.seq || 0), 0);
         await clickInRow(cdp, editedLabel, action);
         await acceptConfirm(cdp, [action]);
-        const call = await waitForCall(
+        return waitForCall(
           server,
           (item) =>
             item.seq > startSeq &&
             item.method === 'PUT' &&
-            suffixOf(item) === '/keys/' + key.id &&
+            suffixOf(item) === '/keys' &&
+            item.query.id === key.id &&
             item.request_body &&
             item.request_body.enabled === enabled,
           15000,
-          action + ' -> PUT /keys/{id}'
+          action + ' -> PUT /keys?id'
         );
-        return call;
       };
+      await gotoPage(cdp, 'keys');
       const disabledCall = await toggle('停用', false);
-      check('停用发送 enabled=false 的 PUT', disabledCall.request_body.enabled === false);
+      check('停用发送 enabled=false 的 PUT /keys?id', disabledCall.request_body.enabled === false && disabledCall.status === 200);
       const enabledCall = await toggle('启用', true);
-      check('启用发送 enabled=true 的 PUT', enabledCall.request_body.enabled === true);
+      check('启用发送 enabled=true 的 PUT /keys?id', enabledCall.request_body.enabled === true && enabledCall.status === 200);
 
       await clickInRow(cdp, editedLabel, '轮换');
       await acceptConfirm(cdp, ['轮换']);
       const rotateCall = await waitForCall(
         server,
-        (call) => call.method === 'POST' && suffixOf(call) === '/keys/' + key.id + '/rotate',
+        (call) => call.method === 'POST' && suffixOf(call) === '/keys/rotate' && call.query.id === key.id,
         15000,
-        'POST rotate'
+        'POST /keys/rotate?id'
       );
-      check('轮换发送 POST /keys/{id}/rotate', rotateCall.status === 200);
+      check('轮换发送 POST /keys/rotate?id', rotateCall.status === 200);
       await sleep(250);
-      const rotatedSecret = await waitForSecret(cdp);
-      check('轮换后再次展示假 secret', /^observer_sk_[0-9a-f]{64}$/.test(rotatedSecret), rotatedSecret.slice(0, 16) + '…');
-      await closeDialog(cdp).catch(() => {});
-      await sleep(150);
-      check('关闭轮换 secret 后从页面清除', await secretAbsent(cdp));
+      await closeSecret(await waitForSecret(cdp), '轮换');
 
       await clickInRow(cdp, editedLabel, '重置');
       await sleep(300);
@@ -1830,12 +2499,12 @@ async function runBrowserSuite(server, cdp) {
       }
       const resetCall = await waitForCall(
         server,
-        (call) => call.method === 'POST' && suffixOf(call) === '/keys/' + key.id + '/reset',
+        (call) => call.method === 'POST' && suffixOf(call) === '/keys/reset' && call.query.id === key.id,
         15000,
-        'POST reset'
+        'POST /keys/reset?id'
       );
       check(
-        '重置发送 POST /keys/{id}/reset 且包含窗口',
+        '重置发送 POST /keys/reset?id 且包含窗口',
         resetCall.status === 200 && resetCall.request_body && Array.isArray(resetCall.request_body.windows) && resetCall.request_body.windows.length > 0,
         JSON.stringify(resetCall.request_body)
       );
@@ -1845,13 +2514,67 @@ async function runBrowserSuite(server, cdp) {
       await acceptConfirm(cdp, ['撤销', '删除']);
       const revokeCall = await waitForCall(
         server,
-        (call) => call.method === 'DELETE' && suffixOf(call) === '/keys/' + key.id,
+        (call) => call.method === 'DELETE' && suffixOf(call) === '/keys' && call.query.id === key.id,
         15000,
-        'DELETE /keys/{id}'
+        'DELETE /keys?id'
       );
-      check('撤销发送 DELETE /keys/{id}', revokeCall.status === 204);
+      check('撤销发送 DELETE /keys?id', revokeCall.status === 204);
     }
-    return 'key actions';
+
+    // 恢复：UI 必须先给出明确警告；确认后才发送 acknowledge:true，且不得重置计数器。
+    await gotoPage(cdp, 'keys');
+    const blocked = server.state.keys.find((item) => item.id === 'key-blocked');
+    const blockedBefore = JSON.parse(JSON.stringify(blocked));
+    const recoversBefore = server.counters.keyRecovers;
+    const dialogStart = nativeDialogs.length;
+    let warningText = '';
+    await clickInRow(cdp, '待恢复计费 Key', '恢复');
+    await sleep(250);
+    const warnDialog = await dialogInfo(cdp);
+    if (warnDialog.present) {
+      warningText = warnDialog.text || '';
+      // UI 要求显式勾选“已核对并处理缺失用量”，然后才启用确认按钮。
+      const checked = await cdp.evaluate(
+        pageFn(
+          VISIBLE_SNIPPET +
+            'const d=[...document.querySelectorAll("' + DIALOG_ROOT + '")].filter(visible).pop();' +
+            'if(!d)return 0;const boxes=[...d.querySelectorAll(\'input[type="checkbox"]\')].filter(visible);' +
+            'boxes.forEach((box)=>{if(!box.checked)box.click();});return boxes.length;'
+        )
+      );
+      check('恢复对话框要求勾选核对声明', checked >= 1, String(checked));
+      await acceptConfirm(cdp, ['恢复', '确认', '继续']);
+    }
+    const newDialogs = nativeDialogs.slice(dialogStart);
+    if (!warningText && newDialogs.length) warningText = newDialogs.map((dialog) => dialog.message).join(' | ');
+    check(
+      '恢复操作先显示未知计费/不可逆警告',
+      /未知|计费|不可逆|acknowledge|恢复/.test(warningText),
+      warningText || JSON.stringify(newDialogs)
+    );
+    const recoverCall = await waitForCall(
+      server,
+      (call) => call.method === 'POST' && suffixOf(call) === '/keys/recover' && call.query.id === 'key-blocked',
+      15000,
+      'POST /keys/recover?id'
+    );
+    check(
+      '恢复显式发送 acknowledge:true',
+      recoverCall.status === 200 && recoverCall.request_body && recoverCall.request_body.acknowledge === true,
+      JSON.stringify(recoverCall.request_body)
+    );
+    check('恢复清除 Key 级阻塞原因', blocked.blocked_reason === '', JSON.stringify(blocked.blocked_reason));
+    check(
+      '恢复不重置 used/starts/resets/limits',
+      JSON.stringify(blocked.used) === JSON.stringify(blockedBefore.used) &&
+        JSON.stringify(blocked.starts) === JSON.stringify(blockedBefore.starts) &&
+        JSON.stringify(blocked.resets) === JSON.stringify(blockedBefore.resets) &&
+        JSON.stringify(blocked.limits) === JSON.stringify(blockedBefore.limits),
+      JSON.stringify(blocked)
+    );
+    check('恢复只增加 keyRecovers 计数', server.counters.keyRecovers === recoversBefore + 1, String(server.counters.keyRecovers));
+
+    return 'models+key actions';
   }).then((ok) => {
     keysReady = keysReady || ok;
   });
@@ -1871,6 +2594,63 @@ async function runBrowserSuite(server, cdp) {
     const settingsBefore = JSON.stringify(server.state.settings);
     const pricingBefore = JSON.parse(JSON.stringify(server.state.settings.pricing));
     const manualIdBefore = await settingsFirstManualId(cdp);
+
+    // 8 MiB 上限：原生约束阻止点击提交；直接触发 submit 也必须被应用层拒绝且不发 PUT。
+    const putsBeforeOversize = settingsPutCount(server);
+    await setGeneralSettings(cdp, {
+      capture: true,
+      max_body_bytes: 8388609,
+      max_body_storage_bytes: 536870912,
+      raw_retention_hours: 48,
+      daily_retention_days: 730
+    });
+    const oversizeValidity = await cdp.evaluate(
+      pageFn(
+        `
+        const input=document.querySelector('input[id$="-max-body-bytes"]');
+        return input?{value:String(input.value),max:input.max,rangeOverflow:input.validity.rangeOverflow,valid:input.validity.valid}:null;
+        `
+      )
+    );
+    await clickSettingsTestId(cdp, 'settings-general-save');
+    await sleep(250);
+    check(
+      'max_body > 8MiB 被原生约束标记越界',
+      oversizeValidity &&
+        oversizeValidity.value === '8388609' &&
+        oversizeValidity.max === '8388608' &&
+        oversizeValidity.rangeOverflow === true &&
+        oversizeValidity.valid === false,
+      JSON.stringify(oversizeValidity)
+    );
+    check(
+      'max_body > 8MiB 点击保存不发送 PUT',
+      settingsPutCount(server) === putsBeforeOversize,
+      'PUT 数量未变'
+    );
+    await cdp.evaluate(
+      pageFn(
+        `
+        const save=document.querySelector('[data-testid="settings-general-save"]');
+        if(!save||!save.form)return false;
+        save.form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
+        return true;
+        `
+      )
+    );
+    await cdp.waitFor(
+      '(() => {const el=document.querySelector(\'[id$="-general-status"]\');' +
+        'return !!el&&/8388608/.test(el.innerText);})()',
+      5000,
+      '8 MiB 上限应用层错误'
+    );
+    check(
+      'max_body > 8MiB 应用层拒绝且不发送 PUT',
+      settingsPutCount(server) === putsBeforeOversize &&
+        server.state.settings.max_body_bytes === 1048576,
+      JSON.stringify({ puts: settingsPutCount(server), max_body_bytes: server.state.settings.max_body_bytes })
+    );
+
     await setGeneralSettings(cdp, {
       capture: true,
       max_body_bytes: 2097152,
@@ -2013,6 +2793,57 @@ async function runBrowserSuite(server, cdp) {
         initial.rules[0].rates.reasoning.value === '',
       JSON.stringify(initial.rules[0])
     );
+
+    await openPricingCatalog(cdp);
+    const catalog = await pricingCatalogState(cdp);
+    const gptCatalogRows = (catalog.rows || []).filter((row) => row[0] === 'gpt-5-codex');
+    const autoRows = gptCatalogRows.filter((row) => row[2] === '自动目录');
+    const manualCatalogRows = gptCatalogRows.filter((row) => row[2] === '手工');
+    check(
+      '价格明细区分同模型不同 provider',
+      catalog.present &&
+        catalog.open &&
+        autoRows.length === 2 &&
+        autoRows.map((row) => row[1]).sort().join(',') === 'azure,openai' &&
+        autoRows[0][3] !== autoRows[1][3],
+      JSON.stringify({ rows: catalog.rows, autoRows })
+    );
+    check(
+      '价格明细中的手工价仍是 model-wide',
+      manualCatalogRows.length === 1 &&
+        manualCatalogRows[0][1] === '—' &&
+        initial.manualProviderFields === 0,
+      JSON.stringify({ manualRows: manualCatalogRows, providerFields: initial.manualProviderFields })
+    );
+    const pricingHelp = await cdp.evaluate(
+      pageFn(
+        `
+        const root=document.querySelector('[data-testid="observer-settings"]');
+        if(!root)return {present:false};
+        return {
+          present:true,
+          text:root.innerText,
+          manualLabels:[...root.querySelectorAll('[data-kind="manual"] input')].map(function(el){
+            return (el.getAttribute('aria-label')||'')+' '+(el.id||'');
+          })
+        };
+        `
+      )
+    );
+    check(
+      '价格帮助说明完整提示词含缓存读/写',
+      pricingHelp.present &&
+        /完整提示词上下文（未缓存输入 \+ 缓存读 \+ 缓存写）/.test(pricingHelp.text) &&
+        /含缓存读\/写/.test(pricingHelp.text),
+      JSON.stringify({ present: pricingHelp.present, text: (pricingHelp.text || '').slice(0, 500) })
+    );
+    check(
+      '手工价格提供缓存读/写费率字段',
+      /缓存读（USD \/ 百万 Token）/.test(pricingHelp.manualLabels.join(' ')) &&
+        /缓存写（USD \/ 百万 Token）/.test(pricingHelp.manualLabels.join(' ')),
+      JSON.stringify(pricingHelp.manualLabels)
+    );
+    await closePricingCatalog(cdp);
 
     await addPricingRow(cdp, 'manual');
     await setPricingRow(cdp, 'manual', 1, {
@@ -2779,6 +3610,64 @@ async function runScreenshotMatrix(server, cdp) {
           path.join(shotsDir, size.width + '-' + theme + '-key-form.png'),
           false
         );
+        if (size.width <= 500) {
+          const scrollAudit = await keyDialogScrollAudit(cdp);
+          const buttonsInside = (state) =>
+            Array.isArray(state) &&
+            state.length === 2 &&
+            state.every((button) => button.inside === true);
+          check(
+            '移动端 Key 表单滚到顶部时保存/取消仍在对话框内',
+            scrollAudit.present && buttonsInside(scrollAudit.top),
+            JSON.stringify(scrollAudit)
+          );
+          check(
+            '移动端 Key 表单滚到底部时保存/取消仍在对话框内',
+            scrollAudit.present &&
+              buttonsInside(scrollAudit.bottom) &&
+              scrollAudit.body &&
+              scrollAudit.body.scrollHeight >= scrollAudit.body.clientHeight,
+            JSON.stringify(scrollAudit)
+          );
+        }
+        await closeDialog(cdp);
+        return bytes + ' bytes';
+      });
+
+      expected += 1;
+      await step('截图 ' + size.width + '/' + theme + '/key-models', async () => {
+        await gotoPage(cdp, 'keys');
+        await clickText(cdp, '新建 Key', { selector: '#content button, button' });
+        const dialog = await waitDialog(cdp);
+        await waitModelDirectory(cdp);
+        await setModelMode(cdp, 'restricted');
+        await setModelChecked(cdp, 'gpt-5-codex', true);
+        await setModelChecked(cdp, 'claude-opus-4-1', true);
+        await cdp.evaluate(
+          pageFn(
+            VISIBLE_SNIPPET +
+              'const dialogs=[...document.querySelectorAll("' + DIALOG_ROOT + '")].filter(visible);' +
+              'const host=dialogs[dialogs.length-1]||document;const root=host.querySelector("' + MODEL_ROOT_SELECTOR + '");' +
+              'if(root)root.scrollIntoView({block:"center"});return !!root;'
+          )
+        );
+        await settle(cdp);
+        const overflow = await overflowAudit(cdp);
+        check(
+          '模型选择器截图无横向溢出 ' + size.width + '/' + theme,
+          overflow.overflow <= 1,
+          JSON.stringify(overflow)
+        );
+        check(
+          '模型选择器在视口内 ' + size.width + '/' + theme,
+          dialog.present && dialog.rect.left >= -1 && dialog.rect.right <= dialog.vw + 1,
+          JSON.stringify(dialog.present ? dialog.rect : dialog)
+        );
+        const bytes = await capture(
+          cdp,
+          path.join(shotsDir, size.width + '-' + theme + '-key-models.png'),
+          false
+        );
         await closeDialog(cdp);
         return bytes + ' bytes';
       });
@@ -2819,11 +3708,247 @@ async function runScreenshotMatrix(server, cdp) {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Real host read-only smoke                                                  */
+/* -------------------------------------------------------------------------- */
+
+function normalizeRealUI(baseUrl) {
+  const raw = String(baseUrl || '').trim();
+  if (!raw) throw new Error('--base-url 不能为空');
+  const url = new URL(raw);
+  if (!/^https?:$/.test(url.protocol)) throw new Error('--base-url 只支持 http/https');
+  // 报告只保存规范化后的入口；拒绝可能夹带凭据的 URL 形态，而不是悄悄剥离。
+  if (url.username || url.password) throw new Error('--base-url 不允许包含 userinfo');
+  if (url.search) throw new Error('--base-url 不允许包含 query（避免把 token 写入报告）');
+  if (url.hash) throw new Error('--base-url 不允许包含 hash');
+  let pathname = url.pathname.replace(/\/+$/, '');
+  if (/\/ui(?:\.html)?$/.test(pathname)) return url.origin + pathname;
+  if (/\/v0\/(?:management|resource)\/plugins\/[^/]+$/.test(pathname)) {
+    return url.origin + pathname + '/ui';
+  }
+  return url.origin + '/v0/management/plugins/' + mock.PLUGIN_ID + '/ui';
+}
+
+async function runRealHostSmoke(args) {
+  if (!args.baseUrl) throw new Error('realhost smoke 需要 --base-url');
+  reportDir = args.reportDir;
+  chromePath = args.chrome;
+  keepProfile = args.keepProfile;
+  fs.mkdirSync(reportDir, { recursive: true });
+  fs.rmSync(path.join(reportDir, 'screenshots'), { recursive: true, force: true });
+  fs.mkdirSync(path.join(reportDir, 'screenshots'), { recursive: true });
+
+  const uiURL = normalizeRealUI(args.baseUrl);
+  const started = Date.now();
+  const apiRequests = [];
+  const blockedRequests = [];
+  let fetchInterceptionEnabled = false;
+  let chrome = null;
+  let profileDir = null;
+  let fatal = null;
+
+  async function writeReport() {
+    const durationMs = Date.now() - started;
+    const report = {
+      generated_at: new Date().toISOString(),
+      mode: 'realhost-readonly',
+      readonly: true,
+      readonly_methods: ['GET', 'HEAD', 'OPTIONS'],
+      fetch_interception: fetchInterceptionEnabled,
+      outcome: failed === 0 ? 'completed' : 'failed',
+      duration_ms: durationMs,
+      chrome: chromeInfo,
+      chrome_path: chromePath,
+      report_dir: reportDir,
+      ui_url: uiURL,
+      summary: {
+        total: results.length,
+        passed: results.length - failed,
+        failed,
+        screenshots: screenshots.length
+      },
+      results,
+      screenshots,
+      console_errors: consoleErrors,
+      expected_diagnostics: expectedDiagnostics,
+      native_dialogs: nativeDialogs,
+      api_requests: apiRequests,
+      blocked_requests: blockedRequests,
+      fatal: fatal ? String(fatal.message || fatal) : null
+    };
+    fs.writeFileSync(path.join(reportDir, 'report.json'), JSON.stringify(report, null, 2));
+    const summary = [
+      'Observer real-host read-only smoke',
+      'outcome: ' + report.outcome,
+      'passed: ' + report.summary.passed + '/' + report.summary.total,
+      'ui: ' + uiURL,
+      'readonly: true (CDP Fetch preflight; GET/HEAD/OPTIONS only)',
+      'duration_ms: ' + durationMs,
+      'report: ' + path.join(reportDir, 'report.json'),
+      report.fatal ? 'fatal: ' + report.fatal : '',
+      ''
+    ].join('\n');
+    fs.writeFileSync(path.join(reportDir, 'summary.txt'), summary);
+    process.stdout.write('\n' + summary);
+    if (failed > 0) process.exitCode = 1;
+  }
+
+  try {
+    profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'observer-realhost-'));
+    const launched = await launchChrome(chromePath, profileDir, 1280, 900);
+    const cdp = await connectWebSocket(launched.wsUrl);
+    chrome = { child: launched.child, cdp, stderr: launched.stderr };
+
+    await cdp.send('Page.enable');
+    await cdp.send('Runtime.enable');
+    await cdp.send('Log.enable');
+    await cdp.send('Network.enable');
+    // 在 Request 阶段拦截：任何非只读方法在真正发出前就被 fail，而不是事后审计。
+    cdp.on('Fetch.requestPaused', (params) => {
+      const request = params.request || {};
+      const method = String(request.method || '').toUpperCase();
+      const url = request.url || '';
+      if (/^(GET|HEAD|OPTIONS)$/.test(method)) {
+        cdp.send('Fetch.continueRequest', { requestId: params.requestId }).catch((err) => {
+          fatal = fatal || err;
+        });
+        return;
+      }
+      blockedRequests.push({
+        method,
+        url,
+        type: params.resourceType || ''
+      });
+      cdp.send('Fetch.failRequest', {
+        requestId: params.requestId,
+        errorReason: 'BlockedByClient'
+      }).catch((err) => {
+        fatal = fatal || err;
+      });
+    });
+    await cdp.send('Fetch.enable', {
+      patterns: [{ urlPattern: '*', requestStage: 'Request' }]
+    });
+    fetchInterceptionEnabled = true;
+    cdp.on('Runtime.exceptionThrown', (params) => {
+      const description =
+        (params.exceptionDetails && params.exceptionDetails.exception && params.exceptionDetails.exception.description) ||
+        (params.exceptionDetails && params.exceptionDetails.text) ||
+        'uncaught exception';
+      consoleErrors.push({ type: 'exception', text: description });
+    });
+    cdp.on('Runtime.consoleAPICalled', (params) => {
+      if (params.type !== 'error' && params.type !== 'assert') return;
+      consoleErrors.push({
+        type: 'console',
+        text: (params.args || [])
+          .map((arg) => (arg.value !== undefined ? String(arg.value) : arg.description || arg.type || ''))
+          .join(' ')
+      });
+    });
+    cdp.on('Log.entryAdded', (params) => {
+      const entry = params.entry || {};
+      if (entry.level !== 'error') return;
+      consoleErrors.push({
+        type: 'log',
+        source: entry.source || '',
+        text: entry.text || '',
+        url: entry.url || ''
+      });
+    });
+    cdp.on('Network.requestWillBeSent', (params) => {
+      const request = params.request || {};
+      const url = request.url || '';
+      if (!/^https?:/i.test(url)) return;
+      apiRequests.push({
+        method: request.method || '',
+        url,
+        type: params.type || ''
+      });
+    });
+    cdp.on('Page.javascriptDialogOpening', (params) => {
+      nativeDialogs.push({ type: params.type || '', message: params.message || '' });
+      cdp.send('Page.handleJavaScriptDialog', { accept: false }).catch(() => {});
+    });
+
+    await setViewport(cdp, SIZES[0]);
+    await cdp.send('Page.navigate', { url: uiURL });
+    await cdp.waitFor(
+      '(() => {' + VISIBLE_SNIPPET +
+        'return visible(document.querySelector("#login"))||visible(document.querySelector("#content"));})()',
+      20000,
+      '真实 host UI 外壳'
+    );
+    const shell = await cdp.evaluate(
+      pageFn(
+        'return {title:document.title||"",lang:document.documentElement.lang||"",' +
+          'login:!!document.querySelector("#login"),content:!!document.querySelector("#content")};'
+      )
+    );
+    check('真实 host UI 外壳可访问', Boolean(shell.title && shell.lang && shell.login && shell.content), JSON.stringify(shell));
+
+    if (args.managementKey) {
+      await login(cdp, args.managementKey);
+      await cdp.waitFor(
+        '(() => {' + VISIBLE_SNIPPET +
+          'const l=document.querySelector("#login");const c=document.querySelector("#content");' +
+          'return !!l&&!!c&&!visible(l)&&visible(c);})()',
+        20000,
+        '真实 host 登录'
+      );
+      await waitRequestsLoaded(cdp);
+      check('真实 host 登录后可读取请求日志', true);
+      await gotoPage(cdp, 'keys');
+      check('真实 host Key 页面可读取', /新建\s*Key/.test(await text(cdp, '#content')));
+      await gotoPage(cdp, 'settings');
+      check('真实 host 设置页面可读取', /捕获|保留|价格|压缩|设置/.test(await text(cdp, '#content')));
+    } else {
+      check('未提供 OBSERVER_MANAGEMENT_KEY 时只验证公开外壳', true);
+    }
+
+    await settle(cdp);
+    const bytes = await capture(cdp, path.join(reportDir, 'screenshots', 'realhost-smoke.png'), false);
+    check('真实 host smoke 截图非空', bytes > 1000, String(bytes));
+
+    const writes = apiRequests.filter((request) => !/^(GET|HEAD|OPTIONS)$/i.test(request.method));
+    check(
+      '真实 host 只读请求在发送前被 CDP Fetch 拦截',
+      fetchInterceptionEnabled === true && blockedRequests.length === 0,
+      JSON.stringify({ enabled: fetchInterceptionEnabled, blocked: blockedRequests })
+    );
+    check(
+      '真实 host smoke 只发送只读请求',
+      writes.length === 0,
+      JSON.stringify(writes)
+    );
+    const methods = [...new Set(apiRequests.map((request) => request.method))].sort();
+    check('真实 host smoke 方法集合为只读', methods.every((method) => /^(GET|HEAD|OPTIONS)$/.test(method)), JSON.stringify(methods));
+    check('真实 host 正常流程无 console/page 错误', consoleErrors.length === 0, JSON.stringify(consoleErrors.slice(0, 8)));
+  } catch (err) {
+    fatal = err;
+    check('真实 host 只读 smoke 执行完成', false, err && err.stack ? err.stack.split('\n').slice(0, 4).join(' | ') : String(err));
+  } finally {
+    if (chrome) await stopChrome({ child: chrome.child, cdp: chrome.cdp });
+    if (profileDir && !keepProfile) {
+      try {
+        fs.rmSync(profileDir, { recursive: true, force: true });
+      } catch (err) {
+        /* ignore */
+      }
+    }
+    await writeReport();
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /* Main                                                                       */
 /* -------------------------------------------------------------------------- */
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.baseUrl) {
+    await runRealHostSmoke(args);
+    return;
+  }
   reportDir = args.reportDir;
   chromePath = args.chrome;
   keepProfile = args.keepProfile;
@@ -2928,14 +4053,15 @@ async function main() {
     const patterns = new Set(calls.map(callPattern));
     const expectedPatterns = [
       'GET /requests',
-      'GET /requests/{id}',
+      'GET /requests/detail',
       'GET /summary',
       'GET /keys',
       'POST /keys',
-      'PUT /keys/{id}',
-      'POST /keys/{id}/rotate',
-      'POST /keys/{id}/reset',
-      'DELETE /keys/{id}',
+      'PUT /keys',
+      'POST /keys/rotate',
+      'POST /keys/reset',
+      'POST /keys/recover',
+      'DELETE /keys',
       'GET /settings',
       'PUT /settings',
       'POST /prices/refresh',
@@ -2943,6 +4069,22 @@ async function main() {
     ];
     const missing = expectedPatterns.filter((pattern) => !patterns.has(pattern));
     check('UI 调用了预期管理 API', missing.length === 0, 'missing=' + JSON.stringify(missing) + '; seen=' + JSON.stringify([...patterns].sort()));
+
+    const cpaCalls = server.calls.filter((call) => call.kind === 'cpa');
+    const cpaPaths = new Set(cpaCalls.map((call) => call.path));
+    check(
+      'UI 通过固定 auth-files 路由发现模型',
+      cpaPaths.has(mock.AUTH_FILES_PATH) &&
+        [...cpaPaths].some((path) => path === mock.AUTH_FILES_PATH + '/models') &&
+        cpaCalls.every((call) => call.authorized),
+      JSON.stringify([...cpaPaths])
+    );
+    check(
+      'auth-files 请求不携带凭据到 URL/日志',
+      cpaCalls.every((call) => !('authorization' in call)) &&
+        cpaCalls.every((call) => !JSON.stringify(call.query).includes(mock.DEFAULT_MANAGEMENT_KEY)),
+      JSON.stringify(cpaCalls.slice(0, 5))
+    );
 
     const unauthorized = calls.filter((call) => call.status !== 401 && !call.authorized);
     check('除刻意 401 外所有管理请求均带控制台密钥鉴权', unauthorized.length === 0, JSON.stringify(unauthorized.map(callPattern)));

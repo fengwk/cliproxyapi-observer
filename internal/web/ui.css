@@ -357,3 +357,152 @@ label input[type="checkbox"] {
 .settings > button {
   align-self: flex-start;
 }
+
+/* Four compact quota lines, not four paragraph-sized cards. */
+#content td p {
+  margin: 3px 0;
+}
+.key-quotas {
+  display: grid;
+  gap: 5px;
+  line-height: 1.35;
+}
+.quota-line {
+  display: grid;
+  grid-template-columns: 105px auto;
+  gap: 8px;
+  white-space: nowrap;
+}
+.quota-line small {
+  font-size: 11px;
+}
+.model-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.model-chips span {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+#content td small {
+  display: block;
+}
+.key-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+  height: min(780px, 92dvh);
+  max-height: 92dvh;
+}
+.key-dialog > h2 {
+  flex: 0 0 auto;
+  padding: 16px 20px;
+  margin: 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.key-dialog form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin: 0;
+  flex: 1;
+  background: transparent;
+}
+.dialog-body {
+  overflow-y: auto;
+  min-height: 0;
+  padding: 16px 20px;
+  flex: 1;
+}
+.dialog-footer {
+  flex: 0 0 auto;
+  padding: 12px 20px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dialog-footer [role="alert"]:empty {
+  display: none;
+}
+.dialog-footer [role="alert"] {
+  flex: 1;
+  margin: 0;
+}
+.models-root {
+  padding: 12px;
+  margin: 14px 0 0;
+}
+.models-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+.models-mode-option,
+.models-item {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.models-mode input[type="radio"] {
+  width: 18px;
+  min-height: 18px;
+  flex: 0 0 18px;
+}
+.models-list {
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin: 10px 0;
+  padding: 6px;
+}
+.models-item {
+  padding: 5px;
+  overflow-wrap: anywhere;
+}
+.models-actions,
+.models-manual {
+  display: flex;
+  gap: 8px;
+  align-items: end;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+.models-manual-field {
+  flex: 1;
+  min-width: 150px;
+}
+.models-root p {
+  margin: 6px 0;
+  font-size: 12px;
+}
+.models-missing,
+.models-warning {
+  color: var(--error);
+}
+.models-status,
+.models-note,
+.models-manual-note {
+  color: var(--muted);
+}
+@media (max-width: 600px) {
+  .key-dialog > h2,
+  .dialog-footer {
+    padding: 12px 14px;
+  }
+  .dialog-body {
+    padding: 12px 14px;
+  }
+  .models-list {
+    max-height: 155px;
+  }
+}

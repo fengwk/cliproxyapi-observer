@@ -4,18 +4,25 @@
  * Observer v0.6.0 浏览器验收 mock 宿主（零 npm 依赖）。
  *
  * 只监听 127.0.0.1，使用假管理密钥、假 Key、假请求和假安全数据；不接触真实 CPA、
- * 上游或生产配置。它实现 DESIGN.md 中 Observer 管理 API 的完整形状：
+ * 上游或生产配置。它实现 DESIGN.md 中 Observer 管理 API 的完整形状（固定
+ * 静态路由 + query ID，不注册旧动态路由）：
  *
  *   GET  /health
  *   GET  /keys                       POST /keys
- *   PUT  /keys/{id}                  DELETE /keys/{id}
- *   POST /keys/{id}/rotate           POST /keys/{id}/reset
- *   GET  /requests                   GET /requests/{id}
+ *   PUT  /keys?id={id}               DELETE /keys?id={id}
+ *   POST /keys/rotate?id={id}        POST /keys/reset?id={id}
+ *   POST /keys/recover?id={id}
+ *   GET  /requests                   GET /requests/detail?id={id}
  *   GET  /summary
  *   GET  /settings                   PUT /settings
  *   GET  /prices                     POST /prices/refresh
  *   POST /compact
  *   GET  /ui, /ui/, /ui.html, /ui.js, /ui.css
+ *
+ * 同时模拟 CPA 宿主的管理目录接口（认证使用同一管理密钥）：
+ *
+ *   GET /v0/management/auth-files
+ *   GET /v0/management/auth-files/models?name={file}
  *
  * 资源与 API 均可通过 /v0/resource/plugins/cliproxyapi-observer 和
  * /v0/management/plugins/cliproxyapi-observer 前缀访问；管理数据要求
@@ -33,6 +40,7 @@ const crypto = require('node:crypto');
 const PLUGIN_ID = 'cliproxyapi-observer';
 const RESOURCE_BASE = '/v0/resource/plugins/' + PLUGIN_ID;
 const MANAGEMENT_BASE = '/v0/management/plugins/' + PLUGIN_ID;
+const AUTH_FILES_PATH = '/v0/management/auth-files';
 const DEFAULT_MANAGEMENT_KEY = 'observer-browser-secret';
 const MAX_BODY_BYTES = 1024 * 1024;
 const ASSET_DIR = path.resolve(__dirname, '..');
@@ -52,6 +60,44 @@ const XSS = {
   leakedSecret: 'sk-live-DO-NOT-LEAK'
 };
 
+// CPA auth-files 目录夹具。secret 只存在于 mock 内部，公开响应只暴露 name 等
+// 非敏感字段；模型 ID 是真实 CPA 会返回的可用 ID，而不是 pricing 目录。
+const AUTH_FILE_FIXTURES = [
+  {
+    name: 'openai-main.json',
+    provider: 'openai',
+    account: 'browser-openai@example.test',
+    runtime: false,
+    secret: 'sk-auth-file-openai-DO-NOT-LEAK',
+    models: ['gpt-5-codex', 'gpt-5', 'gpt-5-mini', 'o4-mini']
+  },
+  {
+    name: 'anthropic-work.json',
+    provider: 'anthropic',
+    account: 'browser-anthropic@example.test',
+    runtime: false,
+    secret: 'sk-ant-auth-file-DO-NOT-LEAK',
+    models: ['claude-opus-4-1', 'claude-sonnet-4-5', 'claude-haiku-4-5', 'claude-3-7-sonnet']
+  },
+  {
+    name: 'google-vertex.json',
+    provider: 'google',
+    account: 'browser-google@example.test',
+    runtime: false,
+    secret: 'ya29.auth-file-google-DO-NOT-LEAK',
+    models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite']
+  },
+  {
+    name: 'runtime-credentials',
+    provider: 'mixed',
+    account: 'runtime',
+    runtime: true,
+    secret: 'runtime-auth-DO-NOT-LEAK',
+    models: ['gpt-5-codex', 'claude-opus-4-1', 'gemini-2.5-pro', 'grok-4']
+  }
+];
+
+
 function iso(ms) {
   return new Date(ms).toISOString();
 }
@@ -67,6 +113,37 @@ function publicKey(key) {
   delete out.secret_rotated_at;
   return out;
 }
+
+function publicAuthFile(file) {
+  return {
+    name: file.name,
+    provider: file.provider,
+    account: file.account,
+    runtime: file.runtime === true,
+    status: 'active'
+  };
+}
+
+function cloneAuthFiles() {
+  return AUTH_FILE_FIXTURES.map((file) => ({
+    name: file.name,
+    provider: file.provider,
+    account: file.account,
+    runtime: file.runtime === true,
+    secret: file.secret,
+    models: file.models.slice()
+  }));
+}
+
+function defaultAuthControl() {
+  return {
+    delay_ms: 0,
+    fail_root: false,
+    fail_models: false,
+    fail_names: []
+  };
+}
+
 
 function rate(input, output, cacheRead, cacheWrite) {
   return { input, output, cache_read: cacheRead, cache_write: cacheWrite };
@@ -290,10 +367,23 @@ function createState(options) {
         enabled: true,
         expires_at: iso(now - 24 * 3600 * 1000),
         active: 0
+      }),
+      createKey('key-legacy', '历史受限 Key', {
+        allowed_models: ['retired-model-v0', 'gpt-5-codex'],
+        max_concurrent: 2,
+        active: 0
+      }),
+      createKey('key-blocked', '待恢复计费 Key', {
+        allowed_models: ['gpt-5-codex'],
+        max_concurrent: 1,
+        active: 0,
+        blocked_reason: 'unknown usage after crash; pending billing cannot be retried'
       })
     ],
     records: createRecords(now),
     settings: createSettings(),
+    authFiles: cloneAuthFiles(),
+    authControl: defaultAuthControl(),
     pricesLastSync: iso(now - 15 * 60 * 1000),
     secrets: new Map(),
     nextKey: 1,
@@ -302,9 +392,12 @@ function createState(options) {
       compactions: 0,
       keyCreates: 0,
       keyRotates: 0,
-      keyRevokes: 0,
       keyResets: 0,
-      detailReads: 0
+      keyRecovers: 0,
+      keyRevokes: 0,
+      detailReads: 0,
+      authFileReads: 0,
+      modelCatalogReads: 0
     },
     managementKey: (options && options.managementKey) || DEFAULT_MANAGEMENT_KEY
   };
@@ -363,10 +456,12 @@ function sendAsset(res, file, headOnly) {
   let body;
   try {
     if (file === 'ui.js') {
-      // Go 的 Asset("ui.js") 是 settings.js + "\n" + ui.js；固定端点只暴露 bundle，
-      // 不单独暴露 settings.js。
+      // Go 的 Asset("ui.js") 是 settings.js + "\n" + models.js + "\n" + ui.js；
+      // 固定端点只暴露 bundle，不单独暴露源文件。
       body = Buffer.concat([
         fs.readFileSync(path.join(ASSET_DIR, 'settings.js')),
+        Buffer.from('\n'),
+        fs.readFileSync(path.join(ASSET_DIR, 'models.js')),
         Buffer.from('\n'),
         fs.readFileSync(path.join(ASSET_DIR, 'ui.js'))
       ]);
@@ -547,8 +642,23 @@ function computeSummary(records, query) {
 }
 
 function pricingSnapshot(state) {
+  // 目录快照允许同一模型存在多个 provider 的独立费率；手工价仍是 model-wide。
+  const catalog = [
+    {
+      model: 'gpt-5-codex',
+      provider: 'openai',
+      rates: rate(1_000_000, 8_000_000, 100_000, 1_000_000),
+      source: 'auto'
+    },
+    {
+      model: 'gpt-5-codex',
+      provider: 'azure',
+      rates: rate(1_500_000, 12_000_000, 150_000, 1_500_000),
+      source: 'auto'
+    }
+  ];
   return {
-    prices: clone(state.settings.pricing.prices),
+    prices: clone(state.settings.pricing.prices).concat(catalog),
     last_sync: state.pricesLastSync,
     error: '',
     refreshing: false
@@ -759,6 +869,40 @@ function parseWindowList(body) {
   return body.windows;
 }
 
+// 固定路由只接受单个 id query；旧 /keys/{id} 与 /requests/{id} 不再注册。
+function parseQueryID(url, what) {
+  for (const key of url.searchParams.keys()) {
+    if (key !== 'id') throw failure(400, 'invalid_query', 'unknown query parameter: ' + key);
+  }
+  const values = url.searchParams.getAll('id');
+  if (values.length !== 1 || !values[0]) {
+    throw failure(400, 'invalid_query', what + ' requires exactly one id query parameter');
+  }
+  return values[0];
+}
+
+function rejectAnyQuery(url) {
+  for (const key of url.searchParams.keys()) {
+    throw failure(400, 'invalid_query', 'unknown query parameter: ' + key);
+  }
+}
+
+function parseAcknowledge(body) {
+  rejectUnknown(body, new Set(['acknowledge']), 'recover request');
+  if (body.acknowledge !== true) {
+    throw failure(400, 'invalid_json', 'recover requires acknowledge:true');
+  }
+  return true;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function authFileByName(state, name) {
+  return state.authFiles.find((file) => file.name === name) || null;
+}
+
 function createServer(options) {
   const opts = options || {};
   const state = createState(opts);
@@ -771,6 +915,8 @@ function createServer(options) {
     state.keys = fresh.keys;
     state.records = fresh.records;
     state.settings = fresh.settings;
+    state.authFiles = fresh.authFiles;
+    state.authControl = fresh.authControl;
     state.pricesLastSync = fresh.pricesLastSync;
     state.secrets = fresh.secrets;
     state.nextKey = fresh.nextKey;
@@ -820,9 +966,40 @@ function createServer(options) {
         sendJson(res, 200, {
           keys: state.keys.map(publicKey),
           settings: state.settings,
+          auth_files: state.authFiles.map(publicAuthFile),
+          auth_control: state.authControl,
           counters: state.counters,
           calls: calls.length
         });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/__mock/control') {
+        const body = await readJson(req);
+        rejectUnknown(body, new Set(['auth_files']), 'mock control');
+        if (body.auth_files !== undefined) {
+          const patch = body.auth_files;
+          rejectUnknown(patch, new Set(['delay_ms', 'fail_root', 'fail_models', 'fail_names']), 'auth_files control');
+          if (patch.delay_ms !== undefined) {
+            ensureInteger(patch.delay_ms, 'auth_files.delay_ms', 0);
+            if (patch.delay_ms > 10000) throw failure(400, 'invalid_json', 'delay_ms must be <= 10000');
+            state.authControl.delay_ms = patch.delay_ms;
+          }
+          if (patch.fail_root !== undefined) {
+            if (typeof patch.fail_root !== 'boolean') throw failure(400, 'invalid_json', 'fail_root must be a boolean');
+            state.authControl.fail_root = patch.fail_root;
+          }
+          if (patch.fail_models !== undefined) {
+            if (typeof patch.fail_models !== 'boolean') throw failure(400, 'invalid_json', 'fail_models must be a boolean');
+            state.authControl.fail_models = patch.fail_models;
+          }
+          if (patch.fail_names !== undefined) {
+            if (!Array.isArray(patch.fail_names) || patch.fail_names.some((name) => typeof name !== 'string')) {
+              throw failure(400, 'invalid_json', 'fail_names must be an array of strings');
+            }
+            state.authControl.fail_names = patch.fail_names.slice();
+          }
+        }
+        sendJson(res, 200, { ok: true, auth_files: state.authControl });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/__mock/reset-calls') {
@@ -858,6 +1035,69 @@ function createServer(options) {
       return;
     }
 
+    // CPA 宿主管理目录：模型可用性来源，不读取 pricing 目录。这里只注册
+    // DESIGN 指定的两个固定路径，并支持验收用的失败/延迟注入。
+    if (url.pathname === AUTH_FILES_PATH || url.pathname.startsWith(AUTH_FILES_PATH + '/')) {
+      const call = record(req, url, 'cpa', {});
+      res.on('finish', () => {
+        call.status = res.statusCode;
+      });
+      res.on('close', () => {
+        if (!res.writableEnded) call.aborted = true;
+      });
+      try {
+        const auth = req.headers.authorization || '';
+        const bearer = /^Bearer\s+(.+)$/i.exec(auth);
+        const authorized = Boolean(bearer && bearer[1] === state.managementKey);
+        call.authorized = authorized;
+        call.has_authorization = Boolean(auth);
+        if (!authorized) throw failure(401, 'unauthorized', 'invalid management key');
+
+        if (state.authControl.delay_ms > 0) await sleep(state.authControl.delay_ms);
+        if (req.destroyed || res.destroyed || res.writableEnded) {
+          call.aborted = true;
+          return;
+        }
+
+        if (url.pathname === AUTH_FILES_PATH) {
+          requireMethod(req, 'GET');
+          for (const key of url.searchParams.keys()) {
+            throw failure(400, 'invalid_query', 'unknown query parameter: ' + key);
+          }
+          if (state.authControl.fail_root) throw failure(502, 'auth_files_failed', 'auth-files unavailable');
+          state.counters.authFileReads += 1;
+          sendJson(res, 200, { files: state.authFiles.map(publicAuthFile) });
+          return;
+        }
+
+        if (url.pathname === AUTH_FILES_PATH + '/models') {
+          requireMethod(req, 'GET');
+          for (const key of url.searchParams.keys()) {
+            if (key !== 'name') throw failure(400, 'invalid_query', 'unknown query parameter: ' + key);
+          }
+          const name = url.searchParams.get('name');
+          if (!name) throw failure(400, 'invalid_query', 'models requires exactly one name query parameter');
+          if (state.authControl.fail_models || state.authControl.fail_names.includes(name)) {
+            throw failure(502, 'models_failed', 'auth-file models unavailable');
+          }
+          const file = authFileByName(state, name);
+          if (!file) throw failure(404, 'not_found', 'auth file not found');
+          state.counters.modelCatalogReads += 1;
+          sendJson(res, 200, {
+            models: file.models.map((id) => ({ id, provider: file.provider }))
+          });
+          return;
+        }
+
+        sendError(res, 404, 'not_found', 'not found');
+      } catch (err) {
+        if (res.headersSent) return;
+        if (err && err.status) sendError(res, err.status, err.code || 'error', err.message);
+        else sendError(res, 500, 'internal_error', 'mock server error');
+      }
+      return;
+    }
+
     if (managementSuffix === null) {
       sendError(res, 404, 'not_found', 'not found');
       return;
@@ -886,10 +1126,12 @@ function createServer(options) {
 
       if (suffix === '/keys') {
         if (req.method === 'GET') {
+          rejectAnyQuery(url);
           sendJson(res, 200, { items: state.keys.map(publicKey) });
           return;
         }
         if (req.method === 'POST') {
+          rejectAnyQuery(url);
           const body = await readJson(req);
           call.request_body = clone(body);
           const spec = normalizeKeySpec(body);
@@ -911,15 +1153,9 @@ function createServer(options) {
           sendJson(res, 201, { key: publicKey(key), secret });
           return;
         }
-        methodNotAllowed(res, 'GET, POST');
-        return;
-      }
-
-      let match = /^\/keys\/([^/]+)(\/rotate|\/reset)?$/.exec(suffix);
-      if (match) {
-        const key = findKey(state, decodeURIComponent(match[1]));
-        const action = match[2] || '';
-        if (action === '' && req.method === 'PUT') {
+        if (req.method === 'PUT') {
+          const id = parseQueryID(url, 'PUT /keys');
+          const key = findKey(state, id);
           const body = await readJson(req);
           call.request_body = clone(body);
           const spec = normalizeKeySpec(body);
@@ -934,7 +1170,9 @@ function createServer(options) {
           sendJson(res, 200, publicKey(key));
           return;
         }
-        if (action === '' && req.method === 'DELETE') {
+        if (req.method === 'DELETE') {
+          const id = parseQueryID(url, 'DELETE /keys');
+          const key = findKey(state, id);
           key.enabled = false;
           key.revoked = true;
           key.active = 0;
@@ -948,29 +1186,52 @@ function createServer(options) {
           res.end();
           return;
         }
-        if (action === '/rotate' && req.method === 'POST') {
-          const secret = newSecret();
-          state.secrets.set(key.id, crypto.createHash('sha256').update(secret).digest('hex'));
-          key.secret_rotated_at = iso(Date.now());
-          state.counters.keyRotates += 1;
-          sendJson(res, 200, { key: publicKey(key), secret });
-          return;
+        methodNotAllowed(res, 'GET, POST, PUT, DELETE');
+        return;
+      }
+
+      if (suffix === '/keys/rotate') {
+        requireMethod(req, 'POST');
+        const id = parseQueryID(url, 'POST /keys/rotate');
+        const key = findKey(state, id);
+        const secret = newSecret();
+        state.secrets.set(key.id, crypto.createHash('sha256').update(secret).digest('hex'));
+        key.secret_rotated_at = iso(Date.now());
+        state.counters.keyRotates += 1;
+        sendJson(res, 200, { key: publicKey(key), secret });
+        return;
+      }
+
+      if (suffix === '/keys/reset') {
+        requireMethod(req, 'POST');
+        const id = parseQueryID(url, 'POST /keys/reset');
+        const key = findKey(state, id);
+        const body = await readJson(req);
+        call.request_body = clone(body);
+        const windows = parseWindowList(body);
+        const at = iso(Date.now());
+        for (const window of windows) {
+          key.used[window] = 0;
+          key.starts[window] = at;
+          key.resets[window] = at;
         }
-        if (action === '/reset' && req.method === 'POST') {
-          const body = await readJson(req);
-          call.request_body = clone(body);
-          const windows = parseWindowList(body);
-          const at = iso(Date.now());
-          for (const window of windows) {
-            key.used[window] = 0;
-            key.starts[window] = at;
-            key.resets[window] = at;
-          }
-          state.counters.keyResets += 1;
-          sendJson(res, 200, publicKey(key));
-          return;
-        }
-        methodNotAllowed(res, action === '' ? 'PUT, DELETE' : 'POST');
+        state.counters.keyResets += 1;
+        sendJson(res, 200, publicKey(key));
+        return;
+      }
+
+      if (suffix === '/keys/recover') {
+        requireMethod(req, 'POST');
+        const id = parseQueryID(url, 'POST /keys/recover');
+        const key = findKey(state, id);
+        const body = await readJson(req);
+        call.request_body = clone(body);
+        parseAcknowledge(body);
+        // 恢复只清除 Key 级阻塞原因并记录审计；不得改动 used/starts/resets/limits。
+        key.blocked_reason = '';
+        key.recovered_at = iso(Date.now());
+        state.counters.keyRecovers += 1;
+        sendJson(res, 200, publicKey(key));
         return;
       }
 
@@ -989,11 +1250,10 @@ function createServer(options) {
         return;
       }
 
-      match = /^\/requests\/([^/]+)$/.exec(suffix);
-      if (match) {
+      if (suffix === '/requests/detail') {
         requireMethod(req, 'GET');
-        if (url.search) throw failure(400, 'invalid_query', 'detail does not accept query parameters');
-        sendJson(res, 200, detailFor(state, decodeURIComponent(match[1])));
+        const id = parseQueryID(url, 'GET /requests/detail');
+        sendJson(res, 200, detailFor(state, id));
         return;
       }
 
@@ -1110,6 +1370,7 @@ async function startServer(options) {
 
 module.exports = {
   ASSET_CSP,
+  AUTH_FILES_PATH,
   DEFAULT_MANAGEMENT_KEY,
   MANAGEMENT_BASE,
   MAX_BODY_BYTES,

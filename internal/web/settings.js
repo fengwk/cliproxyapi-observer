@@ -3,7 +3,8 @@
   "use strict";
 
   var MAX_SAFE_INPUT = 9000000000000000;
-  var MAX_BODY_BYTES = 9000000000000000;
+  // DESIGN caps each captured body at 8 MiB.
+  var MAX_BODY_BYTES = 8 * 1024 * 1024;
   var MAX_BODY_STORAGE_BYTES = 9000000000000000;
   var DEFAULT_MAX_BODY_BYTES = 1048576;
   var DEFAULT_MAX_BODY_STORAGE_BYTES = 268435456;
@@ -399,10 +400,28 @@
     function normalizeSnapshot(raw) {
       var source = raw && typeof raw === "object" ? raw : {};
       return {
-        prices: Array.isArray(source.prices) ? source.prices : [],
+        prices: Array.isArray(source.prices)
+          ? source.prices.map(normalizeSnapshotPrice)
+          : [],
         last_sync: source.last_sync,
         error: source.error ? String(source.error) : "",
         refreshing: source.refreshing === true,
+      };
+    }
+
+    // Snapshot rows are read-only. Provider is optional and only present for
+    // provider-specific catalog rates; it never participates in manual config.
+    function normalizeSnapshotPrice(raw) {
+      var item =
+        raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+      return {
+        model: item.model === undefined ? "" : String(item.model),
+        provider:
+          item.provider === undefined || item.provider === null
+            ? ""
+            : String(item.provider),
+        source: item.source === undefined ? "" : String(item.source),
+        rates: normalizeRates(item.rates),
       };
     }
 
@@ -430,6 +449,22 @@
       if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
       if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
       return (n / 1073741824).toFixed(2) + " GB";
+    }
+
+    function formatRate(value) {
+      var n = Number(value);
+      if (!isFinite(n) || n < 0) return "—";
+      var usd = (n / 1000000).toFixed(6).replace(/\.?0+$/, "");
+      return "$" + (usd || "0");
+    }
+
+    function sourceLabel(value) {
+      var source = value === null || value === undefined ? "" : String(value);
+      if (source === "manual") return "手工";
+      if (source === "auto") return "自动目录";
+      if (source === "rule") return "规则";
+      if (source === "unpriced") return "未定价";
+      return source || "—";
     }
 
     function formatTime(value) {
@@ -562,7 +597,7 @@
         state.base.max_body_bytes,
         1,
         MAX_BODY_BYTES,
-        "1 MiB = 1,048,576 字节",
+        "1 MiB = 1,048,576 字节；上限 8 MiB = 8,388,608 字节",
       );
       var maxStorageInput = numberField(
         grid,
@@ -745,6 +780,64 @@
       });
       wrapper.appendChild(snapshotInfo);
 
+      // Read-only effective price snapshot. The table is built lazily so a large
+      // catalog stays collapsed and never mixes with the manual/rule editors.
+      var catalogDetails = el("details", "", { class: "settings-catalog" });
+      var catalogSummary = el("summary", "", {});
+      var catalogBody = el("div", "", {});
+      catalogDetails.appendChild(catalogSummary);
+      catalogDetails.appendChild(catalogBody);
+      wrapper.appendChild(catalogDetails);
+
+      function renderCatalog() {
+        catalogBody.textContent = "";
+        var prices = state.snapshot.prices || [];
+        if (!prices.length) {
+          catalogBody.appendChild(
+            el("p", "尚无生效价格。", { class: "muted" }),
+          );
+          return;
+        }
+        var wrap = el("div", "", { class: "table-wrap" });
+        var table = el("table");
+        var thead = el("thead");
+        var headRow = el("tr");
+        ["模型", "提供商", "来源", "费率（USD / 百万 Token）"].forEach(
+          function (title) {
+            headRow.appendChild(el("th", title, { scope: "col" }));
+          },
+        );
+        thead.appendChild(headRow);
+        table.appendChild(thead);
+        var tbody = el("tbody");
+        prices.forEach(function (price) {
+          var row = el("tr");
+          row.appendChild(el("td", price.model || "—"));
+          row.appendChild(el("td", price.provider || "—"));
+          row.appendChild(el("td", sourceLabel(price.source)));
+          var rates = price.rates || {};
+          var cells = [
+            "输入 " + formatRate(rates.input),
+            "输出 " + formatRate(rates.output),
+            "缓存读 " + formatRate(rates.cache_read),
+            "缓存写 " + formatRate(rates.cache_write),
+          ];
+          if (rates.reasoning !== undefined && rates.reasoning !== null) {
+            cells.push("推理 " + formatRate(rates.reasoning));
+          }
+          row.appendChild(el("td", cells.join(" · ")));
+          tbody.appendChild(row);
+        });
+        table.appendChild(tbody);
+        wrap.appendChild(table);
+        catalogBody.appendChild(wrap);
+        catalogBody.appendChild(
+          el("p", "只读快照；修改请使用下方手工价格或规则。", {
+            class: "settings-note",
+          }),
+        );
+      }
+
       function renderSnapshot() {
         var snapshot = state.snapshot;
         var parts = [];
@@ -756,7 +849,16 @@
         parts.push("生效价格条目：" + formatInt(snapshot.prices.length));
         if (snapshot.error) parts.push("目录错误：" + snapshot.error);
         text(snapshotInfo, parts.join(" · "));
+        text(
+          catalogSummary,
+          "生效价格明细（" + formatInt(snapshot.prices.length) + " 条）",
+        );
+        if (catalogDetails.open) renderCatalog();
+        else catalogBody.textContent = "";
       }
+      catalogDetails.addEventListener("toggle", function () {
+        if (catalogDetails.open) renderCatalog();
+      });
       renderSnapshot();
 
       var refresh = actionButton(
@@ -906,7 +1008,7 @@
       wrapper.appendChild(rulesHeading);
       var rulesNote = el(
         "p",
-        "规则条件：模型 ID 精确匹配；输入 Token 阈值表示“严格大于”，留空即不限制；时间区间为 UTC HH:mm-HH:mm，起点包含、终点不包含，可跨夜。所有条件需同时满足。",
+        "规则条件：模型 ID 精确匹配；完整提示词 Token 阈值表示“严格大于”，按完整提示词上下文（未缓存输入 + 缓存读 + 缓存写）计算，留空即不限制；时间区间为 UTC HH:mm-HH:mm，起点包含、终点不包含，可跨夜。所有条件需同时满足。",
         { class: "settings-note" },
       );
       wrapper.appendChild(rulesNote);
@@ -966,7 +1068,9 @@
         );
         record.threshold.setAttribute(
           "aria-label",
-          "第 " + (index + 1) + " 条规则输入 Token 阈值（严格大于，可选）",
+          "第 " +
+            (index + 1) +
+            " 条规则完整提示词 Token 阈值（严格大于，含缓存读/写，可选）",
         );
         record.range.setAttribute(
           "aria-label",
@@ -1052,7 +1156,7 @@
             ? String(rule.input_tokens_gt)
             : "";
         var thresholdField = field(
-          "输入 Token 严格大于（可选）",
+          "完整提示词 Token 严格大于（含缓存读/写，可选）",
           thresholdInput,
         );
         addClass(thresholdField, "setting-field");
@@ -1228,7 +1332,7 @@
           };
           var threshold = readInteger(
             record.threshold,
-            label + "的输入 Token 阈值",
+            label + "的完整提示词 Token 阈值（含缓存读/写）",
             0,
             MAX_SAFE_INPUT,
             true,

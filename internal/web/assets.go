@@ -22,12 +22,17 @@ var uiJS []byte
 //go:embed settings.js
 var settingsJS []byte
 
+//go:embed models.js
+var modelsJS []byte
+
 // uiBundle is the single public ui.js asset: settings.js stays a separate
 // source file for review, but is concatenated ahead of ui.js so the fixed
 // /ui.js endpoint serves both without exposing another resource route.
 var uiBundle = func() []byte {
-	body := make([]byte, 0, len(settingsJS)+1+len(uiJS))
+	body := make([]byte, 0, len(settingsJS)+len(modelsJS)+2+len(uiJS))
 	body = append(body, settingsJS...)
+	body = append(body, '\n')
+	body = append(body, modelsJS...)
 	body = append(body, '\n')
 	body = append(body, uiJS...)
 	return body

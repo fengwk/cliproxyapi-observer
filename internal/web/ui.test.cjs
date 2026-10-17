@@ -23,7 +23,8 @@ const html = readAsset('ui.html');
 const css = readAsset('ui.css');
 const uiSource = readAsset('ui.js');
 const settingsSource = readAsset('settings.js');
-const servedUISource = settingsSource + '\n' + uiSource;
+const modelsSource = readAsset('models.js');
+const servedUISource = settingsSource + '\n' + modelsSource + '\n' + uiSource;
 
 // ---------------------------------------------------------------------------
 // 共享助手导出
@@ -143,20 +144,54 @@ const externalWithoutSVGNamespace = (source) =>
 const compactSource = (source) => source.replace(/["']/g, '').replace(/\s+/g, '');
 const includesCode = (source, snippet) => compactSource(source).includes(compactSource(snippet));
 
-test('the fixed ui.js bundle keeps settings.js before the UI runtime', () => {
-  const settingsAt = compactSource(servedUISource).indexOf(
+test('the fixed ui.js bundle keeps settings.js and models.js before the UI runtime', () => {
+  const compact = compactSource(servedUISource);
+  const settingsAt = compact.indexOf(
     compactSource('window.ObserverSettings = ObserverSettings')
   );
-  const uiAt = compactSource(servedUISource).indexOf(compactSource('window.ObserverUI = {'));
+  const modelsAt = compact.indexOf(compactSource('window.ObserverModels = ObserverModels'));
+  const uiAt = compact.indexOf(compactSource('window.ObserverUI = {'));
   assert.ok(settingsAt >= 0, 'settings.js must define ObserverSettings in the bundle');
-  assert.ok(uiAt > settingsAt, 'settings.js must execute before ui.js in the bundle');
+  assert.ok(modelsAt >= 0, 'models.js must define ObserverModels in the bundle');
+  assert.ok(uiAt >= 0, 'ui.js must define ObserverUI in the bundle');
+  assert.ok(
+    settingsAt < modelsAt && modelsAt < uiAt,
+    'the bundle order must be settings.js, models.js, then ui.js'
+  );
   assert.match(uiSource, /window\.ObserverSettings\s*\(/);
 
-  // ui.html only needs the fixed ui.js endpoint; settings.js is not a separate asset.
+  // ui.html only needs the fixed ui.js endpoint; settings.js and models.js are
+  // embedded sources, never separate asset routes.
   const scripts = [...html.matchAll(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi)].map(
     (match) => match[1]
   );
-  assert.ok(scripts.includes('/v0/resource/plugins/cliproxyapi-observer/ui.js'), 'ui.html must load ui.js');
+  assert.deepEqual(scripts, ['/v0/resource/plugins/cliproxyapi-observer/ui.js']);
+  assert.doesNotMatch(html, /(?:settings|models)\.js/);
+});
+
+test('management calls use the fixed query-ID routes and no removed dynamic paths', () => {
+  for (const route of [
+    '"/requests/detail?id=" + encodeURIComponent(',
+    '"/keys?id=" + encodeURIComponent(',
+    '"/keys/rotate?id=" + encodeURIComponent(',
+    '"/keys/reset?id=" + encodeURIComponent(',
+    '"/keys/recover?id=" + encodeURIComponent('
+  ]) {
+    assert.ok(includesCode(uiSource, route), 'ui.js missing fixed query-ID route ' + route);
+  }
+
+  for (const legacy of [
+    '"/requests/" + encodeURIComponent(',
+    '"/keys/" + k.id',
+    '"/keys/" + encodeURIComponent(k.id) + "/rotate"',
+    '"/keys/" + encodeURIComponent(k.id) + "/reset"'
+  ]) {
+    assert.equal(
+      includesCode(uiSource, legacy),
+      false,
+      'ui.js still builds the removed dynamic route ' + legacy
+    );
+  }
 });
 
 const forbiddenMarkupAPIs = [
@@ -170,7 +205,11 @@ const forbiddenMarkupAPIs = [
 ];
 
 test('dynamic UI text never uses markup injection APIs', () => {
-  for (const [name, source] of [['ui.js', uiSource], ['settings.js', settingsSource]]) {
+  for (const [name, source] of [
+    ['ui.js', uiSource],
+    ['settings.js', settingsSource],
+    ['models.js', modelsSource]
+  ]) {
     for (const needle of forbiddenMarkupAPIs) {
       assert.equal(source.includes(needle), false, name + ' must not use ' + needle);
     }
@@ -184,6 +223,7 @@ test('assets stay self-contained and CSP-compatible', () => {
   assert.equal(externalReference.test(externalWithoutSVGNamespace(css)), false);
   assert.equal(externalReference.test(externalWithoutSVGNamespace(uiSource)), false);
   assert.equal(externalReference.test(externalWithoutSVGNamespace(settingsSource)), false);
+  assert.equal(externalReference.test(externalWithoutSVGNamespace(modelsSource)), false);
 
   assert.match(html, /default-src 'self'/);
   assert.match(html, /script-src 'self'/);
