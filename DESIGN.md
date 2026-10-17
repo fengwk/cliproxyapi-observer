@@ -242,6 +242,7 @@ Standard direct JSON response (not RPC envelope) and errors
 `{"error":{"code":"...","message":"..."}}`.
 
 - GET `/health` -> Health plus `version`, `schema_version:2`
+- POST `/models/token` -> `{"token":"...","expires_at":"..."}` (single-use catalog-only capability)
 - GET `/keys` -> `{"items":[Key...]}`; POST `/keys` KeySpec ->201 `{"key":Key,"secret":"..."}`
 - PUT `/keys?id={id}` KeySpec -> Key; DELETE `/keys?id={id}` ->204 (revoke)
 - POST `/keys/rotate?id={id}` -> `{"key":Key,"secret":"..."}`
@@ -298,13 +299,17 @@ routes above supersede the originally planned dynamic paths; do not retain dead
 compatibility routes. Register the trailing `/ui/` route as well as `/ui`.
 
 Key model selection: default all; explicit searchable checkbox multi-select
-restricts to selected exact requested IDs. Discover real configured models using
-CPA's authenticated `GET /v0/management/auth-files` (`files[].name`) and
-`GET /v0/management/auth-files/models?name=...` (`models[].id`), including runtime
-credentials. Cache/bound concurrency, preserve unavailable selected IDs, surface
-partial failures. Do not use the public pricing catalog as an availability list.
-Allow a manual exact model ID when discovery is unavailable. Never turn a failed
-discovery into unrestricted access for an existing restricted Key.
+restricts to selected exact requested IDs. Real .30 acceptance proved config
+credentials are not reliably listed by auth-files, so discover the authoritative
+host `/v1/models` instead. A management-authenticated POST `/models/token` issues
+a random >=256-bit single-use token valid30s, bounded32 outstanding capabilities.
+That token authenticates GET `/v1/models` ONLY, not inference, count-tokens,
+management or any other route. Use it in an Authorization header, never a URL or
+storage. UI fetches it once when catalog is needed and immediately fetches the
+same-origin `/v1/models`; no second user credential. Cache IDs5min, preserve
+unavailable selected IDs, surface errors and allow manual exact IDs. No pricing
+catalog or config/credential JSON downloads as availability sources. Failed
+discovery never makes an existing restricted Key unrestricted.
 
 Per-Key recovery: retained pending billing retries automatically with original
 quote. For a crash or irrecoverably lost event, persist a Key-scoped blocked
@@ -327,3 +332,19 @@ Pricing rule input_tokens_gt uses full prompt context (uncached+read+write),
 not only uncached billable input. Expose optional provider in price snapshots
 when the same model has provider-specific rates, with no effect on model-wide
 manual overrides.
+
+The pinned host has no guaranteed usage-queue drain before hot replacement or
+shutdown. A callback delivered to a detached store or an unexpected accounting
+panic must persist a Key-scoped interruption marker outside the closed bbolt
+handle. Every new Store/Open/admission/list reads it; only explicit recovery may
+clear it. Use a small atomic marker and file lock for recovery races, not another
+billing database. `engine.RecordInterruption(dataPath,keyID string) error` is the
+shared entry point, safe across different native-library runtimes. Source events
+never delivered by CPA cannot be reconstructed; document this boundary and don't
+claim exactly-once delivery from a non-durable host queue.
+
+Gemini countTokens: before-hook receives a wildcard path, but frontend auth has
+the original URL.Path. Use a distinct stable nonbilling principal/caller_scope
+for count-token authentication, preserve normal generation principal, and carry
+the operation in the scope lookup. Do not guess from a potentially identical body
+or mutate CPA headers/body/path/session.
