@@ -4,7 +4,7 @@
  * Node 单元测试：`node --test internal/web/ui.test.cjs`
  *
  * 覆盖目标：
- *  - ui.js 只导出 settings.js 需要的纯助手：micro / usd / base / query。
+ *  - ui.js 只导出纯助手：micro / usd / base / query，以及到期时间与 UTC 展示助手。
  *  - 金额解析严格：六位小数、非负、精确 micro-USD 且不超过安全上限，绝不静默截断。
  *  - 反向代理前缀下的 UI → management 路由推导。
  *  - 日期筛选统一转换为 UTC 日边界，并固定分页参数。
@@ -30,9 +30,17 @@ const servedUISource = settingsSource + '\n' + modelsSource + '\n' + uiSource;
 // 共享助手导出
 // ---------------------------------------------------------------------------
 
-test('ui.js exports exactly micro, usd, base and query for settings.js', () => {
-  assert.deepEqual(Object.keys(ui).sort(), ['base', 'micro', 'query', 'usd']);
-  for (const name of ['micro', 'usd', 'base', 'query']) {
+test('ui.js exports exactly the pure helpers for settings.js and UTC expiry handling', () => {
+  assert.deepEqual(Object.keys(ui).sort(), [
+    'base',
+    'expiryInput',
+    'expiryValue',
+    'micro',
+    'query',
+    'usd',
+    'utcShort'
+  ]);
+  for (const name of ['micro', 'usd', 'base', 'query', 'expiryInput', 'expiryValue', 'utcShort']) {
     assert.equal(typeof ui[name], 'function', name + ' should be exported as a function');
   }
 });
@@ -91,6 +99,82 @@ test('usd renders integer micro-USD without losing fractional micros', () => {
   assert.equal(ui.usd(null), '0');
   assert.equal(ui.usd(undefined), '0');
   assert.equal(ui.usd(ui.micro('12.345678')), '12.345678');
+});
+
+// ---------------------------------------------------------------------------
+// 到期时间与 UTC 展示
+// ---------------------------------------------------------------------------
+
+test('expiryInput keeps RFC3339 nanoseconds but renders millisecond UTC without Z', () => {
+  // datetime-local must show UTC at millisecond precision; the trailing Z is
+  // omitted because the input itself is interpreted as UTC by expiryValue.
+  assert.equal(
+    ui.expiryInput('2026-10-18T01:02:03.123456789Z'),
+    '2026-10-18T01:02:03.123'
+  );
+  // Offset timestamps are converted to the same UTC instant without drifting.
+  assert.equal(
+    ui.expiryInput('2026-10-18T09:02:03.123456789+08:00'),
+    '2026-10-18T01:02:03.123'
+  );
+  assert.equal(
+    ui.expiryInput('2026-10-17T23:02:03.123456789-02:00'),
+    '2026-10-18T01:02:03.123'
+  );
+  assert.equal(ui.expiryInput(''), '');
+  assert.equal(ui.expiryInput(null), '');
+  assert.throws(() => ui.expiryInput('not-a-date'), /Invalid time value/);
+});
+
+test('expiryValue preserves the exact original nanoseconds when the instant is unchanged', () => {
+  // The server string retains nine fractional digits even though the form and
+  // comparison only have millisecond precision.
+  const original = '2026-10-18T01:02:03.123456789Z';
+  assert.equal(ui.expiryValue(original, '2026-10-18T01:02:03.123'), original);
+  assert.equal(
+    ui.expiryValue('2026-10-18T09:02:03.123456789+08:00', '2026-10-18T01:02:03.123'),
+    '2026-10-18T09:02:03.123456789+08:00'
+  );
+});
+
+test('expiryValue emits UTC ISO milliseconds for changed input and null when cleared', () => {
+  const original = '2026-10-18T01:02:03.123456789Z';
+  assert.equal(
+    ui.expiryValue(original, '2026-10-18T01:02:04.123'),
+    '2026-10-18T01:02:04.123Z'
+  );
+  assert.equal(
+    ui.expiryValue('2026-10-18T09:02:03.123456789+08:00', '2026-10-18T01:02:04.124'),
+    '2026-10-18T01:02:04.124Z'
+  );
+  assert.equal(ui.expiryValue(original, ''), null);
+  assert.equal(ui.expiryValue(original, null), null);
+  assert.equal(ui.expiryValue(original, undefined), null);
+});
+
+test('expiryValue rejects malformed non-empty input', () => {
+  for (const input of ['not-a-date', '2026-13-40T99:99:99.999', '2026-10-18T25:00:00.000']) {
+    assert.throws(() => ui.expiryValue(null, input), /Invalid time value/, input);
+  }
+});
+
+test('utcShort renders UTC day and hour without fractional seconds or Z', () => {
+  const value = '2026-10-18T01:02:03.123456789Z';
+  const short = ui.utcShort(value);
+  const full = ui.utcShort(value, true);
+  assert.equal(short, '10-18 01:02 UTC');
+  assert.equal(full, '2026-10-18 01:02 UTC');
+  assert.match(short, /^\d{2}-\d{2} \d{2}:\d{2} UTC$/);
+  assert.match(full, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$/);
+  assert.doesNotMatch(short + full, /\.\d+Z/);
+
+  // Offset input is shown in UTC, so the displayed hour does not drift.
+  assert.equal(
+    ui.utcShort('2026-10-18T09:02:03.123456789+08:00', true),
+    '2026-10-18 01:02 UTC'
+  );
+  assert.equal(ui.utcShort(''), '—');
+  assert.equal(ui.utcShort('not-a-date'), '—');
 });
 
 // ---------------------------------------------------------------------------

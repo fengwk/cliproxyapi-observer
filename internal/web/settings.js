@@ -5,7 +5,7 @@
   var MAX_SAFE_INPUT = 9000000000000000;
   // DESIGN caps each captured body at 8 MiB.
   var MAX_BODY_BYTES = 8 * 1024 * 1024;
-  var MAX_BODY_STORAGE_BYTES = 9000000000000000;
+  var MAX_BODY_STORAGE_BYTES = 1073741824;
   var DEFAULT_MAX_BODY_BYTES = 1048576;
   var DEFAULT_MAX_BODY_STORAGE_BYTES = 268435456;
   var MAX_CONFIG_ENTRIES = 4096;
@@ -606,7 +606,7 @@
         state.base.max_body_storage_bytes,
         1,
         MAX_BODY_STORAGE_BYTES,
-        "请求体以 gzip 压缩保存；所有已捕获请求体的总量上限",
+        "请求体以 gzip 压缩保存；所有已捕获请求体的总量上限 1 GiB = 1,073,741,824 字节",
       );
       var rawRetentionInput = numberField(
         grid,
@@ -1026,7 +1026,7 @@
       }
 
       function nextRuleID() {
-        var used = {};
+        var used = Object.create(null);
         state.ruleRows.forEach(function (record) {
           used[record.id.value.trim()] = true;
         });
@@ -1293,7 +1293,7 @@
         if (state.ruleRows.length > MAX_CONFIG_ENTRIES) {
           throw new Error("规则不能超过 " + MAX_CONFIG_ENTRIES + " 条");
         }
-        var seenModels = {};
+        var seenModels = Object.create(null);
         var prices = state.manualRows.map(function (record, index) {
           var label = "第 " + (index + 1) + " 条手工价格";
           var model = record.model.value.trim();
@@ -1311,7 +1311,7 @@
           return item;
         });
 
-        var seenIDs = {};
+        var seenIDs = Object.create(null);
         var rules = state.ruleRows.map(function (record, index) {
           var label = "第 " + (index + 1) + " 条规则";
           var id = record.id.value.trim();

@@ -128,6 +128,18 @@ test('requests: filters, RFC3339 validation, pagination and no accidental detail
       assert.equal(typeof item.tokens[field], 'number', 'tokens.' + field);
     }
 
+    // 64 位十六进制 Key ID 与 unclassified 质量夹具只增加覆盖，不改变列表形状。
+    const keyidFixture = first.body.items.find((record) => record.id === 'req-007');
+    assert.ok(keyidFixture, '64-hex key_id fixture present');
+    assert.match(keyidFixture.key_id, /^[0-9a-f]{64}$/);
+    assert.equal(keyidFixture.accounting_quality, 'complete');
+    const qualityFixture = first.body.items.find((record) => record.id === 'req-008');
+    assert.ok(qualityFixture, 'unclassified accounting fixture present');
+    assert.equal(qualityFixture.accounting_quality, 'unclassified');
+    const exactKey = await json(server, '/requests?key_id=' + encodeURIComponent(mock.LONG_KEY_ID));
+    assert.deepEqual(exactKey.body.items.map((record) => record.id), ['req-007']);
+    assert.equal(exactKey.body.items[0].key_id, mock.LONG_KEY_ID);
+
     const failed = await json(server, '/requests?status=failed');
     assert.ok(failed.body.items.length > 0);
     assert.ok(failed.body.items.every((record) => record.failed === true));
@@ -543,6 +555,21 @@ test('settings/prices/compact: round-trip, refresh and method rejection', async 
       body: Object.assign({}, saved.body, { raw_retention_hours: 169 })
     });
     assert.equal(invalid.res.status, 400);
+
+    // mock 与引擎同步 1 GiB 总存储上限：exact 1 GiB 可保存，+1 字节拒绝。
+    const exactStorage = await json(server, '/settings', {
+      method: 'PUT',
+      body: Object.assign({}, saved.body, { max_body_storage_bytes: mock.MAX_BODY_STORAGE_BYTES })
+    });
+    assert.equal(exactStorage.res.status, 200);
+    assert.equal(exactStorage.body.max_body_storage_bytes, mock.MAX_BODY_STORAGE_BYTES);
+    const overflowStorage = await json(server, '/settings', {
+      method: 'PUT',
+      body: Object.assign({}, saved.body, { max_body_storage_bytes: mock.MAX_BODY_STORAGE_BYTES + 1 })
+    });
+    assert.equal(overflowStorage.res.status, 400);
+    assert.ok(errorShape(overflowStorage.body));
+    assert.equal(server.state.settings.max_body_storage_bytes, mock.MAX_BODY_STORAGE_BYTES);
 
     const prices = await json(server, '/prices');
     assert.equal(prices.res.status, 200);
