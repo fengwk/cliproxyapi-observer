@@ -5,241 +5,29 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'"
     />
     <meta name="referrer" content="no-referrer" />
-    <title>Observer 观测台</title>
-    <link rel="stylesheet" href="ui.css" />
+    <title>Observer · Key 与用量</title>
+    <link rel="stylesheet" href="/v0/resource/plugins/cliproxyapi-observer/ui.css" />
   </head>
   <body>
-    <noscript>该面板需要启用 JavaScript。</noscript>
-
-    <header class="topbar">
-      <div class="brand">
-        <span class="brand-dot" aria-hidden="true"></span>
-        <span class="brand-title">Observer 观测台</span>
-        <span class="brand-sub">CLIProxyAPI 插件</span>
-      </div>
+    <header>
+      <div><strong>Observer</strong><span>Key 与用量管理</span></div>
+      <div id="tools"></div>
     </header>
-
     <main>
-      <section class="card connection" aria-label="管理连接">
-        <div class="conn">
-          <label class="sr-only" for="mgmt-key">管理密钥</label>
-          <input
-            id="mgmt-key"
-            type="password"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="管理密钥"
-            data-testid="mgmt-key"
-          />
-          <button id="connect" class="btn btn-primary" type="button" data-testid="connect">连接</button>
-          <button id="refresh" class="btn btn-secondary" type="button" data-testid="refresh" disabled>
-            刷新
-          </button>
-        </div>
-        <div class="connection-status">
-          <span
-            id="conn-status"
-            class="conn-status"
-            role="status"
-            aria-live="polite"
-            data-testid="conn-status"
-          ></span>
-        </div>
-      </section>
-      <section class="toolbar card" aria-label="筛选条件">
-        <div class="controls range-controls">
-          <div class="seg" role="group" aria-label="时间范围">
-            <button class="btn seg-btn is-active" type="button" data-range="24h">24 小时</button>
-            <button class="btn seg-btn" type="button" data-range="7d">7 天</button>
-            <button class="btn seg-btn" type="button" data-range="30d">30 天</button>
-          </div>
-          <div class="filter time-filter">
-            <label for="time-start">开始时间</label>
-            <input id="time-start" type="datetime-local" step="0.001" data-testid="time-start" />
-          </div>
-          <div class="filter time-filter">
-            <label for="time-end">结束时间</label>
-            <input id="time-end" type="datetime-local" step="0.001" data-testid="time-end" />
-          </div>
-          <button id="time-apply" class="btn btn-secondary" type="button" data-testid="time-apply">应用时间</button>
-        </div>
-        <div class="controls identity-controls">
-          <div class="filter">
-            <label for="filter-provider">Provider</label>
-            <select id="filter-provider" data-testid="filter-provider">
-              <option value="">全部</option>
-            </select>
-          </div>
-          <div class="filter">
-            <label for="filter-model">模型</label>
-            <select id="filter-model" data-testid="filter-model">
-              <option value="">全部</option>
-            </select>
-          </div>
-          <div class="filter">
-            <label for="filter-client-key">客户端 key</label>
-            <select id="filter-client-key">
-              <option value="">全部</option>
-              <option value="unknown">未归属（含旧记录）</option>
-            </select>
-          </div>
-          <div class="filter">
-            <label for="filter-auth">auth</label>
-            <select id="filter-auth">
-              <option value="">全部</option>
-              <option value="unknown">未归属（含旧记录）</option>
-            </select>
-          </div>
-          <button id="identity-apply" class="btn btn-secondary" type="button" disabled>应用筛选</button>
-        </div>
-        <div class="toolbar-meta">
-          <span id="time-error" class="time-error" role="alert" aria-live="polite"></span>
-          <span id="range-label" class="range-label" data-testid="range-label"></span>
-        </div>
-        <p id="credential-status" class="settings-note" role="status"></p>
-      </section>
-
-      <div id="banner" class="banner" role="alert" hidden data-testid="banner"></div>
-
-      <section class="cards" id="cards" aria-label="概览" data-testid="cards"></section>
-
-      <section class="card">
-        <div class="card-header">
-          <h2>请求趋势</h2>
-          <span id="trend-note" class="muted"></span>
-        </div>
-        <div class="legend">
-          <span><i class="legend-requests"></i>请求</span>
-          <span><i class="legend-failed"></i>失败</span>
-        </div>
-        <div class="chart-wrap">
-          <canvas id="chart" role="img" aria-label="请求趋势图" data-testid="chart"></canvas>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="card-header">
-          <h2>模型分组</h2>
-          <span id="groups-note" class="muted"></span>
-        </div>
-        <div class="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>Provider</th>
-                <th>模型</th>
-                <th class="num">请求</th>
-                <th class="num col-secondary">失败</th>
-                <th class="num col-secondary">输入</th>
-                <th class="num col-secondary">输出</th>
-                <th class="num col-secondary">缓存读</th>
-                <th class="num col-secondary">缓存写</th>
-                <th class="num col-secondary" title="缓存命中率（Token）= Σ完整cache_read / Σ完整input">缓存命中率（Token）</th>
-                <th class="num">成本</th>
-              </tr>
-            </thead>
-            <tbody id="groups-body" data-testid="groups-body"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="card-header">
-          <h2>请求记录</h2>
-          <span id="requests-note" class="muted"></span>
-          <p class="muted">请求记录受现有保留时长限制；选择更早的时间不会补造已过期记录。</p>
-        </div>
-        <div class="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>模型</th>
-                <th class="col-secondary">Provider</th>
-                <th>客户端 key</th>
-                <th>auth</th>
-                <th class="num col-secondary">Token</th>
-                <th class="num col-secondary" title="缓存读占比 = cache_read_tokens / input_tokens（单条）">缓存读占比</th>
-                <th class="num">延迟</th>
-                <th class="num col-secondary">TTFT</th>
-                <th class="num col-secondary">TPS</th>
-                <th class="num">成本</th>
-                <th>状态</th>
-                <th>请求体</th>
-              </tr>
-            </thead>
-            <tbody id="requests-body" data-testid="requests-body"></tbody>
-          </table>
-        </div>
-        <div class="table-footer">
-          <button id="requests-prev" class="btn btn-secondary" type="button" disabled>上一页</button>
-          <span id="requests-page" role="status" aria-live="polite">第 1 页 · 本页 0 条</span>
-          <button id="requests-next" class="btn btn-secondary" type="button" disabled>下一页</button>
-        </div>
-      </section>
-
-      <section class="card" aria-labelledby="keys-heading">
-        <div class="card-header">
-          <h2 id="keys-heading">Key 分组</h2>
-          <label for="key-group-kind">分组维度</label>
-          <select id="key-group-kind"><option value="client">客户端 key</option><option value="auth">auth</option></select>
-        </div>
-        <div class="table-scroll">
-          <table>
-            <thead><tr><th>Key</th><th class="num">请求</th><th class="num">失败 / 失败率</th><th class="num">Token（输入 / 输出）</th><th class="num" title="缓存命中率（Token）= Σ完整cache_read / Σ完整input">缓存读 / 写 · 缓存命中率（Token）</th><th class="num">平均延迟</th><th class="num">平均 TTFT</th><th class="num">成本</th></tr></thead>
-            <tbody id="keys-body"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="card-header">
-          <h2>采集设置</h2>
-        </div>
-        <div id="settings-body" class="settings" data-testid="settings-body">
-          <p class="muted">连接后显示。</p>
-        </div>
-        <p class="settings-note">请求体捕获是显式选择：可能将提示词、代码等敏感内容写入磁盘。缩短保留时间会在清理后永久删除旧数据，无法恢复。只有点击保存才会应用。</p>
-        <p class="settings-note">历史请求与统计在查询时按当前生效的精确模型价格计算；保存价格后会刷新历史成本。压缩尝试间隔默认至少 15 分钟，仅可回收空间达到阈值且占比 ≥25% 时缩小数据库；需要临时磁盘空间，失败保留原文件并重试，不是磁盘擦除。</p>
-        <div class="settings-actions">
-          <button id="settings-save" type="button" class="btn btn-primary" disabled>保存设置</button>
-          <button id="settings-revert" type="button" class="btn btn-secondary" disabled>重新加载 / 放弃草稿</button>
-          <span id="settings-status" role="status" aria-live="polite">连接后可编辑</span>
-        </div>
-        <p id="disk-status" class="settings-note" role="status"></p>
-      </section>
+      <form id="login">
+        <h1>管理登录</h1>
+        <p>使用同源 CPA 管理密钥；仅保存在本次标签页会话。</p>
+        <label
+          >管理密钥<input type="password" autocomplete="off" required /></label
+        ><button>登录</button>
+      </form>
+      <nav aria-label="页面" hidden></nav>
+      <p id="message" role="status" aria-live="polite"></p>
+      <div id="content"></div>
     </main>
-
-    <dialog id="body-dialog" class="dialog" aria-labelledby="body-dialog-title" data-testid="body-dialog">
-      <div class="dialog-head">
-        <h3 id="body-dialog-title">请求体</h3>
-        <button id="body-close" class="btn btn-ghost" type="button" data-testid="body-close">关闭</button>
-      </div>
-      <div id="body-meta" class="dialog-meta" data-testid="body-meta"></div>
-      <div id="body-confirm" class="dialog-confirm">
-        <p>请求体可能包含提示词、代码等敏感内容，仅在确有必要时查看。</p>
-        <button id="body-reveal" class="btn btn-primary" type="button" data-testid="body-reveal">
-          确认查看
-        </button>
-      </div>
-      <div id="body-view" class="dialog-body" hidden>
-        <pre id="body-content" class="body-content" data-testid="body-content"></pre>
-      </div>
-    </dialog>
-
-    <dialog id="confirmation-dialog" class="dialog confirmation-dialog" aria-labelledby="confirmation-title" aria-describedby="confirmation-desc">
-      <div class="dialog-head"><h3 id="confirmation-title">确认操作</h3></div>
-      <div class="dialog-confirm">
-        <p id="confirmation-desc"></p>
-        <div class="settings-actions">
-          <button id="confirmation-cancel" class="btn btn-secondary" type="button" autofocus>取消</button>
-          <button id="confirmation-confirm" class="btn btn-primary" type="button">确认</button>
-        </div>
-      </div>
-    </dialog>
-    <script src="ui.js"></script>
+    <script src="/v0/resource/plugins/cliproxyapi-observer/ui.js"></script>
   </body>
 </html>

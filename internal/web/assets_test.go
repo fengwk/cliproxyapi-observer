@@ -1,10 +1,37 @@
 package web
 
 import (
+	"bytes"
 	"regexp"
 	"strings"
 	"testing"
 )
+
+// requireAsset keeps the asset tests standalone: they inspect only the embedded
+// package data and never construct a plugin engine or management request.
+func requireAsset(t *testing.T, name string) ([]byte, string) {
+	t.Helper()
+	body, contentType, ok := Asset(name)
+	if !ok {
+		t.Fatalf("Asset(%q) not found", name)
+	}
+	if len(body) == 0 {
+		t.Fatalf("Asset(%q) is empty", name)
+	}
+	return body, contentType
+}
+
+// compactSource compares code semantics rather than formatting: whitespace and
+// quote style are irrelevant after normalization, so prettier cannot cause
+// false failures while identifiers, operators and literals remain checked.
+func compactSource(source string) string {
+	source = strings.NewReplacer(`"`, "", `'`, "").Replace(source)
+	return strings.Join(strings.Fields(source), "")
+}
+
+func containsCode(source, snippet string) bool {
+	return strings.Contains(compactSource(source), compactSource(snippet))
+}
 
 func TestAssetKnownNamesAndContentTypes(t *testing.T) {
 	cases := map[string]string{
@@ -13,26 +40,19 @@ func TestAssetKnownNamesAndContentTypes(t *testing.T) {
 		"ui.js":   ContentTypeJS,
 	}
 	for name, wantType := range cases {
-		body, contentType, ok := Asset(name)
-		if !ok {
-			t.Fatalf("Asset(%q) not found", name)
-		}
+		_, contentType := requireAsset(t, name)
 		if contentType != wantType {
 			t.Fatalf("Asset(%q) content type = %q, want %q", name, contentType, wantType)
 		}
-		if len(body) == 0 {
-			t.Fatalf("Asset(%q) is empty", name)
+		// 名称首尾空白应被容忍，避免宿主拼接时的小误差。
+		if _, _, ok := Asset("  " + name + " \n"); !ok {
+			t.Fatalf("Asset should trim whitespace around %q", name)
 		}
-	}
-
-	// 名称首尾空白应被容忍，避免宿主拼接时的小误差。
-	if _, _, ok := Asset("  ui.js \n"); !ok {
-		t.Fatal("Asset should trim whitespace around the name")
 	}
 }
 
 func TestAssetUnknownName(t *testing.T) {
-	for _, name := range []string{"", "ui.txt", "../ui.js", "ui.js/../assets.go", "assets.go"} {
+	for _, name := range []string{"", "ui.txt", "../ui.js", "ui.js/../assets.go", "assets.go", "settings.css", "settings.js"} {
 		if body, contentType, ok := Asset(name); ok || body != nil || contentType != "" {
 			t.Fatalf("Asset(%q) = (%v, %q, %v), want not found", name, body, contentType, ok)
 		}
@@ -41,17 +61,13 @@ func TestAssetUnknownName(t *testing.T) {
 
 // Asset 必须返回副本：调用方修改不得污染二进制内嵌的原始字节。
 func TestAssetReturnsIsolatedCopy(t *testing.T) {
-	body, _, ok := Asset("ui.js")
-	if !ok {
-		t.Fatal("ui.js missing")
-	}
-	if len(body) == 0 {
-		t.Fatal("ui.js empty")
-	}
-	body[0] = 'X'
-	again, _, _ := Asset("ui.js")
-	if again[0] == 'X' {
-		t.Fatal("Asset returned a mutable reference into the embedded data")
+	for _, name := range []string{"ui.html", "ui.css", "ui.js"} {
+		body, _ := requireAsset(t, name)
+		body[0] = 'X'
+		again, _ := requireAsset(t, name)
+		if again[0] == 'X' {
+			t.Fatalf("Asset(%q) returned a mutable reference into the embedded data", name)
+		}
 	}
 }
 
@@ -59,21 +75,22 @@ func TestAssetReturnsIsolatedCopy(t *testing.T) {
 var externalURL = regexp.MustCompile(`(?i)https?://|//[a-z0-9.-]+\.[a-z]{2,}`)
 
 func TestHTMLIsSelfContainedAndCSPCompatible(t *testing.T) {
-	html, _, _ := Asset("ui.html")
+	html, _ := requireAsset(t, "ui.html")
 	page := string(html)
 
-	if !strings.Contains(page, `lang="zh-CN"`) {
+	if !containsCode(page, `lang="zh-CN"`) {
 		t.Fatal("ui.html should declare lang=\"zh-CN\"")
 	}
 	if externalURL.MatchString(page) {
 		t.Fatal("ui.html must not reference external resources")
 	}
-	if strings.Contains(page, `src="ui.js"`) == false {
-		t.Fatal("ui.html must load ui.js same-origin")
-	}
-	if strings.Contains(page, `href="ui.css"`) == false {
+	if !containsCode(page, `href="/v0/resource/plugins/cliproxyapi-observer/ui.css"`) {
 		t.Fatal("ui.html must load ui.css same-origin")
 	}
+	if !containsCode(page, `src="/v0/resource/plugins/cliproxyapi-observer/ui.js"`) {
+		t.Fatal("ui.html must load the bundled ui.js same-origin")
+	}
+
 	// 内联脚本或事件处理器会削弱 CSP，禁止出现。
 	for _, tag := range regexp.MustCompile(`(?i)<script\b[^>]*>`).FindAllString(page, -1) {
 		if !strings.Contains(strings.ToLower(tag), "src=") {
@@ -86,152 +103,173 @@ func TestHTMLIsSelfContainedAndCSPCompatible(t *testing.T) {
 	if regexp.MustCompile(`(?i)\sstyle\s*=`).MatchString(page) {
 		t.Fatal("ui.html must not contain inline style attributes (CSP style-src 'self')")
 	}
-	if !strings.Contains(page, `default-src 'self'`) {
-		t.Fatal("ui.html should declare a same-origin CSP meta policy")
+
+	for _, directive := range []string{
+		`default-src 'self'`,
+		`script-src 'self'`,
+		`style-src 'self'`,
+		`connect-src 'self'`,
+		`img-src 'self'`,
+	} {
+		if !containsCode(page, directive) {
+			t.Fatalf("ui.html CSP missing %q", directive)
+		}
 	}
 }
 
-func TestJSForbiddenAPIsAbsent(t *testing.T) {
-	js, _, _ := Asset("ui.js")
+func TestJSAssetsAreTextSafeAndSelfContained(t *testing.T) {
+	for _, file := range []struct {
+		name string
+		body []byte
+	}{
+		{"ui.js", uiJS},
+		{"settings.js", settingsJS},
+	} {
+		source := string(file.body)
+		for _, needle := range []string{
+			"innerHTML",
+			"outerHTML",
+			"insertAdjacentHTML",
+			"document.write",
+			"eval(",
+			"new Function",
+			"window.open",
+			"localStorage",
+			"document.cookie",
+		} {
+			if strings.Contains(source, needle) {
+				t.Fatalf("%s must not use %q", file.name, needle)
+			}
+		}
+		// SVG 命名空间是常量而非网络资源，检查外链前先剥离。
+		if externalURL.MatchString(strings.ReplaceAll(source, "http://www.w3.org/2000/svg", "")) {
+			t.Fatalf("%s must not reference external resources", file.name)
+		}
+		if !strings.Contains(source, "textContent") {
+			t.Fatalf("%s must render dynamic text with textContent", file.name)
+		}
+	}
+}
+
+// 登录只持有当前标签页会话密钥；发送时使用 Bearer，401 立即退出且不回显输入。
+func TestAuthControlsUseSessionBearerOnly(t *testing.T) {
+	html, _ := requireAsset(t, "ui.html")
+	page := string(html)
+	for _, needle := range []string{
+		`id="login"`,
+		`type="password"`,
+		`autocomplete="off"`,
+		`required`,
+		`>登录</button>`,
+	} {
+		if !containsCode(page, needle) {
+			t.Fatalf("ui.html missing auth control %q", needle)
+		}
+	}
+
+	js, _ := requireAsset(t, "ui.js")
 	source := string(js)
 	for _, needle := range []string{
-		"innerHTML",
-		"outerHTML",
-		"insertAdjacentHTML",
-		"document.write",
-		"eval(",
-		"new Function",
-		"localStorage",
-		"sessionStorage",
-		"document.cookie",
+		"Authorization:'Bearer '+key",
+		"sessionStorage.getItem('observer.management-key')",
+		"sessionStorage.setItem('observer.management-key',key)",
+		"sessionStorage.removeItem('observer.management-key')",
+		"r.status===401",
+		"login.querySelector('input').value=''",
 	} {
-		if strings.Contains(source, needle) {
-			t.Fatalf("ui.js must not use %q", needle)
+		if !containsCode(source, needle) {
+			t.Fatalf("ui.js missing auth guard %q", needle)
 		}
 	}
-	if externalURL.MatchString(source) {
-		t.Fatal("ui.js must not reference external resources")
-	}
 }
 
-// 全局筛选必须合并为单一工具栏：一个 aria-label="筛选条件" 区域同时承载时间范围、
-// Provider、模型、客户端指纹、上游凭据与统一的应用按钮；不得再出现独立的 Key 筛选卡片
-// 或冗长的 Key 筛选说明段落。
-func TestFilterToolbarIsSingleConsolidatedArea(t *testing.T) {
-	html, _, _ := Asset("ui.html")
-	page := string(html)
-
-	if got := strings.Count(page, `aria-label="筛选条件"`); got != 1 {
-		t.Fatalf("ui.html should expose exactly one 筛选条件 region, got %d", got)
-	}
-	if strings.Contains(page, `aria-label="Key 筛选"`) {
-		t.Fatal("ui.html must not keep a separate Key 筛选 card")
-	}
-	if strings.Contains(page, "Key 筛选影响概览") {
-		t.Fatal("ui.html must not keep the removed Key-filter help paragraph")
-	}
-	if strings.Contains(page, "request-filters") {
-		t.Fatal("ui.html must not use the removed request-filters layout")
-	}
-	for _, id := range []string{
-		`id="filter-provider"`,
-		`id="filter-model"`,
-		`id="filter-client-key"`,
-		`id="filter-auth"`,
-		`id="identity-apply"`,
-		`id="range-label"`,
-	} {
-		if !strings.Contains(page, id) {
-			t.Fatalf("ui.html missing filter control %s", id)
-		}
-	}
-	if !strings.Contains(page, ">应用筛选<") {
-		t.Fatal("ui.html apply button should read 应用筛选")
-	}
-}
-
-// 请求表与筛选标签简化：上游凭据列更名为 auth，不得再残留繁冗的「上游凭据 / 认证文件」文案。
-func TestRequestsTableHeaderAndFilterLabelAuth(t *testing.T) {
-	html, _, _ := Asset("ui.html")
-	page := string(html)
-
-	if strings.Contains(page, "上游凭据 / 认证文件") {
-		t.Fatal("ui.html must not retain verbose 上游凭据 / 认证文件 text")
-	}
-	if !strings.Contains(page, `<label for="filter-auth">auth</label>`) {
-		t.Fatal("ui.html filter label for auth should be auth")
-	}
-	if !strings.Contains(page, `<th>auth</th>`) {
-		t.Fatal("ui.html requests table header should include <th>auth</th>")
-	}
-	if !strings.Contains(page, `<option value="auth">auth</option>`) {
-		t.Fatal("ui.html key-group-kind select should include <option value=\"auth\">auth</option>")
-	}
-}
-
-// 客户端 key 筛选统一为原生下拉：只做选择、默认明确「全部」、含「未归属（含旧记录）」；
-// 不得再保留需手填的 input 或 datalist 候选。
-func TestClientKeyFilterIsNativeSelect(t *testing.T) {
-	html, _, _ := Asset("ui.html")
-	page := string(html)
-
-	selectTag := regexp.MustCompile(`(?s)<select[^>]*\bid="filter-client-key"[^>]*>(.*?)</select>`).FindStringSubmatch(page)
-	if selectTag == nil {
-		t.Fatal("filter-client-key should be a native <select>")
-	}
-	if body := selectTag[1]; !strings.Contains(body, `<option value="">全部</option>`) ||
-		!strings.Contains(body, `<option value="unknown">未归属（含旧记录）</option>`) {
-		t.Fatalf("client key select should default to 全部 and include 未归属, got %q", body)
-	}
+// 取消路径必须显式：对话框关闭有清理逻辑，破坏性操作与放弃草稿都先确认。
+func TestCancelControlsAreExplicit(t *testing.T) {
+	uiJS, _ := requireAsset(t, "ui.js")
+	uiSource := string(uiJS)
 	for _, needle := range []string{
-		`list="client-key-options"`,
-		`id="client-key-options"`,
-		`<datalist`,
-		`id="filter-client-key" type=`,
+		"d.addEventListener('cancel'",
+		"d.addEventListener('close'",
+		"d.replaceChildren()",
+		"d.remove()",
+		"function confirmed(",
+		"button('退出',logout)",
 	} {
-		if strings.Contains(page, needle) {
-			t.Fatalf("ui.html must not keep removable client-key input/datalist marker %q", needle)
+		if !containsCode(uiSource, needle) {
+			t.Fatalf("ui.js missing cancel/cleanup control %q", needle)
+		}
+	}
+
+	settingsSource := string(settingsJS)
+	for _, needle := range []string{
+		"重新加载 / 放弃草稿",
+		"win.confirm",
+		"已取消压缩",
+	} {
+		if !containsCode(settingsSource, needle) {
+			t.Fatalf("settings.js missing cancel control %q", needle)
 		}
 	}
 }
 
-// 工具栏样式必须收敛到单一 .controls 行，移除废弃的 request-filters / toolbar-spacer，
-// 并隐藏空的凭据状态占位；同时阈值文案不再重复「含缓存」，但保留严格大于语义。
-func TestFilterToolbarStylesAndPricingCopyConsolidated(t *testing.T) {
-	css, _, _ := Asset("ui.css")
-	style := string(css)
-	for _, needle := range []string{".toolbar .controls", "#credential-status:empty"} {
-		if !strings.Contains(style, needle) {
-			t.Fatalf("ui.css missing consolidated toolbar rule %q", needle)
-		}
+// /ui.js 是固定端点：Asset 必须按 settings.js + "\n" + ui.js 的顺序返回 bundle，
+// 且不额外暴露 settings.js 资源。
+func TestUIAssetBundlesSettingsBeforeUI(t *testing.T) {
+	body, contentType := requireAsset(t, "ui.js")
+	if contentType != ContentTypeJS {
+		t.Fatalf("ui.js content type = %q, want %q", contentType, ContentTypeJS)
 	}
-	for _, needle := range []string{".toolbar-spacer", ".request-filters"} {
-		if strings.Contains(style, needle) {
-			t.Fatalf("ui.css should drop unused rule %q", needle)
-		}
+	want := make([]byte, 0, len(settingsJS)+1+len(uiJS))
+	want = append(want, settingsJS...)
+	want = append(want, '\n')
+	want = append(want, uiJS...)
+	if !bytes.Equal(body, want) {
+		t.Fatal("ui.js asset must be settings.js + newline + ui.js")
 	}
 
-	js, _, _ := Asset("ui.js")
-	source := string(js)
-	if strings.Contains(source, "含缓存") {
-		t.Fatal("ui.js must not repeat 含缓存 in pricing UI copy")
+	source := string(body)
+	compact := compactSource(source)
+	settingsAt := strings.Index(compact, compactSource("window.ObserverSettings = ObserverSettings"))
+	uiAt := strings.Index(compact, compactSource("window.ObserverUI = {"))
+	if settingsAt < 0 || uiAt < 0 || settingsAt >= uiAt {
+		t.Fatalf("ui.js bundle order invalid: settings at %d, UI at %d", settingsAt, uiAt)
 	}
-	if !strings.Contains(source, "输入 Token >（可选）") {
-		t.Fatal("ui.js threshold label should read 输入 Token >（可选）")
+	if _, _, ok := Asset("settings.js"); ok {
+		t.Fatal("settings.js must not be exposed as a separate asset endpoint")
+	}
+}
+
+func TestSettingsAssetContract(t *testing.T) {
+	uiJS, _ := requireAsset(t, "ui.js")
+	uiSource := string(uiJS)
+	for _, needle := range []string{
+		"window.ObserverSettings = ObserverSettings",
+		"module.exports = ObserverSettings",
+		"UI.micro",
+		"window.ObserverUI",
+		"window.ObserverSettings(",
+	} {
+		if !containsCode(uiSource, needle) {
+			t.Fatalf("bundled ui.js missing shared contract %q", needle)
+		}
 	}
 }
 
 func TestCSSThemesAndNoExternalImports(t *testing.T) {
-	css, _, _ := Asset("ui.css")
+	css, _ := requireAsset(t, "ui.css")
 	style := string(css)
 	for _, needle := range []string{
-		":root {",
-		"[data-theme='white']",
-		"[data-theme='dark']",
-		"--bg-secondary: #faf9f5",
-		"--radius-md: 8px",
+		":root{",
+		"[data-theme=white]",
+		"[data-theme=dark]",
+		"color-scheme:light",
+		"color-scheme:dark",
+		"--bg:#faf9f5",
+		"--panel:#fff",
+		"--error:#a43d32",
+		"[hidden]",
 	} {
-		if !strings.Contains(style, needle) {
+		if !containsCode(style, needle) {
 			t.Fatalf("ui.css missing theme marker %q", needle)
 		}
 	}
@@ -240,29 +278,5 @@ func TestCSSThemesAndNoExternalImports(t *testing.T) {
 	}
 	if externalURL.MatchString(style) {
 		t.Fatal("ui.css must not reference external resources")
-	}
-}
-
-// Native scrollbars and form controls must follow the selected document theme.
-func TestCSSNativeColorSchemes(t *testing.T) {
-	css, _, _ := Asset("ui.css")
-	for _, tc := range []struct {
-		selector string
-		scheme   string
-	}{
-		{":root", "light"},
-		{"[data-theme='white']", "light"},
-		{"[data-theme='dark']", "dark"},
-	} {
-		t.Run(tc.selector, func(t *testing.T) {
-			block := regexp.MustCompile(regexp.QuoteMeta(tc.selector) + `\s*\{([^}]+)\}`).FindStringSubmatch(string(css))
-			if len(block) != 2 {
-				t.Fatalf("missing theme selector %q", tc.selector)
-			}
-			property := regexp.MustCompile(`\bcolor-scheme\s*:\s*` + tc.scheme + `\s*;`)
-			if !property.MatchString(block[1]) {
-				t.Fatalf("%s must declare color-scheme: %s", tc.selector, tc.scheme)
-			}
-		})
 	}
 }

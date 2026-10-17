@@ -1,148 +1,167 @@
-# Observer 面板浏览器验证
+# Observer 浏览器验收（真实 Chrome CDP，零 npm 依赖）
 
-本目录包含 `internal/web` 面板的浏览器验证夹具与脚本。它们只用于本地验证，
-不参与 `go:embed`，也不会被插件打包进二进制。
+本目录只包含本地验收夹具，不参与 `go:embed`，不会被打包进插件二进制。
 
-- `mock-server.cjs`：同源 mock 宿主，同时提供
-  - 公开资源路由 `/v0/resource/plugins/cliproxyapi-observer/{ui,ui.js,ui.css}`（带 CSP）；
-  - 管理 API `/v0/management/plugins/cliproxyapi-observer/{summary,requests,settings,health,body}`
-    （要求 `Authorization: Bearer observer-test-secret`）；
-  - 上游凭据名称 `GET /v8/management/credentials`（返回假 `files[].auth_index/label/name`，默认
-    `fake-file-a.json`/`fake-file-b.json`，可改写 `controls.credentialFiles` 验证「同标签不同文件可区分、
-    名称缺失回落索引、恶意文件名仅作文本」）；UI 只保留非机密展示字段，按 `label（文件名）` 展示并以 `auth_index` 精确筛选。
-  - 模拟 management-center 的嵌入宿主页 `/embed`，用于验证父级 `data-theme` 跟随。
-  - summary 真实按 `client_key_id` / `auth_index` / `provider` / `model` 过滤，并返回
-    `client_keys` / `credentials` 有序身份数组（未归属桶 id 为空字符串）；定价按
-    `prices` map 与有序 `price-rules`（first-match、阈值严格大于、UTC 区间）真实计算。
-- `capture.cjs`：Playwright 验证脚本，输出截图与 `results.json`。
-- `settings.cjs`：真实 Chromium 设置保存、价格增删、刷新保留草稿、错误/超时/过期连接、
-  503 重配置确认与宿主浮层命中测试，输出截图与 `settings-results.json`。
-- `keys.cjs`：真实 Chromium 的客户端指纹 / 上游凭据筛选、概览与分组联动、分组维度切换
-  与整行点击过滤，并校验统一筛选工具栏（单一卡片、桌面一行、窄屏自然换行、无表单序列化），
-  输出三主题筛选区近景截图与 `key-results.json`。
-- `price-rules.cjs`：真实 Chromium 的有序条件定价场景：阈值严格大于、first-match、
-  重排持久化、UTC/跨夜/24:00 边界、删除/清空、后端拒绝保留草稿，并输出
-  light/white/dark × 1280/390 截图与 `price-rules-results.json`。
-- `ui-polish.cjs`：时间草稿、固定 UTC 查询窗口、失败分页恢复、严格缓存占比、
-  下拉键盘与禁用分组、长 iframe 定位、三主题 768px 布局及 44px 触控目标。
-- `cache-rate.cjs`：真实 Chromium 聚合缓存 Token 命中率（`Σ完整cache_read / Σ完整input`）
-  主指标与完整核算覆盖展示回归，包括概览主卡、模型分组与 Key 分组可见换行覆盖、
-  单条请求语义对齐、零输入降级为“—”（非 0%）、不一致/越界降级为“完整核算未知”、
-  部分核算隔离原始 read 污染，以及 3 主题 × 1280px / 390px 截图与无横向溢出断言。
-- `mock-server.test.cjs`：Node mock 合约回归。mock CSP 直接读取
-  `internal/plugin/management.go` 的 `cspPolicy`，不会使用另一套策略。
+- `mock-server.cjs`：`127.0.0.1` 上的假 Observer 宿主，实现 `DESIGN.md`
+  管理 API 的完整形状，记录每次调用与状态变更。
+- `mock-server.test.cjs`：`node:test` 合约回归，不启动浏览器。
+- `run.cjs`：Node 22 + 真实 `/usr/bin/google-chrome-stable` 的 CDP 验收，
+  不依赖 Playwright/Puppeteer/npm 包。
 
 ## 运行
 
-Playwright 只应安装在仓库之外的专用临时目录：
-
 ```bash
-tmp=$(mktemp -d)
-cd "$tmp"
-npm init -y >/dev/null
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install playwright@1.63.0
+# 1) 管理 API / mock 合约（无需 Chrome）
+node --test internal/web/browser/mock-server.test.cjs
 
-cd -
-NODE_PATH="$tmp/node_modules" \
-CHROMIUM_PATH=/usr/bin/chromium \
-node internal/web/browser/capture.cjs "$tmp/evidence"
-NODE_PATH="$tmp/node_modules" CHROMIUM_PATH=/usr/bin/chromium \
-node internal/web/browser/settings.cjs "$tmp/settings-evidence"
-NODE_PATH="$tmp/node_modules" CHROMIUM_PATH=/usr/bin/chromium \
-node internal/web/browser/keys.cjs "$tmp/keys-evidence"
-NODE_PATH="$tmp/node_modules" CHROMIUM_PATH=/usr/bin/chromium \
-node internal/web/browser/price-rules.cjs "$tmp/price-rules-evidence"
-NODE_PATH="$tmp/node_modules" CHROMIUM_PATH=/usr/bin/chromium \
-node internal/web/browser/ui-polish.cjs "$tmp/polish-evidence"
-NODE_PATH="$tmp/node_modules" CHROMIUM_PATH=/usr/bin/chromium \
-node internal/web/browser/cache-rate.cjs "$tmp/cache-rate-evidence"
-node --test internal/web/ui.test.cjs internal/web/browser/mock-server.test.cjs
+# 2) 真实 Chrome 浏览器验收
+node internal/web/browser/run.cjs \
+  --report-dir /home/fengwk/proj/cliproxyapi-observer/.workspace/observer-web/browser-report
 ```
 
-截图与 `results.json` 写入指定的输出目录（仓库之外）。脚本在任一项失败时以非零码退出。
+可选参数：
 
-## 分页设计与权衡
+```bash
+node internal/web/browser/run.cjs \
+  --report-dir /tmp/observer-browser-report \
+  --chrome /usr/bin/google-chrome-stable
+```
 
-- **offset / limit 语义**：请求列表采用 `offset`（`0..2147483647`）与 `limit`（默认 50，后端上限 100，UI 固定每页请求 50）切页，返回 `{ items, offset, limit, has_more }`，废弃所有游标 `cursor` 字段。
-- **权衡考量**：
-  - **优势**：不为总页数额外全库计数；翻页采用单页替换（固定最多 50 行），避免无限列表 DOM/内存累加。
-  - **开销与偏移漂移**：深页需跳过前面的匹配记录，无过滤时开销随 `offset + limit` 增长，有过滤时可能扫描更多区间记录。翻页固定 from/to，不查询总条数或总页数；保留清理或迟到写入仍可能造成偏移、重复/遗漏。刷新、筛选或重连成功后回到第 1 页（`offset=0`）；刷新与筛选沿用已应用的固定时间范围，不应用未确认的草稿。
-- **动态查询定价**：历史请求明细与 summary 总成本均在查询时按当前生效价格（`effectiveSettings.prices`）动态计算；保存配置更新价格后立即反映于历史明细，无需快照。
+- `--report-dir` 必须指向仓库之外的持久目录；缺省为
+  `<worktree>/../browser-report`。
+- `CHROME_BIN` 环境变量可覆盖 Chrome 路径。
+- `--keep-profile` 保留临时 Chrome profile，仅用于排障。
 
-## 弹窗与表单合约
+脚本在任一断言失败时以非零码退出。输出：
 
-- **异步确认弹窗（#confirmation-dialog）**：
-  - 彻底杜绝浏览器原生 `window.confirm` / `alert` 弹窗（Playwright `page.on('dialog')` 守卫直接断言失败）。
-  - 保存操作在调用 `editor.read()` 前必经 `#confirmation-dialog` 二次确认；丢弃草稿（`#settings-revert`）仅在脏状态下弹窗确认，干净状态直接重载。
-  - 具备可访问性属性（`aria-labelledby="confirmation-title"` / `aria-describedby="confirmation-desc"`）；默认初始焦点在 `#confirmation-cancel`；`Escape` 键或遮罩点击取消；关闭后焦点恢复至触发按钮。
-  - 取消确认绝不发起 `/validate` 或 `/config` 写请求（0 计数），保留草稿；连接断开、鉴权失败或重连立即失效并关闭弹窗，陈旧确认绝不作用于新连接。
-  - 同源长 iframe 内仅读取框架与宿主视口几何尺寸，将弹窗置于可见区域；不读取宿主内容或凭据。跨源宿主回退浏览器默认居中。
-- **无障碍定制复选框**：
-  - `#setting-capture-bodies` 为原生 `<input type="checkbox">`，采用 `appearance: none` 定制三套主题（`light`、`white`、`dark`）及高对比度样式。
-  - 支持 `<label>` 区域点击与获得焦点时 `Space` 键切换；禁用状态（断开连接/保存中）静默忽略交互。
+```text
+<report-dir>/
+  report.json       # 断言、截图、console 错误、全部 API 调用
+  summary.txt       # 简短结果
+  screenshots/
+    1280-white-requests.png
+    1280-white-keys.png
+    1280-white-settings.png
+    1280-white-key-form.png
+    1280-white-request-detail.png
+    390-dark-...png
+    ...             # 1280/390 × white/light/dark/auto × 5 个界面 = 40 张
+```
 
-## 覆盖范围
+## mock API
 
-| 场景 | 断言 |
-| --- | --- |
-| 嵌入宿主浅色/纯白/深色 | iframe 内 `data-theme` 跟随父级，`--bg-secondary` 与 CPA 主题一致 |
-| 原生滚动条与控件主题 | 根元素、表格滚动区、弹窗与 select 的 `color-scheme` 为浅色 `light` / 深色 `dark`；覆盖嵌入、独立打开、宽窄屏与实时主题切换 |
-| 实时主题切换 | 父级切换 `data-theme` 后 iframe 立即同步（MutationObserver） |
-| 390px 窄屏 | 无横向溢出，表格内部滚动，次要列隐藏 |
-| 独立打开截图 | 3 主题（light/white/dark）在 1280px 与 390px 下独立渲染与截图输出 |
-| XSS | 恶意模型名/请求体只作为文本存在，不产生 `img`/`script` 元素 |
-| 请求体安全与生命周期 | 列表刷新不触发读取；需二次确认后懒加载；关闭弹窗清空；重连/403 立即失效并关闭查看器 |
-| 分页翻页与替换 | `#requests-prev` / `#requests-next` / `#requests-page` 双向翻页；每页 50 条替换渲染，无游标无累加；空页与末页禁用导航；筛选变更重置第 1 页 |
-| 刷新取消在途翻页 | 点击刷新立即中止在途翻页请求并失效令牌，重置为第 1 页并丢弃旧响应 |
-| 动态生效定价与小计 | Summary 与历史请求均按当前价格动态映射，小计与未定价分类明确展示 |
-| 客户端 key / 上游凭据筛选 | 概览、趋势、分组与请求记录同源过滤；概览数值随身份变化；`offset` 重置为 0 |
-| 统一筛选工具栏 | 时间快捷、起止时间和应用时间位于独立范围行；Provider、模型、客户端 key、auth 与应用筛选位于独立身份行。桌面两行各自底部对齐，时间输入至少 240px；390px 各行自然换行且无横向溢出；无 `form` 与命名序列化入口 |
-| 时间草稿 | 24 小时 / 7 天 / 30 天只填写草稿。应用时间把本地输入精确转换为 UTC `from`/`to` 并重置第 1 页；非法草稿不发请求。刷新失败保留上次成功记录、页码和窗口，随后翻页仍使用该窗口 |
-| 缓存指标与完整核算覆盖 | 聚合主指标为 token-weighted 缓存命中率（`Σ完整cache_read / Σ完整input`），缓存写入计入输入分母，sub 显示读/写计数与可见完整核算覆盖（`完整核算 X/Y 请求`，输入为 0 显示“—”而非 0% 未命中，不一致/越界显示“完整核算未知”）；模型表和 Key 表标题明确 Token 并可见换行展示覆盖；单条请求列统一语义为“缓存读占比”（单条 `read / input`），不称写入为 hit |
-| 选择增强 | 原生 select 仍是唯一值来源；可见触发器为 combobox，单一 fixed listbox 支持点击、方向键、Enter、Escape 和 Tab。菜单按插件与父视口可见交集定位，刷新或重连不残留菜单 |
-| 完整指纹与凭据名称 | 客户端 key 为下拉选择（全部 / 未归属 / 已出现指纹，只显示 12 位前缀，无需手填），内部按完整 64 位指纹过滤，同一连接内已出现的指纹保留在候选中（重连后清空），点击请求行或分组身份同样按完整指纹过滤；上游凭据列更名为 auth，与客户端 key 一并截断超长文本（>12 字符）并通过 title hover 呈现完整凭据/指纹；模型列直接展示模型名称，无别名/核算/流式多行堆叠 |
-| Key 分组与维度切换 | `client_keys` / `credentials` 身份数组，未归属 id 为空；点击整行按完整 id 过滤，切换维度立即反映 |
-| 有序条件定价 | `price-rules` 顺序、阈值（含缓存、严格大于）、UTC 区间（起含终不含、跨夜、24:00）与 first-match；旧 `prices` map 作为无条件回退 |
-| 价格规则编辑 | 上移/下移/删除、响应式整行控制、危险色删除、可访问性标签、重排与删除标记脏草稿 |
-| 安全防护 | 无 localStorage/sessionStorage/cookie；管理密钥不进 URL，仅经 `Authorization` 头；严格禁止重定向 |
-| 异步确认弹窗完整生命周期 | 取消/Escape 保留草稿且 0 请求；重复点击不重复弹窗；断开/重连使在途弹窗失效；干净草稿不弹窗 |
-| 无障碍主题复选框 | `appearance: none`、label 文本点击与 Space 键切换、禁用状态防篡改 |
-| 宿主浮层命中与穿透保护 | 1280px / 390px 下宿主 overlay 绝不遮挡密钥、连接、刷新与状态控件 |
-| 共享按钮契约 | 所有按钮带 `.btn`；常规至少 34px/13px/600/6×12/行高 20、紧凑 `btn-sm` 至少 28px/12px/600/3×9/行高 20、段控复用 `.btn` 基础（同字号字重 + 拼接圆角）；危险删除按钮 error 语义色；禁用不透明度/光标与键盘焦点轮廓；三主题一致，无页面横向溢出 |
+所有管理路由位于
+`/v0/management/plugins/cliproxyapi-observer`（同时接受带反向代理前缀的路径），
+要求 `Authorization: Bearer <管理密钥>`，错误统一为
+`{"error":{"code":"...","message":"..."}}`，响应带 `Cache-Control: no-store`，
+不发送任何 CORS 头。
 
-## 说明
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/health` | `Health` + `version` + `schema_version:2` |
+| GET/POST | `/keys` | 列表 / 201 `{key,secret}` |
+| PUT/DELETE | `/keys/{id}` | 更新 / 撤销（204） |
+| POST | `/keys/{id}/rotate` | `{key,secret}` |
+| POST | `/keys/{id}/reset` | `{windows:[...]}` |
+| GET | `/requests` | 分页、RFC3339 `from/to` 与六个筛选参数 |
+| GET | `/requests/{id}` | 详情；只应由日志行点击触发 |
+| GET | `/summary` | 汇总与 `granularity/buckets` |
+| GET/PUT | `/settings` | `DESIGN.md` 全字段 |
+| GET | `/prices` | pricing Snapshot |
+| POST | `/prices/refresh` | 更新 `last_sync` 并计数 |
+| POST | `/compact` | Health 并计数 |
+| GET | 资源/管理前缀下的 `/ui`, `/ui/`, `/ui.html`, `/ui.js`, `/ui.css` | 公开资源，带 CSP；`ui.js` 是 Go `Asset` 同款 bundle |
 
-- 管理密钥与全部数据均为假值；服务只监听 `127.0.0.1`，不会访问任何真实 CPA 或上游。
-- 主题切换会触发按钮/边框 150ms 过渡；截图脚本在切换主题后等待文档与同源 iframe 内动画结束（`settleTransitions`），避免截到中间灰阶/低对比帧。
-- CSP 的 `frame-ancestors 'self'` 由宿主响应头提供（`<meta>` 中该指令会被浏览器忽略），
-  因此 `ui.html` 的元策略只声明 `default-src/script-src/style-src/img-src/connect-src/base-uri/form-action`。
+资源同时通过
+`/v0/resource/plugins/cliproxyapi-observer/...` 与
+`/v0/management/plugins/cliproxyapi-observer/...` 提供。管理数据始终要求鉴权；
+资源外壳公开。与 Go 的 `Asset("ui.js")` 一致，固定 `/ui.js` 响应体是
+`settings.js + "\n" + ui.js`；`/settings.js` 不作为独立资源暴露。mock 只保存假
+Key 的 SHA-256，明文 secret 仅在创建/轮换响应中出现。
 
-## 设置保存合约
+假数据同时覆盖：
 
-- 仅发送可编辑白名单原始 JSON：先 POST 插件 `/validate`，再 PATCH 插件 `/config`；
-  不获取或编辑 YAML，不获取 CPA 全量 `/config`，不覆盖 `db`、`flush`、`store` 等元数据。
-- 核心配置仅使用 `/v0/management/plugins/cliproxyapi-observer/config`，保留同源反代前缀；
-  v8 资源入口也使用当前宿主实际提供的 v0 插件管理路由。
-- Save 前确认敏感捕获 / 不可逆缩短保留；成功必须 GET 配置回读，并轮询生效设置。
-  暂时 503 可重试，最多 20 次间隔 500ms，总保存/重新加载上限 15s。
-  写入结果未知、回读失败、仍未生效均保留草稿，明确提示核对，不宣称成功。
-- 普通仪表盘刷新不覆盖脏草稿；重新连接会清除旧连接草稿并中止旧保存。
-  所有请求拒绝重定向，凭据只在内存 / Authorization 头中使用。
-- `prices: {}` 为规范保存的一部分：编辑器始终写入空的旧价格表加有序 `price-rules`
-  列表（先显式规则，后由旧 map 行转换的无条件规则），因此旧 `prices` map 向后兼容且
-  不会与规则双写。价格在查询时按当前生效设置（first-match 规则，未命中回落 `prices`
-  map）动态计算，不保留快照；更新规则后历史请求与 summary 成本立即反映。容量表单单位为
-  MiB，转换结果必须为精确整数 bytes；不隐式裁剪越界数值。
+- 成功/失败请求、完整/unknown 核算质量、hour 桶与筛选联动；
+- 合法 `HH:mm-HH:mm` 价格规则（含跨夜边界 `00:00-23:59`）、手工 0 费率与
+  reasoning 可选字段；
+- 恶意模型名、Provider、auth_index、Key 标签、header 与请求体（用于注入回归）；
+- `Authorization: Bearer [redacted]` 和 `sk-live-DO-NOT-LEAK` 对应的脱敏断言；
+- 启用/停用/过期 Key、额度与并发字段、周期开始/重置时间。
 
-## 缓存聚合契约与核算覆盖（cache_accounting）
+## 浏览器断言
 
-- **后端契约**：`summary.totals`，以及各 `groups`、`series`、`client_keys`、`credentials` 聚合 Counters 包含：
-  `cache_accounting: { requests: <complete请求数>, input_tokens: <同集总输入uncached+cacheRead+cacheWrite>, cache_read_tokens: <同集缓存读> }` 或 `null`（不一致/不可安全得出）。
-- **核算覆盖定义**：`coverage = 完整核算 Requests / 全部 Requests`（包括完整 0 输入记录），不是仅统计“有 usage 字段的请求”或“命中的请求”。
-- **比率公式**：`Σ完整 cache_read / Σ完整 input`（token-weighted），缓存写入仅作为分母的一部分，不进行单条百分比平均。若 `input_tokens === 0`，比率显示 `—`，绝不作为 `0.0%` 未命中。
-- **前端严格校验**：校验嵌套字段为严格有限非负安全整数；`completeRequests <= source.requests`，`read <= input`，`completeRequests === 0` 时 tokens 只能为 0；缺失、null 或不一致时比率显示 `—`、覆盖显示 `完整核算未知`，绝不回退到全量未清洗原始 token 字段或旧 `cache_hits` 字段。
+`run.cjs` 首先自检 mock 合约，再启动真实 Chrome：
 
-mock 控制可直接使用 `startServer()` 返回的 `controls` / `counters`，或本地
-`POST /__mock/control` 与 `GET /__mock/counters`。支持校验失败、写入失败、配置回读失败、
-生效永不更新，以及 settings GET 暂时 503（`reconfigureTemporary503Count`）。
-mock 配置在同一服务进程中跨页面刷新持久保留；它并不证明真实宿主的文件写入或重启持久性。
+1. **登录门禁**：初始只有 `#login`；错误密码得到 401 且停留登录页；正确密码后
+   主界面出现，密钥不出现在 URL，除刻意 401 外所有管理请求都带正确 Bearer。
+2. **顶栏**：`#theme` 必须包含 `white/light/dark/auto`；`#interval` 必须包含
+   `0/5/15/30/60`；`#refresh` 触发新的 `GET /requests`。
+3. **轮询时序**：登录后默认 5 秒必须产生真实 `GET /requests`；切到 `0` 后
+   不得再调度长定时器。打开详情对话框、编辑筛选产生脏状态、隐藏标签页都会
+   清理轮询定时器；关闭对话框/恢复可见后按 5 秒恢复，脏状态恢复可见仍不调度。
+   通过包装 `setTimeout/clearTimeout` 记录调度与清理，不靠固定 sleep 断言。
+4. **重叠刷新**：用页面内 `fetch` gate 延迟旧请求。先发 `gemini-2.5-pro`
+   再发 `claude-opus-4-1`：断言旧请求被 `AbortController` 中止；再模拟忽略
+   Abort 的迟到响应，断言 generation 保护不会让旧结果覆盖新结果。
+5. **认证刷新 401**：刷新中注入 401 后必须停止轮询、清空
+   `sessionStorage`、隐藏导航/清空内容并回登录页；认证错误不得附加历史查询
+   提示（仅历史相关错误追加）；随后重新登录并清空筛选。
+6. **在途输入**：延迟一次旧刷新并在其未完成时 focus 筛选输入框、修改草稿。
+   断言 focus/input 会 stop/abort 旧刷新；随后释放迟到响应，输入值、焦点和
+   表格不被旧响应覆盖。
+7. **同源 iframe**：通过页面内 evaluate 插入资源 URL iframe。断言 iframe 直接
+   继承本标签 `sessionStorage`、不出现第二次登录；`auto` 主题初始跟随父页面
+   dark，父页面切 white/dark 时通过 MutationObserver 动态跟随。移除 iframe
+   后主页面仍需可刷新；只读展示，不读取或猜测其它 CPA 存储。
+8. **路由 smoke**：真实 Chrome 打开资源前缀 `/ui/`（尾斜杠），断言 HTML 的
+   `/ui.css` 与 `/ui.js` 请求固定走 `/v0/resource/plugins/cliproxyapi-observer/`
+   且状态均为 200、无 404、无 `/ui/ui.js` 或 `/ui/ui.css` 相对请求；
+   `sessionStorage` 恢复后直接显示请求日志。再打开 management `/ui` 入口重复
+   资产与 session 检查，最后切回资源 `/ui` 执行原 40 张截图矩阵。
+9. **请求日志**：`#filters` 必须提供 `from/to/key_id/model/provider/auth_index/status`；
+   查询按钮把 `model/status` 带到第 1 页；恶意模型名只作为文本，不生成
+   `img/script/iframe/[onerror]/[onload]`，`window.__observerXss` 保持 undefined。
+10. **详情按需**：列表渲染后 `GET /requests/{id}` 计数为 0；点击日志表的模型
+    `button` 后恰好新增一次详情读取；详情对话框有可访问名称、位于视口内、
+    显示脱敏数据且不泄漏假密钥。
+11. **Key 管理**：列表、标签文本化、新建表单标签（标签/到期时间/并发上限/
+    允许模型/5小时额度/周额度/月额度/总额度）、保存、编辑、启用/停用、轮换、
+    重置、撤销；分别断言 `POST /keys`、`PUT /keys/{id}`、
+    `POST /keys/{id}/rotate`、`POST /keys/{id}/reset`、`DELETE /keys/{id}`。
+    创建/轮换后页面出现一次性 `observer_sk_...` 明文，URL 中绝不出现。
+12. **设置**：捕获/保留/价格/压缩模块标签可见；保存发送完整 `PUT /settings`；
+    价格刷新与物理压缩分别发送 `POST /prices/refresh`、`POST /compact`。
+    general save 必须使用实际字段值，并原样保留已确认的 `settings.pricing`。
+13. **价格编辑器**：加载 seed 手工价与规则；新增手工价覆盖全 0 费率、reasoning
+    留空与显式 `0` 的差异；新增规则写入 ID/模型/Token 阈值/UTC 区间/全部费率，
+    上移后按新顺序保存。`24:00` 区间与 7 位小数必须在前端拒绝且不发送 PUT。
+    保存 payload 只能是 settings 字段，pricing 位于 `settings.pricing` 且保留
+    general 配置；general save 必须保留已保存 pricing，不能写入未保存的价格草稿。
+    字段通过实际 `id` 后缀与 `data-testid` 定位。
+14. **可访问性**：可见 input/select/textarea/button 均有可访问名称；对话框有
+    名称；表格有表头；`<html lang>` 与 `document.title` 存在。
+15. **安全与错误**：无 HTML 注入、无 `console.error`/页面异常；CSP 安全日志
+    （包括内联 style 违规）按错误处理。刻意 401 的网络诊断单独记录在
+    `expected_diagnostics`；破坏性操作的原生 `confirm` 会被接受并记录在
+    `native_dialogs`，随后仍断言对应 API 调用。
+16. **布局**：每个视口/主题/页面断言
+    `scrollWidth <= innerWidth + 1`；Key 表单与详情对话框不超出视口。
+17. **截图矩阵**：1280×900 与 390×844；white/light/dark/auto；请求日志、
+    Key 管理、设置、Key 新建表单、请求详情。页面使用整页截图，对话框使用
+    视口截图。`auto` 通过 CDP 模拟 `prefers-color-scheme: dark`。
+
+## 对主 UI 的契约假设
+
+测试按产品契约定位元素；主 UI 需要保持：
+
+- `#login` 内的 `input[type=password]` 与文本“登录”按钮；
+- 导航按钮文本“请求日志”“Key 管理”“设置”；
+- `#theme`、`#interval`、`#refresh`、`#content`；
+- 日志表中模型为 `button`，按钮文本等于模型标识；
+- `#filters` 内 `from/to/key_id/model/provider/auth_index/status`；
+- Key 新建/编辑使用对话框，字段标签如上，保存按钮文本“保存”，
+  操作按钮文本“编辑/启用/停用/撤销/轮换/重置”；
+- 设置模块提供捕获、保留、价格、压缩相关标签与按钮。
+
+如果这些名称/结构发生变化，测试会明确失败并打印缺失项，而不是静默跳过。
+测试不会修改主 UI、不会启动真实 CPA，也不会读取浏览器用户 profile。
