@@ -27,6 +27,14 @@ type Config struct {
 
 func parseConfig(raw []byte) (Config, error) {
 	c := Config{true, "data/cliproxyapi-observer-v2.db"}
+	// CPA injects priority and retains store provenance in lifecycle YAML.
+	// They belong to the host, not to Observer settings or data compatibility.
+	wire := struct {
+		Enabled  bool      `yaml:"enabled"`
+		DB       string    `yaml:"db"`
+		Priority int       `yaml:"priority"`
+		Store    yaml.Node `yaml:"store"`
+	}{Enabled: c.Enabled, DB: c.DB}
 	d := yaml.NewDecoder(bytes.NewReader(raw))
 	d.KnownFields(true)
 	if len(bytes.TrimSpace(raw)) > 0 {
@@ -37,19 +45,27 @@ func parseConfig(raw []byte) (Config, error) {
 		fields := doc.Content[0].Content
 		for i := 0; i < len(fields); i += 2 {
 			key, value := fields[i], fields[i+1]
+			if key.Value == "store" {
+				if value.Kind != yaml.MappingNode {
+					return c, engine.ErrInvalid
+				}
+				continue
+			}
 			if key.Kind != yaml.ScalarNode || value.Kind != yaml.ScalarNode ||
 				(key.Value == "enabled" && value.Tag != "!!bool") ||
+				(key.Value == "priority" && value.Tag != "!!int") ||
 				(key.Value == "db" && value.Tag != "!!str") {
 				return c, engine.ErrInvalid
 			}
 		}
-		if err := d.Decode(&c); err != nil {
+		if err := d.Decode(&wire); err != nil {
 			return c, err
 		}
 		var extra any
 		if err := d.Decode(&extra); err != io.EOF {
 			return c, engine.ErrInvalid
 		}
+		c.Enabled, c.DB = wire.Enabled, wire.DB
 	}
 	if strings.TrimSpace(c.DB) == "" || strings.ContainsRune(c.DB, 0) {
 		return c, engine.ErrInvalid
