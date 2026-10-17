@@ -201,6 +201,10 @@ func TestGeneratedKeyModelSelectionsPersist(t *testing.T) {
 	modelsDeny(t, h, created.Secret, modelName)
 	modelsAllow(t, h, created.Secret, modelNameTwo)
 
+	// Four allowed responses have flushed, but their handler completion/usage
+	// callbacks may still be running. Forbidden models must add no execution.
+	beforeRecords := h.awaitGracefulRestartReady(t, 4)
+	beforeKey := modelsKeyByID(t, h, created.Key.ID)
 	restarted, err := h.restartPreservingConfig(t)
 	if err != nil {
 		t.Fatalf("restart host: %v", err)
@@ -208,7 +212,21 @@ func TestGeneratedKeyModelSelectionsPersist(t *testing.T) {
 	if got := modelsKeyByID(t, restarted, created.Key.ID).AllowedModels; !slices.Equal(got, []string{modelNameTwo}) {
 		t.Fatalf("post-restart allowed models = %v, want [%s]", got, modelNameTwo)
 	}
+	if afterKey := modelsKeyByID(t, restarted, created.Key.ID); afterKey.Used != beforeKey.Used || afterKey.Active != 0 {
+		t.Fatalf("graceful restart changed counters or retained an active slot: before=%+v after=%+v", beforeKey, afterKey)
+	}
+	if records := restarted.page(t, "page_size=100"); records.HasMore || len(records.Items) != 4 {
+		t.Fatalf("graceful restart lost/added ledger executions: %+v", records)
+	}
+	for _, record := range beforeRecords {
+		if got := acceptanceRecordByID(t, restarted, record.ID); got != record {
+			t.Fatalf("graceful restart changed execution %s: before=%+v after=%+v", record.ID, record, got)
+		}
+	}
 	modelsDeny(t, restarted, created.Secret, modelName)
 	modelsAllow(t, restarted, created.Secret, modelNameTwo)
+	// The fifth allowed execution must also reach the ledger; neither denied
+	// model probe may create an extra execution before the test finishes.
+	restarted.awaitGracefulRestartReady(t, 5)
 	restarted.mock.requireClean(t)
 }
