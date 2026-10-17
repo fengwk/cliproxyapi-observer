@@ -87,8 +87,15 @@ type Manager struct {
 	configured, closed bool
 	cancel             context.CancelFunc
 	workers            sync.WaitGroup
-	scopes             sync.Map // host caller_scope -> stable principal; never contains secrets
-	billingFaults      sync.Map // key ID -> accounting callback fault; explicit recovery only
+	scopes             sync.Map // host caller_scope -> callerScope; never contains secrets
+	billingFaults      sync.Map // marker-write failure fallback; explicit recovery or durable handoff only
+	capsMu             sync.Mutex
+	catalogCaps        map[[32]byte]time.Time
+}
+
+type callerScope struct {
+	KeyID    string
+	Generate bool
 }
 
 func NewManager(assets AssetFunc) *Manager { return &Manager{assets: assets, now: time.Now} }
@@ -251,6 +258,9 @@ func (m *Manager) openLocked(c Config) error {
 	return nil
 }
 func (m *Manager) closeLocked() error {
+	m.capsMu.Lock()
+	m.catalogCaps = nil
+	m.capsMu.Unlock()
 	if m.cancel != nil {
 		m.cancel()
 		m.workers.Wait()
@@ -266,9 +276,9 @@ func (m *Manager) closeLocked() error {
 }
 
 // Accounting errors never fail an already running response. Engine errors own
-// durable pending events. An unexpected callback panic or a late delivery to a
-// detached store is explicitly visible and blocks the affected Key in this
-// instance; the host's lack of a usage-drain barrier remains a replacement risk.
+// durable pending events. Unexpected callback panics and late deliveries persist
+// an interruption outside bbolt so even a different native instance fails closed.
+// This cannot reconstruct source events that the host never delivers.
 func (m *Manager) handleUsage(raw []byte) {
 	var r pluginapi.UsageRecord
 	if json.Unmarshal(raw, &r) != nil || !r.Generate || r.AccessProvider != AccessProvider || !validPrincipal(r.APIKey) {
@@ -277,25 +287,50 @@ func (m *Manager) handleUsage(raw []byte) {
 	id := strings.TrimPrefix(r.APIKey, "observer:")
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	m.accountUsage(id, func() error {
+		if m.store == nil {
+			return engine.ErrClosed
+		}
+		return m.store.RecordUsage(r)
+	})
+}
+
+// Caller holds the lifecycle read fence. Keep this panic boundary around the
+// engine call only, not around JSON parsing or credential extraction.
+func (m *Manager) accountUsage(id string, write func() error) {
 	defer func() {
 		if recover() != nil {
-			m.billingFaults.Store(id, true)
+			m.recordInterruption(id)
 		}
 	}()
-	if m.store == nil {
-		m.billingFaults.Store(id, true)
-		return
+	if err := write(); errors.Is(err, engine.ErrClosed) {
+		m.recordInterruption(id)
 	}
-	if err := m.store.RecordUsage(r); err != nil {
-		// RecordUsage retains ordinary failures for bounded retries. Unexpected
-		// closed-store errors must not be masked by a stale manager pointer.
-		if errors.Is(err, engine.ErrClosed) {
-			m.billingFaults.Store(id, true)
-		}
+}
+
+func (m *Manager) recordInterruption(id string) {
+	if err := engine.RecordInterruption(m.cfg.DB, id); err != nil {
+		// Only marker write failures need a second, in-memory safety gate.
+		// Never expose filesystem errors, callback panic text, or credentials.
+		m.billingFaults.Store(id, true)
+	} else {
+		m.billingFaults.Delete(id)
 	}
 }
 func validPrincipal(s string) bool {
-	return strings.HasPrefix(s, "observer:") && len(s) > len("observer:") && !strings.ContainsAny(s, " /\\\t\r\n")
+	if !strings.HasPrefix(s, "observer:") {
+		return false
+	}
+	id := strings.TrimPrefix(s, "observer:")
+	if len(id) != 64 {
+		return false
+	}
+	for _, c := range id {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 func (m *Manager) authenticate(raw []byte) ([]byte, error) {
 	var r pluginapi.FrontendAuthRequest
@@ -311,14 +346,21 @@ func (m *Manager) authenticate(raw []byte) ([]byte, error) {
 	if m.store == nil {
 		return okEnvelope(pluginapi.FrontendAuthResponse{})
 	}
+	if m.consumeCatalog(r, secret) {
+		return okEnvelope(pluginapi.FrontendAuthResponse{Authenticated: true, Principal: "observer-catalog"})
+	}
 	k, e := m.store.Authenticate(secret)
 	if e != nil {
 		return okEnvelope(pluginapi.FrontendAuthResponse{})
 	}
+	generate := !countTokenPath(r.Path)
 	principal := "observer:" + k.ID
+	if !generate {
+		principal = "observer-count:" + k.ID
+	}
 	// handlers.requestCallerScope hashes Gin userApiKey via the pinned SDK helper.
 	// userApiKey itself is NOT present in RequestInterceptRequest.Metadata.
-	m.scopes.Store(session.CallerScope(principal), principal)
+	m.scopes.Store(session.CallerScope(principal), callerScope{KeyID: k.ID, Generate: generate})
 	return okEnvelope(pluginapi.FrontendAuthResponse{Authenticated: true, Principal: principal})
 }
 func denied(status int) pluginapi.RequestInterceptResponse {
@@ -339,23 +381,19 @@ func (m *Manager) before(raw []byte) ([]byte, error) {
 	if !ok {
 		return okEnvelope(denied(401))
 	}
-	principal, _ := v.(string)
-	if !validPrincipal(principal) {
+	caller, ok := v.(callerScope)
+	if !ok || caller.KeyID == "" {
 		return okEnvelope(denied(401))
 	}
 	model := r.RequestedModel
 	if model == "" {
 		model = r.Model
 	}
-	id := strings.TrimPrefix(principal, "observer:")
+	id := caller.KeyID
 	e := m.store.Authorize(id, model)
-	generate := true
+	generate := caller.Generate
 	if b, ok := r.Metadata[coreexecutor.GenerateMetadataKey].(bool); ok {
-		generate = b
-	}
-	path, _ := r.Metadata[coreexecutor.RequestPathMetadataKey].(string)
-	if strings.Contains(strings.ToLower(path), "counttokens") || strings.Contains(path, "count_tokens") {
-		generate = false
+		generate = generate && b
 	}
 	if e == nil && generate {
 		if _, fault := m.billingFaults.Load(id); fault {
