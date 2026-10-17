@@ -513,7 +513,7 @@ func (h *harness) Stop() {
 		}
 	}
 	if root := os.Getenv("CPA_TEST_ARTIFACTS"); root != "" {
-		logDir := filepath.Join(root, fmt.Sprintf("%s-%d", strings.ReplaceAll(h.t.Name(), "/", "_"), h.port))
+		logDir := filepath.Join(root, fmt.Sprintf("%s-%d", artifactTestName(h.t.Name()), h.port))
 		if err := os.MkdirAll(logDir, 0700); err != nil {
 			h.t.Errorf("create host artifacts: %v", err)
 			return
@@ -525,6 +525,18 @@ func (h *harness) Stop() {
 		}
 		h.t.Logf("host artifacts: %s", logDir)
 	}
+}
+
+// Query-bearing subtest names are valid Go names but not portable artifact
+// paths. Keep host evidence uploadable on all supported filesystems.
+func artifactTestName(name string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' ||
+			r >= '0' && r <= '9' || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, name)
 }
 
 // rawRequest performs one host HTTP call. Headers and body may be nil.
