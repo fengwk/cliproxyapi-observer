@@ -1,14 +1,19 @@
 package plugin
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"net/http"
 	"net/url"
-	"strings"
+	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/fengwk/cliproxyapi-observer/internal/engine"
+	"github.com/fengwk/cliproxyapi-observer/internal/pricing"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -80,9 +85,15 @@ func TestCatalogTTLBoundAndQuiesce(t *testing.T) {
 	if r := m.serveCatalogToken(); r.StatusCode != 429 {
 		t.Fatal("outstanding cap not bounded")
 	}
-	memory, _ := json.Marshal(m.catalogCaps)
-	if strings.Contains(string(memory), first.Token) {
-		t.Fatal("plaintext retained")
+	if expiry, ok := m.catalogCaps[sha256.Sum256([]byte(first.Token))]; !ok || !expiry.Equal(first.ExpiresAt) {
+		t.Fatal("capability not indexed by digest")
+	}
+	database, err := os.ReadFile(m.cfg.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(database, []byte(first.Token)) {
+		t.Fatal("plaintext capability persisted")
 	}
 	now = now.Add(30 * time.Second)
 	if authenticateTest(t, m, pluginapi.FrontendAuthRequest{Method: "GET", Path: "/v1/models", Headers: http.Header{"Authorization": {"Bearer " + first.Token}}}).Authenticated {
@@ -106,6 +117,8 @@ func TestCatalogTTLBoundAndQuiesce(t *testing.T) {
 	for _, r := range []pluginapi.ManagementRequest{
 		{Method: "POST", Path: managementBasePath + "/models/token", Query: url.Values{"x": {"1"}}},
 		{Method: "POST", Path: managementBasePath + "/models/token", Body: []byte(`{}`)},
+		{Method: "POST", Path: managementBasePath + "/models/token", Body: []byte(" ")},
+		{Method: "POST", Path: resourceBasePath + "/models/token"},
 		{Method: "GET", Path: managementBasePath + "/models/token"},
 	} {
 		if out := m.dispatchManagement(managementRequest{ManagementRequest: r}); out.StatusCode < 400 {
@@ -158,6 +171,75 @@ func TestCountScopeFromOriginalPath(t *testing.T) {
 	for _, path := range []string{"/v1beta/models/:countTokens", "/v1beta/models/m:countTokens/", "/v1beta/models/a/b:countTokens", "/v1/messages/count_tokens/"} {
 		if countTokenPath(path) {
 			t.Fatal("overbroad count path")
+		}
+	}
+}
+
+// Full quota blocks generation only; count authorization uses the same Key's
+// enabled/expiry/model policy without reserving or charging it.
+func TestCountWhenQuotaFull(t *testing.T) {
+	m := liveManager(t)
+	settings, err := m.store.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.Pricing = pricing.Config{Prices: []pricing.Price{{Model: "model", Rates: pricing.Rates{Input: 1_000_000}}}, Rules: []pricing.Rule{}}
+	if _, err = m.store.UpdateSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	k, secret, err := m.store.CreateKey(engine.KeySpec{Enabled: true, Limits: engine.Limits{Total: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call(t, m, "usage.handle", pluginapi.UsageRecord{RequestID: "full", APIKey: "observer:" + k.ID, AccessProvider: AccessProvider, Generate: true, Provider: "openai", Model: "model", RequestedAt: time.Now(), Detail: pluginapi.UsageDetail{InputTokens: 1}})
+	keys, err := m.store.Keys()
+	if err != nil || keys[0].Used.Total != 1 {
+		t.Fatal("quota fixture did not bill")
+	}
+	for _, operation := range []string{"generateContent", "countTokens"} {
+		a := authenticateTest(t, m, pluginapi.FrontendAuthRequest{Method: "POST", Path: "/v1beta/models/model:" + operation, Headers: http.Header{"Authorization": {"Bearer " + secret}}})
+		var r pluginapi.RequestInterceptResponse
+		_ = json.Unmarshal(call(t, m, "request.intercept_before", pluginapi.RequestInterceptRequest{RequestID: operation, RequestedModel: "model", Metadata: map[string]any{coreexecutor.CallerScopeMetadataKey: session.CallerScope(a.Principal), coreexecutor.GenerateMetadataKey: true, coreexecutor.RequestPathMetadataKey: "/v1beta/models/*action"}}), &r)
+		if r.Terminate != (operation == "generateContent") {
+			t.Fatal("quota applied to wrong operation")
+		}
+	}
+	if m.store.Health().ActiveRequests != 0 {
+		t.Fatal("count reserved while quota full")
+	}
+}
+
+// Simultaneous requests cannot redeem the same capability twice.
+func TestCatalogConcurrentRedemption(t *testing.T) {
+	m := liveManager(t)
+	token := issueCatalogTest(t, m)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var accepted atomic.Int32
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if authenticateTest(t, m, pluginapi.FrontendAuthRequest{Method: "GET", Path: "/v1/models", Headers: http.Header{"Authorization": {"Bearer " + token.Token}}}).Authenticated {
+				accepted.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if accepted.Load() != 1 {
+		t.Fatal("capability was not single-use under concurrency")
+	}
+	for _, state := range []string{"disabled", "closed"} {
+		m := NewManager(nil)
+		if state == "disabled" {
+			call(t, m, "plugin.register", lifecycleRequest{[]byte("enabled: false"), 6})
+		} else {
+			call(t, m, "plugin.shutdown", nil)
+		}
+		if m.serveCatalogToken().StatusCode != 503 {
+			t.Fatal("inactive manager issued capability")
 		}
 	}
 }

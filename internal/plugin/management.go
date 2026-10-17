@@ -197,6 +197,9 @@ func (m *Manager) dispatchManagementRoute(req managementRequest, route string) p
 		if len(req.Query) != 0 {
 			return invalidQueryResponse()
 		}
+		if len(req.Body) != 0 {
+			return bodyFailureResponse(errJSONInvalid)
+		}
 		if req.Method != http.MethodPost {
 			return methodNotAllowedResponse()
 		}
