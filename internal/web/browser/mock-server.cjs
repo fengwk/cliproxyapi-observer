@@ -19,10 +19,10 @@
  *   POST /compact
  *   GET  /ui, /ui/, /ui.html, /ui.js, /ui.css
  *
- * 同时模拟 CPA 宿主的管理目录接口（认证使用同一管理密钥）：
+ * 模型目录能力（不回退到 auth-files / pricing / 配置目录）：
  *
- *   GET /v0/management/auth-files
- *   GET /v0/management/auth-files/models?name={file}
+ *   POST <管理前缀>/models/token   -> {token, expires_at}
+ *   GET  /v1/models                -> {data:[{id}]}（仅接受该一次性 capability）
  *
  * 资源与 API 均可通过 /v0/resource/plugins/cliproxyapi-observer 和
  * /v0/management/plugins/cliproxyapi-observer 前缀访问；管理数据要求
@@ -40,9 +40,12 @@ const crypto = require('node:crypto');
 const PLUGIN_ID = 'cliproxyapi-observer';
 const RESOURCE_BASE = '/v0/resource/plugins/' + PLUGIN_ID;
 const MANAGEMENT_BASE = '/v0/management/plugins/' + PLUGIN_ID;
-const AUTH_FILES_PATH = '/v0/management/auth-files';
 const DEFAULT_MANAGEMENT_KEY = 'observer-browser-secret';
 const MAX_BODY_BYTES = 1024 * 1024;
+const CATALOG_PATH = '/v1/models';
+const CAPABILITY_TTL_MS = 30 * 1000;
+const MAX_OUTSTANDING_CAPABILITIES = 32;
+const MAX_CATALOG_MODELS = 100;
 const ASSET_DIR = path.resolve(__dirname, '..');
 
 const SECRET_PREFIX = 'observer_sk_';
@@ -60,43 +63,30 @@ const XSS = {
   leakedSecret: 'sk-live-DO-NOT-LEAK'
 };
 
-// CPA auth-files 目录夹具。secret 只存在于 mock 内部，公开响应只暴露 name 等
-// 非敏感字段；模型 ID 是真实 CPA 会返回的可用 ID，而不是 pricing 目录。
-const AUTH_FILE_FIXTURES = [
-  {
-    name: 'openai-main.json',
-    provider: 'openai',
-    account: 'browser-openai@example.test',
-    runtime: false,
-    secret: 'sk-auth-file-openai-DO-NOT-LEAK',
-    models: ['gpt-5-codex', 'gpt-5', 'gpt-5-mini', 'o4-mini']
-  },
-  {
-    name: 'anthropic-work.json',
-    provider: 'anthropic',
-    account: 'browser-anthropic@example.test',
-    runtime: false,
-    secret: 'sk-ant-auth-file-DO-NOT-LEAK',
-    models: ['claude-opus-4-1', 'claude-sonnet-4-5', 'claude-haiku-4-5', 'claude-3-7-sonnet']
-  },
-  {
-    name: 'google-vertex.json',
-    provider: 'google',
-    account: 'browser-google@example.test',
-    runtime: false,
-    secret: 'ya29.auth-file-google-DO-NOT-LEAK',
-    models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite']
-  },
-  {
-    name: 'runtime-credentials',
-    provider: 'mixed',
-    account: 'runtime',
-    runtime: true,
-    secret: 'runtime-auth-DO-NOT-LEAK',
-    models: ['gpt-5-codex', 'claude-opus-4-1', 'gemini-2.5-pro', 'grok-4']
-  }
+// 权威模型目录夹具。只暴露模型 ID；不读取 pricing、配置或凭证目录。
+const PRIMARY_MODEL_IDS = [
+  'gpt-5-codex',
+  'gpt-5',
+  'gpt-5-mini',
+  'o4-mini',
+  'claude-opus-4-1',
+  'claude-sonnet-4-5',
+  'claude-haiku-4-5',
+  'claude-3-7-sonnet',
+  'gemini-2.5-pro',
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-lite',
+  'grok-4'
 ];
+// 填充项用于验证服务端响应有界；主模型始终排在前面。
+const CATALOG_MODEL_IDS = PRIMARY_MODEL_IDS.concat(
+  Array.from({ length: 120 }, (_, index) => 'catalog-filler-' + String(index + 1).padStart(3, '0'))
+);
 
+function publicCatalogIDs() {
+  return CATALOG_MODEL_IDS.slice(0, MAX_CATALOG_MODELS);
+}
 
 function iso(ms) {
   return new Date(ms).toISOString();
@@ -114,36 +104,18 @@ function publicKey(key) {
   return out;
 }
 
-function publicAuthFile(file) {
+function defaultCatalogControl() {
   return {
-    name: file.name,
-    provider: file.provider,
-    account: file.account,
-    runtime: file.runtime === true,
-    status: 'active'
+    token_delay_ms: 0,
+    models_delay_ms: 0,
+    fail_token: false,
+    fail_models: false
   };
 }
 
-function cloneAuthFiles() {
-  return AUTH_FILE_FIXTURES.map((file) => ({
-    name: file.name,
-    provider: file.provider,
-    account: file.account,
-    runtime: file.runtime === true,
-    secret: file.secret,
-    models: file.models.slice()
-  }));
+function tokenKey(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
 }
-
-function defaultAuthControl() {
-  return {
-    delay_ms: 0,
-    fail_root: false,
-    fail_models: false,
-    fail_names: []
-  };
-}
-
 
 function rate(input, output, cacheRead, cacheWrite) {
   return { input, output, cache_read: cacheRead, cache_write: cacheWrite };
@@ -382,8 +354,8 @@ function createState(options) {
     ],
     records: createRecords(now),
     settings: createSettings(),
-    authFiles: cloneAuthFiles(),
-    authControl: defaultAuthControl(),
+    capabilities: new Map(),
+    catalogControl: defaultCatalogControl(),
     pricesLastSync: iso(now - 15 * 60 * 1000),
     secrets: new Map(),
     nextKey: 1,
@@ -396,8 +368,8 @@ function createState(options) {
       keyRecovers: 0,
       keyRevokes: 0,
       detailReads: 0,
-      authFileReads: 0,
-      modelCatalogReads: 0
+      catalogTokenIssued: 0,
+      catalogReads: 0
     },
     managementKey: (options && options.managementKey) || DEFAULT_MANAGEMENT_KEY
   };
@@ -899,10 +871,6 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function authFileByName(state, name) {
-  return state.authFiles.find((file) => file.name === name) || null;
-}
-
 function createServer(options) {
   const opts = options || {};
   const state = createState(opts);
@@ -915,8 +883,8 @@ function createServer(options) {
     state.keys = fresh.keys;
     state.records = fresh.records;
     state.settings = fresh.settings;
-    state.authFiles = fresh.authFiles;
-    state.authControl = fresh.authControl;
+    state.capabilities = fresh.capabilities;
+    state.catalogControl = fresh.catalogControl;
     state.pricesLastSync = fresh.pricesLastSync;
     state.secrets = fresh.secrets;
     state.nextKey = fresh.nextKey;
@@ -938,6 +906,8 @@ function createServer(options) {
     call.query = Object.fromEntries(url.searchParams.entries());
     call.authorized = false;
     call.request_body = undefined;
+    call.body_bytes = undefined;
+    call.capability_stage = undefined;
     calls.push(call);
     return call;
   }
@@ -966,8 +936,9 @@ function createServer(options) {
         sendJson(res, 200, {
           keys: state.keys.map(publicKey),
           settings: state.settings,
-          auth_files: state.authFiles.map(publicAuthFile),
-          auth_control: state.authControl,
+          catalog_control: state.catalogControl,
+          catalog_ids: publicCatalogIDs(),
+          outstanding_capabilities: state.capabilities.size,
           counters: state.counters,
           calls: calls.length
         });
@@ -975,31 +946,31 @@ function createServer(options) {
       }
       if (req.method === 'POST' && url.pathname === '/__mock/control') {
         const body = await readJson(req);
-        rejectUnknown(body, new Set(['auth_files']), 'mock control');
-        if (body.auth_files !== undefined) {
-          const patch = body.auth_files;
-          rejectUnknown(patch, new Set(['delay_ms', 'fail_root', 'fail_models', 'fail_names']), 'auth_files control');
-          if (patch.delay_ms !== undefined) {
-            ensureInteger(patch.delay_ms, 'auth_files.delay_ms', 0);
-            if (patch.delay_ms > 10000) throw failure(400, 'invalid_json', 'delay_ms must be <= 10000');
-            state.authControl.delay_ms = patch.delay_ms;
-          }
-          if (patch.fail_root !== undefined) {
-            if (typeof patch.fail_root !== 'boolean') throw failure(400, 'invalid_json', 'fail_root must be a boolean');
-            state.authControl.fail_root = patch.fail_root;
-          }
-          if (patch.fail_models !== undefined) {
-            if (typeof patch.fail_models !== 'boolean') throw failure(400, 'invalid_json', 'fail_models must be a boolean');
-            state.authControl.fail_models = patch.fail_models;
-          }
-          if (patch.fail_names !== undefined) {
-            if (!Array.isArray(patch.fail_names) || patch.fail_names.some((name) => typeof name !== 'string')) {
-              throw failure(400, 'invalid_json', 'fail_names must be an array of strings');
+        rejectUnknown(body, new Set(['catalog']), 'mock control');
+        if (body.catalog !== undefined) {
+          const patch = body.catalog;
+          rejectUnknown(
+            patch,
+            new Set(['token_delay_ms', 'models_delay_ms', 'fail_token', 'fail_models']),
+            'catalog control'
+          );
+          for (const field of ['token_delay_ms', 'models_delay_ms']) {
+            if (patch[field] === undefined) continue;
+            ensureInteger(patch[field], 'catalog.' + field, 0);
+            if (patch[field] > 10000) {
+              throw failure(400, 'invalid_json', 'catalog.' + field + ' must be <= 10000');
             }
-            state.authControl.fail_names = patch.fail_names.slice();
+            state.catalogControl[field] = patch[field];
+          }
+          for (const field of ['fail_token', 'fail_models']) {
+            if (patch[field] === undefined) continue;
+            if (typeof patch[field] !== 'boolean') {
+              throw failure(400, 'invalid_json', 'catalog.' + field + ' must be a boolean');
+            }
+            state.catalogControl[field] = patch[field];
           }
         }
-        sendJson(res, 200, { ok: true, auth_files: state.authControl });
+        sendJson(res, 200, { ok: true, catalog: state.catalogControl });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/__mock/reset-calls') {
@@ -1035,10 +1006,10 @@ function createServer(options) {
       return;
     }
 
-    // CPA 宿主管理目录：模型可用性来源，不读取 pricing 目录。这里只注册
-    // DESIGN 指定的两个固定路径，并支持验收用的失败/延迟注入。
-    if (url.pathname === AUTH_FILES_PATH || url.pathname.startsWith(AUTH_FILES_PATH + '/')) {
-      const call = record(req, url, 'cpa', {});
+    // 权威模型目录：只接受 POST /models/token 签发的一次性 capability。
+    // 这是唯一允许的非管理前缀数据路由，且不会回退到 auth-files/pricing。
+    if (url.pathname === CATALOG_PATH) {
+      const call = record(req, url, 'catalog', {});
       res.on('finish', () => {
         call.status = res.statusCode;
       });
@@ -1046,50 +1017,35 @@ function createServer(options) {
         if (!res.writableEnded) call.aborted = true;
       });
       try {
+        requireMethod(req, 'GET');
+        rejectAnyQuery(url);
         const auth = req.headers.authorization || '';
-        const bearer = /^Bearer\s+(.+)$/i.exec(auth);
-        const authorized = Boolean(bearer && bearer[1] === state.managementKey);
-        call.authorized = authorized;
         call.has_authorization = Boolean(auth);
-        if (!authorized) throw failure(401, 'unauthorized', 'invalid management key');
+        call.has_extra_auth_header = Boolean(
+          req.headers['x-api-key'] || req.headers['x-goog-api-key'] || req.headers['x-auth-token']
+        );
+        const bearer = /^Bearer\s+(.+)$/i.exec(auth);
+        const key = bearer ? tokenKey(bearer[1]) : '';
+        const expiresAt = key ? state.capabilities.get(key) : undefined;
+        call.authorized = Boolean(expiresAt && expiresAt > Date.now());
+        call.capability_stage = call.authorized ? 'used' : 'rejected';
+        if (!call.authorized) throw failure(401, 'unauthorized', 'invalid or expired catalog capability');
+        // 一次性 capability：通过校验后立即失效，失败/中止也不再可用。
+        state.capabilities.delete(key);
 
-        if (state.authControl.delay_ms > 0) await sleep(state.authControl.delay_ms);
-        if (req.destroyed || res.destroyed || res.writableEnded) {
+        if (state.catalogControl.models_delay_ms > 0) {
+          await sleep(state.catalogControl.models_delay_ms);
+        }
+        if (res.destroyed || res.writableEnded || req.aborted) {
           call.aborted = true;
           return;
         }
-
-        if (url.pathname === AUTH_FILES_PATH) {
-          requireMethod(req, 'GET');
-          for (const key of url.searchParams.keys()) {
-            throw failure(400, 'invalid_query', 'unknown query parameter: ' + key);
-          }
-          if (state.authControl.fail_root) throw failure(502, 'auth_files_failed', 'auth-files unavailable');
-          state.counters.authFileReads += 1;
-          sendJson(res, 200, { files: state.authFiles.map(publicAuthFile) });
-          return;
+        if (state.catalogControl.fail_models) {
+          throw failure(502, 'catalog_failed', 'model catalog unavailable');
         }
-
-        if (url.pathname === AUTH_FILES_PATH + '/models') {
-          requireMethod(req, 'GET');
-          for (const key of url.searchParams.keys()) {
-            if (key !== 'name') throw failure(400, 'invalid_query', 'unknown query parameter: ' + key);
-          }
-          const name = url.searchParams.get('name');
-          if (!name) throw failure(400, 'invalid_query', 'models requires exactly one name query parameter');
-          if (state.authControl.fail_models || state.authControl.fail_names.includes(name)) {
-            throw failure(502, 'models_failed', 'auth-file models unavailable');
-          }
-          const file = authFileByName(state, name);
-          if (!file) throw failure(404, 'not_found', 'auth file not found');
-          state.counters.modelCatalogReads += 1;
-          sendJson(res, 200, {
-            models: file.models.map((id) => ({ id, provider: file.provider }))
-          });
-          return;
-        }
-
-        sendError(res, 404, 'not_found', 'not found');
+        state.counters.catalogReads += 1;
+        const data = publicCatalogIDs().map((id) => ({ id }));
+        sendJson(res, 200, { data });
       } catch (err) {
         if (res.headersSent) return;
         if (err && err.status) sendError(res, err.status, err.code || 'error', err.message);
@@ -1107,6 +1063,9 @@ function createServer(options) {
     res.on('finish', () => {
       call.status = res.statusCode;
     });
+    res.on('close', () => {
+      if (!res.writableEnded) call.aborted = true;
+    });
 
     try {
       const auth = req.headers.authorization || '';
@@ -1121,6 +1080,38 @@ function createServer(options) {
       if (suffix === '/health') {
         requireMethod(req, 'GET');
         sendJson(res, 200, health(state));
+        return;
+      }
+
+      if (suffix === '/models/token') {
+        requireMethod(req, 'POST');
+        rejectAnyQuery(url);
+        const body = await readBody(req);
+        call.body_bytes = body.length;
+        if (body.length !== 0) throw failure(400, 'invalid_json', 'models/token requires an empty body');
+        if (state.catalogControl.token_delay_ms > 0) {
+          await sleep(state.catalogControl.token_delay_ms);
+        }
+        if (res.destroyed || res.writableEnded || req.aborted) {
+          call.aborted = true;
+          return;
+        }
+        if (state.catalogControl.fail_token) {
+          throw failure(502, 'token_failed', 'catalog capability unavailable');
+        }
+        const now = Date.now();
+        for (const [key, expiresAt] of state.capabilities) {
+          if (expiresAt <= now) state.capabilities.delete(key);
+        }
+        if (state.capabilities.size >= MAX_OUTSTANDING_CAPABILITIES) {
+          throw failure(429, 'capability_limit', 'too many outstanding catalog capabilities');
+        }
+        const token = crypto.randomBytes(32).toString('base64url');
+        const expiresAt = now + CAPABILITY_TTL_MS;
+        state.capabilities.set(tokenKey(token), expiresAt);
+        state.counters.catalogTokenIssued += 1;
+        call.capability_stage = 'minted';
+        sendJson(res, 200, { token, expires_at: iso(expiresAt) });
         return;
       }
 
@@ -1370,8 +1361,11 @@ async function startServer(options) {
 
 module.exports = {
   ASSET_CSP,
-  AUTH_FILES_PATH,
+  CAPABILITY_TTL_MS,
+  CATALOG_PATH,
   DEFAULT_MANAGEMENT_KEY,
+  MAX_CATALOG_MODELS,
+  MAX_OUTSTANDING_CAPABILITIES,
   MANAGEMENT_BASE,
   MAX_BODY_BYTES,
   PLUGIN_ID,

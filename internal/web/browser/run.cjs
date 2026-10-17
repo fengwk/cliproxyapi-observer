@@ -11,6 +11,10 @@
  *   --chrome /usr/bin/google-chrome-stable
  *   --report-dir  截图、report.json、summary.txt 的输出目录
  *   --keep-profile 保留临时 Chrome profile（排障用）
+ *   --base-url URL 真实 host 只读 smoke；管理密钥仅从 OBSERVER_MANAGEMENT_KEY 读取
+ *
+ * realhost 只允许 GET/HEAD/OPTIONS 和唯一精确的插件
+ * POST /models/token（同源、空 query、空 body）；其他写请求在发送前阻断。
  *
  * 覆盖：
  *   - DESIGN.md 管理 API 的完整 mock 合约（鉴权、输入拒绝、CRUD、筛选/分页/汇总）；
@@ -20,7 +24,8 @@
  *   - 1280/390 × white/light/dark/auto × 三页 + Key 表单 + 请求详情截图矩阵；
  *   - 每个视口/主题/页面无横向溢出。
  *
- * 只使用 127.0.0.1 上的假数据；不读取用户 profile、不访问真实 CPA 或上游。
+ * 默认只使用 127.0.0.1 上的假数据；--base-url 模式只对真实 host 做只读 smoke，
+ * 不读取用户 profile，不写 Key/设置，也不访问上游。
  */
 
 const fs = require('node:fs');
@@ -129,7 +134,8 @@ function parseArgs(argv) {
           '\n' +
           '--base-url runs a read-only smoke against a real host.\n' +
           'Management key is read only from OBSERVER_MANAGEMENT_KEY; CLI key flags are not accepted.\n' +
-          'CDP Fetch interception blocks every non-GET/HEAD/OPTIONS request before it is sent.\n'
+          'CDP Fetch interception allows only GET/HEAD/OPTIONS plus the exact empty-body/query POST\n' +
+          '  /v0/management/plugins/cliproxyapi-observer/models/token; all other writes are blocked.\n'
       );
       process.exit(0);
     } else {
@@ -1355,60 +1361,105 @@ async function runApiContract(server) {
     return 'keys=ok';
   });
 
-  await step('mock API: CPA auth-files 模型目录（非 pricing、runtime、失败/延迟）', async () => {
-    const filesResponse = await fetch(server.origin + mock.AUTH_FILES_PATH, {
-      headers: { Authorization: 'Bearer ' + mock.DEFAULT_MANAGEMENT_KEY }
-    });
-    const filesBody = await filesResponse.json();
+  await step('mock API: 一次性模型目录 capability（管理鉴权/空请求/精确 namespace/失败）', async () => {
+    const unauthorized = await apiRequest(server, 'POST', '/models/token', { auth: false });
+    check('POST /models/token 需要管理鉴权', unauthorized.status === 401, String(unauthorized.status));
+    const bodyRejected = await apiRequest(server, 'POST', '/models/token', { body: {} });
+    check('POST /models/token 拒绝非空 body', bodyRejected.status === 400, String(bodyRejected.status));
+    const queryRejected = await fetch(
+      server.origin + mock.MANAGEMENT_BASE + '/models/token?x=1',
+      { method: 'POST', headers: { Authorization: 'Bearer ' + mock.DEFAULT_MANAGEMENT_KEY } }
+    );
+    check('POST /models/token 拒绝 query', queryRejected.status === 400, String(queryRejected.status));
+
+    const issued = await apiRequest(server, 'POST', '/models/token');
     check(
-      'GET auth-files 返回 files[].name 与 runtime',
-      filesResponse.status === 200 &&
-        Array.isArray(filesBody.files) &&
-        filesBody.files.length >= 4 &&
-        filesBody.files.some((file) => file.runtime === true) &&
-        filesBody.files.every((file) => typeof file.name === 'string'),
-      JSON.stringify(filesBody)
+      'POST /models/token 返回 token + 30s expires_at',
+      issued.status === 200 &&
+        typeof issued.body.token === 'string' &&
+        /^[A-Za-z0-9_-]{43}$/.test(issued.body.token) &&
+        Date.parse(issued.body.expires_at) - Date.now() > 28_000,
+      JSON.stringify(issued.body && { ...issued.body, token: '[redacted]' })
     );
-    check('auth-files 不暴露凭据', !/secret|DO-NOT-LEAK|api_key/i.test(JSON.stringify(filesBody)));
-
-    const ids = [];
-    for (const file of filesBody.files) {
-      const response = await fetch(
-        server.origin + mock.AUTH_FILES_PATH + '/models?name=' + encodeURIComponent(file.name),
-        { headers: { Authorization: 'Bearer ' + mock.DEFAULT_MANAGEMENT_KEY } }
-      );
-      const body = await response.json();
-      check('auth-files/models 返回至少 4 个真实模型: ' + file.name, response.status === 200 && body.models.length >= 4, JSON.stringify(body));
-      for (const model of body.models) ids.push(model.id);
-    }
-    check('模型目录不是 pricing 快照', new Set(ids).size >= 8 && ids.some((id) => !server.state.settings.pricing.prices.some((price) => price.model === id)));
-
-    await fetch(server.origin + '/__mock/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ auth_files: { fail_names: ['google-vertex.json'] } })
-    });
-    const failed = await fetch(
-      server.origin + mock.AUTH_FILES_PATH + '/models?name=google-vertex.json',
-      { headers: { Authorization: 'Bearer ' + mock.DEFAULT_MANAGEMENT_KEY } }
+    const token = issued.body.token;
+    const tokenCall = server.calls.filter(
+      (call) => call.method === 'POST' && call.path.endsWith('/models/token') && call.status === 200
+    ).pop();
+    check(
+      'token 只签发一次且请求为空 body/query',
+      tokenCall.authorized === true &&
+        tokenCall.body_bytes === 0 &&
+        Object.keys(tokenCall.query).length === 0 &&
+        tokenCall.request_body === undefined &&
+        tokenCall.capability_stage === 'minted',
+      JSON.stringify(tokenCall)
     );
-    check('auth-files 部分失败可注入', failed.status === 502, String(failed.status));
-    await fetch(server.origin + '/__mock/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ auth_files: { delay_ms: 150 } })
-    });
-    const started = Date.now();
-    await fetch(server.origin + mock.AUTH_FILES_PATH, {
+    check('calls 不记录 capability token', !JSON.stringify(server.calls).includes(token));
+
+    // 管理密钥不能替代 capability；目录只接受精确的 /v1/models。
+    const withManagement = await fetch(server.origin + mock.CATALOG_PATH, {
       headers: { Authorization: 'Bearer ' + mock.DEFAULT_MANAGEMENT_KEY }
     });
-    check('auth-files 延迟可注入', Date.now() - started >= 120, String(Date.now() - started) + 'ms');
+    check('GET /v1/models 拒绝管理密钥', withManagement.status === 401, String(withManagement.status));
+    const catalog = await fetch(server.origin + mock.CATALOG_PATH, {
+      headers: { Authorization: 'Bearer ' + token }
+    });
+    const catalogBody = await catalog.json();
+    check(
+      'GET /v1/models 仅用 minted token 返回有界 {data:[{id}]}',
+      catalog.status === 200 &&
+        Array.isArray(catalogBody.data) &&
+        catalogBody.data.length === mock.MAX_CATALOG_MODELS &&
+        catalogBody.data.every((item) => typeof item.id === 'string' && Object.keys(item).length === 1) &&
+        catalogBody.data.some((item) => item.id === 'gpt-5-codex'),
+      JSON.stringify({ status: catalog.status, length: catalogBody.data && catalogBody.data.length })
+    );
+    const catalogCall = server.calls.filter((call) => call.path === mock.CATALOG_PATH).pop();
+    check(
+      '目录请求只记录 authorized/capability stage，不记录 token 或额外凭据 header',
+      catalogCall.authorized === true &&
+        catalogCall.capability_stage === 'used' &&
+        catalogCall.has_extra_auth_header === false &&
+        !('authorization' in catalogCall) &&
+        !JSON.stringify(catalogCall).includes(token),
+      JSON.stringify(catalogCall)
+    );
+    const replay = await fetch(server.origin + mock.CATALOG_PATH, {
+      headers: { Authorization: 'Bearer ' + token }
+    });
+    check('capability 单次使用后失效', replay.status === 401, String(replay.status));
+    const authFiles = await fetch(server.origin + '/v0/management/auth-files', {
+      headers: { Authorization: 'Bearer ' + mock.DEFAULT_MANAGEMENT_KEY }
+    });
+    check('不存在 auth-files 旧发现回退', authFiles.status === 404, String(authFiles.status));
+    const prefixed = await fetch(server.origin + mock.MANAGEMENT_BASE + '/v1/models', {
+      headers: { Authorization: 'Bearer ' + mock.DEFAULT_MANAGEMENT_KEY }
+    });
+    check('目录 namespace 精确为 /v1/models', prefixed.status === 404, String(prefixed.status));
+
     await fetch(server.origin + '/__mock/control', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ auth_files: { delay_ms: 0, fail_names: [], fail_models: false, fail_root: false } })
+      body: JSON.stringify({ catalog: { fail_token: true } })
     });
-    return 'auth-files=ok';
+    const tokenFailed = await apiRequest(server, 'POST', '/models/token');
+    check('token 签发失败可注入', tokenFailed.status === 502, String(tokenFailed.status));
+    await fetch(server.origin + '/__mock/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ catalog: { fail_token: false, fail_models: true } })
+    });
+    const forModels = await apiRequest(server, 'POST', '/models/token');
+    const modelsFailed = await fetch(server.origin + mock.CATALOG_PATH, {
+      headers: { Authorization: 'Bearer ' + forModels.body.token }
+    });
+    check('模型目录失败可注入且消耗 capability', modelsFailed.status === 502, String(modelsFailed.status));
+    await fetch(server.origin + '/__mock/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ catalog: { fail_models: false } })
+    });
+    return 'catalog-capability=ok';
   });
 
   await step('mock API: settings/prices/compact 全路由', async () => {
@@ -1446,6 +1497,25 @@ async function runApiContract(server) {
 
 function managementCalls(server) {
   return server.calls.filter((call) => call.kind === 'management');
+}
+
+function tokenCalls(server, since = 0) {
+  return server.calls.filter(
+    (call) => call.seq > since && call.method === 'POST' && call.path.endsWith('/models/token')
+  );
+}
+
+function catalogCalls(server, since = 0) {
+  return server.calls.filter((call) => call.seq > since && call.path === mock.CATALOG_PATH);
+}
+
+async function setCatalogControl(server, patch) {
+  const response = await fetch(server.origin + '/__mock/control', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ catalog: patch })
+  });
+  if (response.status !== 200) throw new Error('catalog control failed: ' + response.status);
 }
 
 function suffixOf(call) {
@@ -2108,6 +2178,8 @@ async function runBrowserSuite(server, cdp) {
     const listAudit = await accessibilityAudit(cdp, '#content');
     check('Key 页面控件均有可访问名称', listAudit.unnamed.length === 0, JSON.stringify(listAudit.unnamed));
 
+    // 打开 Key 对话框才按需获取一次性 capability，再读取精确 /v1/models。
+    const catalogBaseline = server.calls.reduce((max, call) => Math.max(max, call.seq || 0), 0);
     const setKeyField = (label, value) => setFieldByLabel(cdp, label, value, DIALOG_ROOT);
     const clickSave = () =>
       clickText(cdp, '保存', {
@@ -2151,6 +2223,51 @@ async function runBrowserSuite(server, cdp) {
       picker.present && picker.all === true && picker.restricted === false && picker.items.length >= 4,
       JSON.stringify({ all: picker.all, restricted: picker.restricted, items: picker.items })
     );
+    check(
+      '目录响应有界且主模型可用',
+      picker.items.length === mock.MAX_CATALOG_MODELS &&
+        picker.items.some((item) => item.id === 'gpt-5-codex') &&
+        picker.items.some((item) => item.id === 'claude-opus-4-1'),
+      JSON.stringify({ count: picker.items.length, max: mock.MAX_CATALOG_MODELS })
+    );
+
+    const firstTokens = tokenCalls(server, catalogBaseline);
+    const firstCatalogs = catalogCalls(server, catalogBaseline);
+    check(
+      '打开 Key 对话框先 POST /models/token 再 GET /v1/models',
+      firstTokens.length === 1 &&
+        firstCatalogs.length === 1 &&
+        firstTokens[0].seq < firstCatalogs[0].seq &&
+        firstTokens[0].status === 200 &&
+        firstCatalogs[0].status === 200,
+      JSON.stringify({
+        tokens: firstTokens.map((call) => ({ seq: call.seq, status: call.status })),
+        catalogs: firstCatalogs.map((call) => ({ seq: call.seq, status: call.status }))
+      })
+    );
+    check(
+      'token 请求为管理 bearer + 空 body/query',
+      firstTokens[0].authorized === true &&
+        firstTokens[0].capability_stage === 'minted' &&
+        firstTokens[0].body_bytes === 0 &&
+        Object.keys(firstTokens[0].query).length === 0 &&
+        firstTokens[0].request_body === undefined,
+      JSON.stringify(firstTokens[0])
+    );
+    check(
+      '目录请求仅带 capability header，无额外凭据/query',
+      firstCatalogs[0].authorized === true &&
+        firstCatalogs[0].capability_stage === 'used' &&
+        firstCatalogs[0].has_extra_auth_header === false &&
+        Object.keys(firstCatalogs[0].query).length === 0 &&
+        !JSON.stringify(firstCatalogs[0]).includes(mock.DEFAULT_MANAGEMENT_KEY),
+      JSON.stringify(firstCatalogs[0])
+    );
+    check(
+      '模型发现不再访问 auth-files 或 pricing 目录',
+      !server.calls.some((call) => call.path.includes('/auth-files')),
+      JSON.stringify(server.calls.filter((call) => call.path.includes('/auth-files')))
+    );
     check('默认 all 时受限面板隐藏', picker.panelHidden === true, JSON.stringify(picker.panelHidden));
 
     const defaultLabel = '自动化默认全部 Key';
@@ -2191,6 +2308,15 @@ async function runBrowserSuite(server, cdp) {
       await waitModelDirectory(cdp);
       picker = await modelPickerState(cdp);
       check('编辑 default[] Key 仍为 all', picker.all === true && picker.restricted === false, JSON.stringify(picker));
+      check(
+        '五分钟目录缓存避免重复签发 capability',
+        tokenCalls(server, catalogBaseline).length === 1 &&
+          catalogCalls(server, catalogBaseline).length === 1,
+        JSON.stringify({
+          tokens: tokenCalls(server, catalogBaseline).length,
+          catalogs: catalogCalls(server, catalogBaseline).length
+        })
+      );
       await setKeyField('标签', defaultLabel + '（编辑）');
       await clickSave();
       const defaultEdit = await waitForCall(
@@ -2316,6 +2442,8 @@ async function runBrowserSuite(server, cdp) {
       JSON.stringify(picker.items)
     );
     await addManualModel(cdp, 'manual/provider-exact-v9');
+    // 目录有 100 条可见上限，手动 ID 追加在末尾；用搜索定位以验证其已勾选。
+    await setModelSearch(cdp, 'manual/provider-exact-v9');
     picker = await modelPickerState(cdp);
     check(
       '手动添加精确模型 ID 后自动勾选',
@@ -2323,6 +2451,7 @@ async function runBrowserSuite(server, cdp) {
         picker.items.find((item) => item.id === 'manual/provider-exact-v9').checked === true,
       JSON.stringify(picker.items)
     );
+    await setModelSearch(cdp, '');
     await clickSave();
     const legacyEdit = await waitForCall(
       server,
@@ -2338,15 +2467,12 @@ async function runBrowserSuite(server, cdp) {
     );
     await closeDialog(cdp).catch(() => {});
 
-    // 部分账户目录失败：警告可见、成功模型仍可用，模式和已选不丢，且不泄漏凭据。
-    await fetch(server.origin + '/__mock/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ auth_files: { fail_names: ['google-vertex.json'] } })
-    });
+    // 目录失败：只显示通用错误，不改变默认 all / 已选模型，也不泄漏凭据。
+    const failureBaseline = server.calls.reduce((max, call) => Math.max(max, call.seq || 0), 0);
+    await setCatalogControl(server, { fail_models: true });
     await openNew();
-    // 目录有 5 分钟缓存；部分失败用例必须点“刷新模型列表”强制绕过缓存。
-    const partialDiagnosticsStart = consoleErrors.length;
+    // 目录有 5 分钟缓存；失败用例必须点“刷新模型列表”强制绕过缓存。
+    const failureDiagnosticsStart = consoleErrors.length;
     await refreshModelDirectory(cdp);
     await waitModelDirectory(cdp);
     await cdp.waitFor(
@@ -2354,41 +2480,47 @@ async function runBrowserSuite(server, cdp) {
         'return !!root && !!root.querySelector(".models-warning") && !root.querySelector(".models-warning").hidden;'
       ),
       15000,
-      '部分目录失败警告'
+      '目录失败警告'
     );
     picker = await modelPickerState(cdp);
     check(
-      '部分目录失败显示警告且保留成功模型',
+      '目录失败显示通用警告且保留缓存模型',
       picker.warningVisible === true &&
-        /部分账户/.test(picker.warning) &&
+        /加载失败|模型目录/.test(picker.warning) &&
         picker.items.some((item) => item.id === 'gpt-5-codex') &&
         picker.items.some((item) => item.id === 'claude-opus-4-1'),
-      JSON.stringify({ warning: picker.warning, items: picker.items })
+      JSON.stringify({ warning: picker.warning, count: picker.items.length })
     );
     check(
-      '部分失败不改变默认 all 模式',
+      '目录失败不改变默认 all 模式',
       picker.all === true && picker.restricted === false,
       JSON.stringify(picker)
     );
     check(
-      '模型目录 UI 不包含 auth-file/管理凭据',
+      '模型目录 UI 不包含管理凭据',
       !/DO-NOT-LEAK|observer-browser-secret|Bearer\s/i.test(picker.text),
       picker.text
     );
+    const failureTokens = tokenCalls(server, failureBaseline);
+    const failureCatalogs = catalogCalls(server, failureBaseline);
+    check(
+      '强制刷新重新签发 capability 并精确请求 /v1/models',
+      failureTokens.length === 1 &&
+        failureCatalogs.length === 1 &&
+        failureTokens[0].seq < failureCatalogs[0].seq &&
+        failureCatalogs[0].capability_stage === 'used' &&
+        failureCatalogs[0].status === 502,
+      JSON.stringify({
+        tokens: failureTokens.map((call) => ({ seq: call.seq, status: call.status })),
+        catalogs: failureCatalogs.map((call) => ({ seq: call.seq, status: call.status }))
+      })
+    );
     await closeDialog(cdp).catch(() => {});
-    absorbExpectedDiagnostics(partialDiagnosticsStart, /502|auth-files\/models/);
-    await fetch(server.origin + '/__mock/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ auth_files: { fail_names: [], delay_ms: 0, fail_models: false, fail_root: false } })
-    });
+    absorbExpectedDiagnostics(failureDiagnosticsStart, /502|v1\/models|catalog/);
+    await setCatalogControl(server, { fail_models: false });
 
     // 慢目录中关闭表单必须 abort；迟到响应不得写入 UI 或泄漏凭据。
-    await fetch(server.origin + '/__mock/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ auth_files: { delay_ms: 1200 } })
-    });
+    await setCatalogControl(server, { models_delay_ms: 1200 });
     const abortSeq = server.calls.reduce((max, call) => Math.max(max, call.seq || 0), 0);
     await gotoPage(cdp, 'keys');
     await clickText(cdp, '新建 Key', { selector: '#content button, button' });
@@ -2412,28 +2544,52 @@ async function runBrowserSuite(server, cdp) {
         VISIBLE_SNIPPET +
           'return {dialog:[...document.querySelectorAll("' + DIALOG_ROOT + '")].some(visible),' +
           'text:document.body.innerText,' +
-          'secret:/DO-NOT-LEAK|observer-browser-secret|Bearer\\s/i.test(document.body.innerText)};'
+          'secret:/DO-NOT-LEAK|observer-browser-secret|Bearer\s/i.test(document.body.innerText)};'
       )
     );
     check('中止后无残留模型对话框', leaked.dialog === false, JSON.stringify(leaked.dialog));
     check('中止后迟到目录响应不泄漏凭据', leaked.secret === false, leaked.text.slice(0, 300));
-    const abortCalls = server.calls.filter((call) => call.seq > abortSeq && call.kind === 'cpa');
+    const abortTokens = tokenCalls(server, abortSeq);
+    const abortedCatalogs = catalogCalls(server, abortSeq);
     check(
-      '慢目录请求被浏览器中止或已完成且不携带凭据',
-      abortCalls.every((call) => !('authorization' in call)) &&
-        (abortCalls.length === 0 || abortCalls.some((call) => call.aborted === true) || abortCalls.every((call) => call.status === 200)),
-      JSON.stringify(abortCalls)
+      '慢目录请求在关闭对话框后被中止且不携带额外凭据',
+      abortTokens.length === 1 &&
+        abortedCatalogs.length === 1 &&
+        abortTokens[0].seq < abortedCatalogs[0].seq &&
+        abortedCatalogs[0].authorized === true &&
+        abortedCatalogs[0].has_extra_auth_header === false &&
+        (abortedCatalogs[0].aborted === true || abortedCatalogs[0].status === 200),
+      JSON.stringify({ tokens: abortTokens, catalogs: abortedCatalogs })
     );
-    absorbExpectedDiagnostics(abortDiagnosticsStart, /ERR_ABORTED|auth-files/);
-    await fetch(server.origin + '/__mock/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ auth_files: { delay_ms: 0 } })
-    });
+    absorbExpectedDiagnostics(abortDiagnosticsStart, /ERR_ABORTED|v1\/models|catalog/);
+    await setCatalogControl(server, { models_delay_ms: 0 });
     await openNew();
     await waitModelDirectory(cdp);
     picker = await modelPickerState(cdp);
-    check('中止后重新打开目录恢复正常', picker.present && picker.warningVisible === false && picker.items.length >= 4, JSON.stringify(picker));
+    check(
+      '中止后重新打开沿用既有缓存并恢复 UI',
+      picker.present &&
+        picker.warningVisible === false &&
+        picker.items.length === mock.MAX_CATALOG_MODELS &&
+        tokenCalls(server, abortSeq).length === 1,
+      JSON.stringify({ items: picker.items.length, tokens: tokenCalls(server, abortSeq).length })
+    );
+    await refreshModelDirectory(cdp);
+    await waitModelDirectory(cdp);
+    picker = await modelPickerState(cdp);
+    check(
+      '中止后强制刷新重新签发 token 并恢复完整目录',
+      picker.present &&
+        picker.warningVisible === false &&
+        picker.items.length === mock.MAX_CATALOG_MODELS &&
+        tokenCalls(server, abortSeq).length === 2 &&
+        catalogCalls(server, abortSeq).length === 2,
+      JSON.stringify({
+        items: picker.items.length,
+        tokens: tokenCalls(server, abortSeq).length,
+        catalogs: catalogCalls(server, abortSeq).length
+      })
+    );
     await closeDialog(cdp).catch(() => {});
 
     if (key) {
@@ -2573,6 +2729,39 @@ async function runBrowserSuite(server, cdp) {
       JSON.stringify(blocked)
     );
     check('恢复只增加 keyRecovers 计数', server.counters.keyRecovers === recoversBefore + 1, String(server.counters.keyRecovers));
+
+    // logout 必须清空模型目录缓存；重新登录后打开 Key 对话框要重新签发 capability。
+    const logoutSeq = server.calls.reduce((max, call) => Math.max(max, call.seq || 0), 0);
+    await clickText(cdp, '退出', { selector: '#content button, button, [role="button"]' });
+    await waitVisible(cdp, '#login', 15000, '退出后登录界面');
+    await login(cdp, mock.DEFAULT_MANAGEMENT_KEY);
+    await cdp.waitFor(
+      '(() => {' + VISIBLE_SNIPPET +
+        'const l=document.querySelector("#login");const c=document.querySelector("#content");' +
+        'return !!l&&!!c&&!visible(l)&&visible(c);})()',
+      20000,
+      '重新登录'
+    );
+    await gotoPage(cdp, 'keys');
+    await openNew();
+    await waitModelDirectory(cdp);
+    picker = await modelPickerState(cdp);
+    const logoutTokens = tokenCalls(server, logoutSeq);
+    const logoutCatalogs = catalogCalls(server, logoutSeq);
+    check(
+      'logout 清除模型目录缓存并在下次打开时重新签发 token',
+      logoutTokens.length === 1 &&
+        logoutCatalogs.length === 1 &&
+        logoutTokens[0].seq < logoutCatalogs[0].seq &&
+        logoutTokens[0].capability_stage === 'minted' &&
+        logoutCatalogs[0].capability_stage === 'used',
+      JSON.stringify({
+        tokens: logoutTokens.map((call) => ({ seq: call.seq, status: call.status })),
+        catalogs: logoutCatalogs.map((call) => ({ seq: call.seq, status: call.status }))
+      })
+    );
+    check('logout 后目录仍可用', picker.present && picker.items.length === mock.MAX_CATALOG_MODELS, JSON.stringify({ items: picker.items.length }));
+    await closeDialog(cdp).catch(() => {});
 
     return 'models+key actions';
   }).then((ok) => {
@@ -3738,13 +3927,66 @@ async function runRealHostSmoke(args) {
   fs.mkdirSync(path.join(reportDir, 'screenshots'), { recursive: true });
 
   const uiURL = normalizeRealUI(args.baseUrl);
+  const realOrigin = new URL(uiURL).origin;
+  // 唯一允许的写请求：精确插件路径、空 query、空 body 的一次性目录 capability。
+  const allowedTokenURL = realOrigin + mock.MANAGEMENT_BASE + '/models/token';
   const started = Date.now();
   const apiRequests = [];
   const blockedRequests = [];
+  const allowedTokenPosts = [];
   let fetchInterceptionEnabled = false;
   let chrome = null;
   let profileDir = null;
   let fatal = null;
+
+  // 报告只保留 origin+path，绝不写入 query/hash（避免任何凭据/token 进入报告）。
+  function reportURL(raw) {
+    try {
+      const parsed = new URL(raw);
+      return parsed.origin + parsed.pathname;
+    } catch (err) {
+      return '';
+    }
+  }
+
+  // 浏览器会自行请求站点根 /favicon.ico；真实 CPA 没有该应用资源。
+  // 仅当“同源根路径 + HTTP 404”时归入 expected_diagnostics，其他 404/CSP 仍失败。
+  let favicon404Seen = false;
+  const pendingFaviconLogs = [];
+  function isRootFaviconURL(raw) {
+    try {
+      const parsed = new URL(raw);
+      return parsed.origin === realOrigin && parsed.pathname === '/favicon.ico';
+    } catch (err) {
+      return false;
+    }
+  }
+  function recordFavicon404(source, text, url) {
+    if (favicon404Seen) return;
+    favicon404Seen = true;
+    expectedDiagnostics.push({
+      type: 'expected-network',
+      source,
+      text,
+      url: reportURL(url),
+      reason: 'same-origin root /favicon.ico HTTP 404; browser default request, not an application asset'
+    });
+  }
+
+  function isAllowedCapabilityPost(request) {
+    if (String(request.method || '').toUpperCase() !== 'POST') return false;
+    let parsed;
+    try {
+      parsed = new URL(request.url || '');
+    } catch (err) {
+      return false;
+    }
+    if (parsed.origin !== realOrigin) return false;
+    if (parsed.pathname !== mock.MANAGEMENT_BASE + '/models/token') return false;
+    if (parsed.search !== '' || parsed.hash !== '') return false;
+    if (request.postData !== undefined && request.postData !== '') return false;
+    return true;
+  }
 
   async function writeReport() {
     const durationMs = Date.now() - started;
@@ -3753,6 +3995,11 @@ async function runRealHostSmoke(args) {
       mode: 'realhost-readonly',
       readonly: true,
       readonly_methods: ['GET', 'HEAD', 'OPTIONS'],
+      readonly_exception: {
+        method: 'POST',
+        path: mock.MANAGEMENT_BASE + '/models/token',
+        requirements: 'same origin, exact plugin path, empty query, empty body'
+      },
       fetch_interception: fetchInterceptionEnabled,
       outcome: failed === 0 ? 'completed' : 'failed',
       duration_ms: durationMs,
@@ -3764,15 +4011,20 @@ async function runRealHostSmoke(args) {
         total: results.length,
         passed: results.length - failed,
         failed,
-        screenshots: screenshots.length
+        screenshots: screenshots.length,
+        allowed_token_posts: allowedTokenPosts.length
       },
       results,
       screenshots,
       console_errors: consoleErrors,
       expected_diagnostics: expectedDiagnostics,
+      expected_diagnostics_policy:
+        'Only a same-origin root /favicon.ico HTTP 404 is exempt as a browser default non-application request; all other 404/CSP/network errors fail.',
+      favicon_404_exempted: favicon404Seen,
       native_dialogs: nativeDialogs,
       api_requests: apiRequests,
       blocked_requests: blockedRequests,
+      allowed_token_posts: allowedTokenPosts,
       fatal: fatal ? String(fatal.message || fatal) : null
     };
     fs.writeFileSync(path.join(reportDir, 'report.json'), JSON.stringify(report, null, 2));
@@ -3781,7 +4033,10 @@ async function runRealHostSmoke(args) {
       'outcome: ' + report.outcome,
       'passed: ' + report.summary.passed + '/' + report.summary.total,
       'ui: ' + uiURL,
-      'readonly: true (CDP Fetch preflight; GET/HEAD/OPTIONS only)',
+      'readonly: true (GET/HEAD/OPTIONS; only exact empty-body/query POST ' + mock.MANAGEMENT_BASE + '/models/token)',
+      'token_posts: ' + allowedTokenPosts.length,
+      'screenshots: ' + screenshots.length,
+      'favicon_404_exempted: ' + favicon404Seen + ' (same-origin root /favicon.ico only)',
       'duration_ms: ' + durationMs,
       'report: ' + path.join(reportDir, 'report.json'),
       report.fatal ? 'fatal: ' + report.fatal : '',
@@ -3802,12 +4057,20 @@ async function runRealHostSmoke(args) {
     await cdp.send('Runtime.enable');
     await cdp.send('Log.enable');
     await cdp.send('Network.enable');
-    // 在 Request 阶段拦截：任何非只读方法在真正发出前就被 fail，而不是事后审计。
+    // 在 Request 阶段拦截：除精确 token POST 外，任何写请求在真正发出前就被 fail。
     cdp.on('Fetch.requestPaused', (params) => {
       const request = params.request || {};
       const method = String(request.method || '').toUpperCase();
       const url = request.url || '';
-      if (/^(GET|HEAD|OPTIONS)$/.test(method)) {
+      if (/^(GET|HEAD|OPTIONS)$/.test(method) || isAllowedCapabilityPost(request)) {
+        if (method === 'POST') {
+          allowedTokenPosts.push({
+            method,
+            path: new URL(url).pathname,
+            query_empty: true,
+            body_empty: true
+          });
+        }
         cdp.send('Fetch.continueRequest', { requestId: params.requestId }).catch((err) => {
           fatal = fatal || err;
         });
@@ -3815,7 +4078,7 @@ async function runRealHostSmoke(args) {
       }
       blockedRequests.push({
         method,
-        url,
+        url: reportURL(url),
         type: params.resourceType || ''
       });
       cdp.send('Fetch.failRequest', {
@@ -3848,12 +4111,25 @@ async function runRealHostSmoke(args) {
     cdp.on('Log.entryAdded', (params) => {
       const entry = params.entry || {};
       if (entry.level !== 'error') return;
+      const url = entry.url || '';
+      const text = entry.text || '';
+      if (isRootFaviconURL(url)) {
+        if (/404|not found/i.test(text)) recordFavicon404('log', text, url);
+        else pendingFaviconLogs.push({ type: 'log', source: entry.source || '', text, url });
+        return;
+      }
       consoleErrors.push({
         type: 'log',
         source: entry.source || '',
-        text: entry.text || '',
-        url: entry.url || ''
+        text,
+        url
       });
+    });
+    cdp.on('Network.responseReceived', (params) => {
+      const response = params.response || {};
+      if (response.status === 404 && isRootFaviconURL(response.url || '')) {
+        recordFavicon404('network', 'HTTP 404', response.url || '');
+      }
     });
     cdp.on('Network.requestWillBeSent', (params) => {
       const request = params.request || {};
@@ -3861,7 +4137,7 @@ async function runRealHostSmoke(args) {
       if (!/^https?:/i.test(url)) return;
       apiRequests.push({
         method: request.method || '',
-        url,
+        url: reportURL(url),
         type: params.type || ''
       });
     });
@@ -3886,6 +4162,7 @@ async function runRealHostSmoke(args) {
     );
     check('真实 host UI 外壳可访问', Boolean(shell.title && shell.lang && shell.login && shell.content), JSON.stringify(shell));
 
+    let loggedIn = false;
     if (args.managementKey) {
       await login(cdp, args.managementKey);
       await cdp.waitFor(
@@ -3895,33 +4172,173 @@ async function runRealHostSmoke(args) {
         20000,
         '真实 host 登录'
       );
+      loggedIn = true;
       await waitRequestsLoaded(cdp);
-      check('真实 host 登录后可读取请求日志', true);
+
+      // native integration 会 seed 至少一条假日志；有日志才能验证“详情只点击后读取”。
+      const requestRows = await cdp.evaluate(
+        pageFn('return document.querySelectorAll("#content tbody tr").length;')
+      );
+      check('真实 host 至少有一条 seed 请求日志', requestRows >= 1, String(requestRows));
+      const detailBefore = apiRequests.filter(
+        (request) => /\/requests\/detail(?:[?#]|$)/.test(request.url)
+      ).length;
+      check('真实 host 列表渲染后未预取请求详情', detailBefore === 0, String(detailBefore));
+      const firstModel = await cdp.evaluate(
+        pageFn(
+          VISIBLE_SNIPPET +
+            'const rows=[...document.querySelectorAll("#content tbody tr")].filter(visible);' +
+            'for(const row of rows){const button=[...row.querySelectorAll("button,[role=button]")].filter(visible)' +
+            '.find((b)=>(b.innerText||"").trim());if(button){button.click();return (button.innerText||"").trim();}}' +
+            'return null;'
+        )
+      );
+      check('真实 host 请求日志存在可点击模型', typeof firstModel === 'string' && firstModel.length > 0, String(firstModel));
+      const detailDialog = await waitDialog(cdp);
+      const detailAfter = apiRequests.filter(
+        (request) => /\/requests\/detail(?:[?#]|$)/.test(request.url)
+      ).length;
+      check('真实 host 请求详情只在点击行后读取一次', detailDialog.present && detailAfter === detailBefore + 1, JSON.stringify({ detailBefore, detailAfter }));
+      await closeDialog(cdp).catch(() => {});
+
       await gotoPage(cdp, 'keys');
-      check('真实 host Key 页面可读取', /新建\s*Key/.test(await text(cdp, '#content')));
+      const keyRows = await cdp.evaluate(
+        pageFn(
+          'return document.querySelectorAll("#content tbody tr,[data-key-id],.key-row,.card").length;'
+        )
+      );
+      check('真实 host 至少有一个 seed 假 Key', keyRows >= 1, String(keyRows));
+
+      // 打开 Key 对话框只读取真实权威目录；不填写、不保存。
+      const tokenPostsBefore = allowedTokenPosts.length;
+      await clickText(cdp, '新建 Key', { selector: '#content button, button' });
+      const keyDialog = await waitDialog(cdp);
+      check('真实 host 可打开 Key 对话框', keyDialog.present);
+      await waitModelDirectory(cdp);
+      const picker = await modelPickerState(cdp);
+      check(
+        '真实 host Key 对话框发现真实模型',
+        picker.present && picker.warningVisible === false && picker.items.length >= 1,
+        JSON.stringify({ present: picker.present, warning: picker.warning, count: picker.items.length, text: picker.text.slice(0, 240) })
+      );
+      check(
+        '真实 host 模型发现使用一次性 capability',
+        allowedTokenPosts.length === tokenPostsBefore + 1,
+        JSON.stringify(allowedTokenPosts.slice(tokenPostsBefore))
+      );
+      await closeDialog(cdp).catch(() => {});
+      check('真实 host Key 对话框只读关闭且未保存', !blockedRequests.some((request) => /\/keys/.test(request.url)), JSON.stringify(blockedRequests));
+
       await gotoPage(cdp, 'settings');
       check('真实 host 设置页面可读取', /捕获|保留|价格|压缩|设置/.test(await text(cdp, '#content')));
+
+      // native browser_test 固定要求该代表截图存在；矩阵之前先保存。
+      await setViewport(cdp, SIZES[0]);
+      await applyTheme(cdp, 'light');
+      await gotoPage(cdp, 'requests');
+      await waitRequestsLoaded(cdp);
+      await settle(cdp);
+      const representative = await capture(
+        cdp,
+        path.join(reportDir, 'screenshots', 'realhost-smoke.png'),
+        true
+      );
+      check('真实 host 代表截图 realhost-smoke.png 非空', representative > 1000, String(representative));
+
+      // 三页 × desktop/mobile × light/dark = 12 张；总计 13 张。
+      const themes = ['light', 'dark'];
+      for (const size of SIZES) {
+        await setViewport(cdp, size);
+        for (const theme of themes) {
+          await applyTheme(cdp, theme);
+          for (const page of PAGES) {
+            await gotoPage(cdp, page.key);
+            if (page.key === 'requests') await waitRequestsLoaded(cdp);
+            await settle(cdp);
+            const bytes = await capture(
+              cdp,
+              path.join(
+                reportDir,
+                'screenshots',
+                'realhost-' + size.width + '-' + theme + '-' + page.key + '.png'
+              ),
+              true
+            );
+            check(
+              '真实 host 截图 ' + size.width + '/' + theme + '/' + page.key,
+              bytes > 1000,
+              String(bytes)
+            );
+          }
+        }
+      }
+      await cdp.send('Emulation.clearDeviceMetricsOverride');
+      await cdp.send('Emulation.setEmulatedMedia', { features: [] });
+      const matrixShots = screenshots.filter((shot) =>
+        /realhost-(1280|390)-(light|dark)-(requests|keys|settings)\.png$/.test(shot.file)
+      );
+      check(
+        '真实 host 截图：12 张矩阵 + realhost-smoke.png = 13',
+        screenshots.length === 13 &&
+          matrixShots.length === 12 &&
+          screenshots.some((shot) => shot.file.endsWith('screenshots/realhost-smoke.png')),
+        JSON.stringify(screenshots.map((shot) => shot.file))
+      );
     } else {
       check('未提供 OBSERVER_MANAGEMENT_KEY 时只验证公开外壳', true);
+      await settle(cdp);
+      const bytes = await capture(cdp, path.join(reportDir, 'screenshots', 'realhost-smoke.png'), false);
+      check('真实 host smoke 截图非空', bytes > 1000, String(bytes));
     }
 
-    await settle(cdp);
-    const bytes = await capture(cdp, path.join(reportDir, 'screenshots', 'realhost-smoke.png'), false);
-    check('真实 host smoke 截图非空', bytes > 1000, String(bytes));
-
     const writes = apiRequests.filter((request) => !/^(GET|HEAD|OPTIONS)$/i.test(request.method));
+    const illegalWrites = writes.filter((request) => {
+      let parsed;
+      try {
+        parsed = new URL(request.url);
+      } catch (err) {
+        return true;
+      }
+      return !(
+        String(request.method).toUpperCase() === 'POST' &&
+        parsed.origin === realOrigin &&
+        parsed.pathname === mock.MANAGEMENT_BASE + '/models/token' &&
+        parsed.search === ''
+      );
+    });
     check(
-      '真实 host 只读请求在发送前被 CDP Fetch 拦截',
-      fetchInterceptionEnabled === true && blockedRequests.length === 0,
-      JSON.stringify({ enabled: fetchInterceptionEnabled, blocked: blockedRequests })
+      '真实 host 只放行精确的 /models/token POST',
+      fetchInterceptionEnabled === true &&
+        blockedRequests.length === 0 &&
+        illegalWrites.length === 0 &&
+        allowedTokenPosts.every(
+          (request) =>
+            request.method === 'POST' &&
+            request.path === mock.MANAGEMENT_BASE + '/models/token' &&
+            request.query_empty === true &&
+            request.body_empty === true
+        ),
+      JSON.stringify({ blocked: blockedRequests, illegal: illegalWrites, allowed: allowedTokenPosts })
     );
     check(
-      '真实 host smoke 只发送只读请求',
-      writes.length === 0,
-      JSON.stringify(writes)
+      '真实 host 所有其他写请求均在发送前被拦截',
+      blockedRequests.length === 0 ? illegalWrites.length === 0 : writes.length === 0,
+      JSON.stringify({ blocked: blockedRequests, writes })
     );
     const methods = [...new Set(apiRequests.map((request) => request.method))].sort();
-    check('真实 host smoke 方法集合为只读', methods.every((method) => /^(GET|HEAD|OPTIONS)$/.test(method)), JSON.stringify(methods));
+    check(
+      '真实 host 方法集合仅为只读 + capability POST',
+      methods.every((method) => /^(GET|HEAD|OPTIONS|POST)$/.test(method)) &&
+        (loggedIn ? allowedTokenPosts.length > 0 : writes.length === 0),
+      JSON.stringify(methods)
+    );
+    check(
+      '真实 host 报告不含管理密钥或 capability token',
+      apiRequests.every((request) => !request.url.includes(args.managementKey || '\u0000')) &&
+        !JSON.stringify({ apiRequests, allowedTokenPosts, blockedRequests }).includes(args.managementKey || '\u0000'),
+      JSON.stringify(apiRequests.slice(0, 5))
+    );
+    if (!favicon404Seen) consoleErrors.push(...pendingFaviconLogs);
     check('真实 host 正常流程无 console/page 错误', consoleErrors.length === 0, JSON.stringify(consoleErrors.slice(0, 8)));
   } catch (err) {
     fatal = err;
@@ -4065,25 +4482,51 @@ async function main() {
       'GET /settings',
       'PUT /settings',
       'POST /prices/refresh',
-      'POST /compact'
+      'POST /compact',
+      'POST /models/token'
     ];
     const missing = expectedPatterns.filter((pattern) => !patterns.has(pattern));
     check('UI 调用了预期管理 API', missing.length === 0, 'missing=' + JSON.stringify(missing) + '; seen=' + JSON.stringify([...patterns].sort()));
 
-    const cpaCalls = server.calls.filter((call) => call.kind === 'cpa');
-    const cpaPaths = new Set(cpaCalls.map((call) => call.path));
+    const catalogCallsAll = server.calls.filter((call) => call.kind === 'catalog');
+    const tokenCallsAll = server.calls.filter((call) => call.method === 'POST' && call.path.endsWith('/models/token'));
     check(
-      'UI 通过固定 auth-files 路由发现模型',
-      cpaPaths.has(mock.AUTH_FILES_PATH) &&
-        [...cpaPaths].some((path) => path === mock.AUTH_FILES_PATH + '/models') &&
-        cpaCalls.every((call) => call.authorized),
-      JSON.stringify([...cpaPaths])
+      'UI 只通过精确 /v1/models + 一次性 capability 发现模型',
+      catalogCallsAll.length > 0 &&
+        catalogCallsAll.every(
+          (call) => call.path === mock.CATALOG_PATH && call.authorized === true && Object.keys(call.query).length === 0
+        ) &&
+        !server.calls.some((call) => call.path.includes('/auth-files')),
+      JSON.stringify(catalogCallsAll.map((call) => ({ path: call.path, status: call.status, stage: call.capability_stage })))
     );
     check(
-      'auth-files 请求不携带凭据到 URL/日志',
-      cpaCalls.every((call) => !('authorization' in call)) &&
-        cpaCalls.every((call) => !JSON.stringify(call.query).includes(mock.DEFAULT_MANAGEMENT_KEY)),
-      JSON.stringify(cpaCalls.slice(0, 5))
+      '每次目录读取前都有空 body/query 的 token 签发',
+      catalogCallsAll.length > 0 &&
+        tokenCallsAll.length >= catalogCallsAll.length &&
+        tokenCallsAll.every(
+          (call) =>
+            call.authorized === true &&
+            call.body_bytes === 0 &&
+            Object.keys(call.query).length === 0 &&
+            call.request_body === undefined
+        ) &&
+        catalogCallsAll.every((catalog) =>
+          tokenCallsAll.some((token) => token.seq < catalog.seq)
+        ),
+      JSON.stringify({
+        tokens: tokenCallsAll.map((call) => ({ seq: call.seq, status: call.status })),
+        catalogs: catalogCallsAll.map((call) => ({ seq: call.seq, status: call.status }))
+      })
+    );
+    check(
+      '目录/凭据不出现在 URL 或调用日志',
+      server.calls.every(
+        (call) =>
+          !('authorization' in call) &&
+          !JSON.stringify(call).includes(mock.DEFAULT_MANAGEMENT_KEY) &&
+          !call.path.includes('Bearer')
+      ),
+      JSON.stringify(catalogCallsAll.slice(0, 3))
     );
 
     const unauthorized = calls.filter((call) => call.status !== 401 && !call.authorized);

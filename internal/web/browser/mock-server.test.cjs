@@ -339,87 +339,174 @@ test('keys: fixed query-ID create/update/rotate/reset/recover/revoke with hashed
   });
 });
 
-test('CPA auth-files: fixed discovery routes, runtime files, four+ real models and no secrets', async () => {
+async function issueToken(server, options) {
+  const opts = Object.assign({ method: 'POST', headers: Object.assign({}, AUTH) }, options || {});
+  const response = await fetch(server.origin + BASE + '/models/token', opts);
+  const text = await response.text();
+  return { response, body: text ? JSON.parse(text) : null };
+}
+
+async function getCatalog(server, token, options) {
+  const opts = Object.assign({}, options || {});
+  opts.headers = Object.assign({}, opts.headers || {});
+  if (token) opts.headers.Authorization = 'Bearer ' + token;
+  const response = await fetch(server.origin + mock.CATALOG_PATH, opts);
+  const text = await response.text();
+  return { response, body: text ? JSON.parse(text) : null };
+}
+
+test('catalog capability: management bearer, empty request, 30s single-use and bounded IDs', async () => {
   await withServer(async (server) => {
-    const unauthorized = await fetch(server.origin + mock.AUTH_FILES_PATH);
+    const unauthorized = await fetch(server.origin + BASE + '/models/token', { method: 'POST' });
     assert.equal(unauthorized.status, 401);
+    assert.ok(errorShape(await unauthorized.json()));
 
-    const response = await fetch(server.origin + mock.AUTH_FILES_PATH, { headers: AUTH });
-    assert.equal(response.status, 200);
-    const body = await response.json();
-    assert.ok(Array.isArray(body.files));
-    assert.ok(body.files.length >= 4);
-    assert.ok(body.files.some((file) => file.runtime === true));
-    assert.ok(body.files.every((file) => typeof file.name === 'string' && file.name));
-    const rawText = JSON.stringify(body);
-    assert.ok(!/DO-NOT-LEAK/.test(rawText), 'auth-files 不得泄漏内部凭据');
-    assert.ok(!/secret|api_key|token/i.test(rawText), '公开字段不得包含凭据字段');
+    const wrongMethod = await json(server, '/models/token');
+    assert.equal(wrongMethod.res.status, 405);
 
-    const discovered = new Set();
-    for (const file of body.files) {
-      const modelsRes = await fetch(
-        server.origin + mock.AUTH_FILES_PATH + '/models?name=' + encodeURIComponent(file.name),
-        { headers: AUTH }
-      );
-      assert.equal(modelsRes.status, 200, file.name);
-      const modelsBody = await modelsRes.json();
-      assert.ok(Array.isArray(modelsBody.models), file.name);
-      assert.ok(modelsBody.models.length >= 4, file.name + ' 至少四个模型');
-      modelsBody.models.forEach((model) => {
-        assert.equal(typeof model.id, 'string');
-        discovered.add(model.id);
-      });
-    }
-    assert.ok(discovered.size >= 4);
-    assert.ok([...discovered].includes('gpt-5-codex'));
-    assert.ok([...discovered].includes('retired-model-v0') === false);
-
-    const missingName = await fetch(server.origin + mock.AUTH_FILES_PATH + '/models', { headers: AUTH });
-    assert.equal(missingName.status, 400);
-    const unknownName = await fetch(
-      server.origin + mock.AUTH_FILES_PATH + '/models?name=unknown.json',
-      { headers: AUTH }
-    );
-    assert.equal(unknownName.status, 404);
-    const unknownQuery = await fetch(server.origin + mock.AUTH_FILES_PATH + '?bogus=1', { headers: AUTH });
-    assert.equal(unknownQuery.status, 400);
-
-    // 失败/延迟注入只影响 mock 的 auth-files 响应，供部分失败与 abort 用例使用。
-    await fetch(server.origin + '/__mock/control', {
+    const queryRejected = await fetch(server.origin + BASE + '/models/token?x=1', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ auth_files: { fail_names: ['google-vertex.json'] } })
+      headers: AUTH
     });
-    const partial = await fetch(
-      server.origin + mock.AUTH_FILES_PATH + '/models?name=google-vertex.json',
-      { headers: AUTH }
-    );
-    assert.equal(partial.status, 502);
-    const stillOk = await fetch(
-      server.origin + mock.AUTH_FILES_PATH + '/models?name=openai-main.json',
-      { headers: AUTH }
-    );
-    assert.equal(stillOk.status, 200);
-
-    await fetch(server.origin + '/__mock/control', {
+    assert.equal(queryRejected.status, 400);
+    const bodyRejected = await fetch(server.origin + BASE + '/models/token', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ auth_files: { delay_ms: 120 } })
+      headers: Object.assign({ 'Content-Type': 'application/json' }, AUTH),
+      body: '{}'
     });
-    const started = Date.now();
-    const delayed = await fetch(server.origin + mock.AUTH_FILES_PATH, { headers: AUTH });
-    assert.equal(delayed.status, 200);
-    assert.ok(Date.now() - started >= 100, 'delay_ms 应产生可测延迟');
+    assert.equal(bodyRejected.status, 400);
+
+    const query = await issueToken(server, {});
+    assert.equal(query.response.status, 200);
+    const token = query.body.token;
+    assert.match(token, /^[A-Za-z0-9_-]{43}$/, '>=256-bit random capability');
+    const ttl = Date.parse(query.body.expires_at) - Date.now();
+    assert.ok(ttl > 28_000 && ttl <= 30_500, 'expires_at is 30s: ' + ttl);
+
+    const tokenCall = server.calls
+      .filter((call) => call.method === 'POST' && call.path.endsWith('/models/token') && call.status === 200)
+      .pop();
+    assert.equal(tokenCall.authorized, true);
+    assert.deepEqual(tokenCall.query, {});
+    assert.equal(tokenCall.request_body, undefined);
+    assert.equal(tokenCall.body_bytes, 0);
+    assert.equal(tokenCall.capability_stage, 'minted');
+    assert.ok(!JSON.stringify(server.calls).includes(token), 'call log must not contain capability token');
+
+    // capability 只认证精确的 /v1/models；管理密钥本身不能读取目录。
+    const withManagement = await getCatalog(server, KEY);
+    assert.equal(withManagement.response.status, 401);
+    const withoutAuth = await getCatalog(server, '');
+    assert.equal(withoutAuth.response.status, 401);
+
+    const catalog = await getCatalog(server, token);
+    assert.equal(catalog.response.status, 200);
+    assert.equal(catalog.response.headers.get('cache-control'), 'no-store');
+    assert.ok(Array.isArray(catalog.body.data));
+    assert.equal(catalog.body.data.length, mock.MAX_CATALOG_MODELS, 'response is bounded');
+    assert.deepEqual(Object.keys(catalog.body.data[0]), ['id']);
+    const ids = catalog.body.data.map((item) => item.id);
+    assert.ok(ids.includes('gpt-5-codex'));
+    assert.ok(ids.includes('claude-opus-4-1'));
+    assert.ok(ids.includes('gemini-2.5-pro'));
+    assert.ok(!JSON.stringify(catalog.body).match(/secret|DO-NOT-LEAK|api_key/i));
+
+    const catalogCall = server.calls.filter((call) => call.path === mock.CATALOG_PATH).pop();
+    assert.equal(catalogCall.kind, 'catalog');
+    assert.equal(catalogCall.authorized, true);
+    assert.equal(catalogCall.capability_stage, 'used');
+    assert.deepEqual(catalogCall.query, {});
+    assert.equal(catalogCall.has_extra_auth_header, false);
+    assert.ok(!JSON.stringify(catalogCall).includes(token));
+
+    // 一次性：同一 capability 不能再次读取目录。
+    const replay = await getCatalog(server, token);
+    assert.equal(replay.response.status, 401);
+    const replayCall = server.calls.filter((call) => call.path === mock.CATALOG_PATH).pop();
+    assert.equal(replayCall.authorized, false);
+    assert.equal(replayCall.capability_stage, 'rejected');
+
+    // 精确 namespace：不得出现 auth-files 回退或插件前缀下的 /v1/models。
+    const authFiles = await fetch(server.origin + '/v0/management/auth-files', { headers: AUTH });
+    assert.equal(authFiles.status, 404);
+    const prefixed = await fetch(server.origin + BASE + '/v1/models', { headers: AUTH });
+    assert.equal(prefixed.status, 404);
+    const queryCatalog = await getCatalog(server, await issueToken(server).then((issued) => issued.body.token), {
+      headers: {}
+    });
+    assert.equal(queryCatalog.response.status, 200);
+    const withQuery = await fetch(server.origin + mock.CATALOG_PATH + '?x=1');
+    assert.equal(withQuery.status, 400);
+    const postCatalog = await fetch(server.origin + mock.CATALOG_PATH, { method: 'POST' });
+    assert.equal(postCatalog.status, 405);
 
     const state = await (await fetch(server.origin + '/__mock/state')).json();
-    assert.deepEqual(state.auth_control, {
-      delay_ms: 120,
-      fail_root: false,
-      fail_models: false,
-      fail_names: ['google-vertex.json']
+    assert.equal(state.outstanding_capabilities, 0, 'all issued capabilities were consumed');
+    assert.ok(!JSON.stringify(state).includes(token));
+  });
+});
+
+test('catalog capability: bounded outstanding allocation and failure/delay controls', async () => {
+  await withServer(async (server) => {
+    const issued = [];
+    for (let i = 0; i < mock.MAX_OUTSTANDING_CAPABILITIES; i += 1) {
+      const token = await issueToken(server);
+      assert.equal(token.response.status, 200, 'allocation ' + i);
+      issued.push(token.body.token);
+    }
+    const overflow = await issueToken(server);
+    assert.equal(overflow.response.status, 429);
+    assert.ok(errorShape(overflow.body));
+
+    // 使用一个后即可再签发一个，保持有界且不误伤已消费 capability。
+    const first = await getCatalog(server, issued[0]);
+    assert.equal(first.response.status, 200);
+    const replacement = await issueToken(server);
+    assert.equal(replacement.response.status, 200);
+
+    // 后续失败/延迟用例不继承 32 个未消费 capability。
+    await fetch(server.origin + '/__mock/reset', { method: 'POST' });
+    await fetch(server.origin + '/__mock/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ catalog: { fail_token: true } })
     });
-    assert.ok(state.auth_files.every((file) => !('secret' in file)));
-    assert.ok(server.calls.filter((call) => call.kind === 'cpa').every((call) => !('authorization' in call)));
+    const tokenFailed = await issueToken(server);
+    assert.equal(tokenFailed.response.status, 502);
+
+    await fetch(server.origin + '/__mock/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ catalog: { fail_token: false, fail_models: true } })
+    });
+    const token = await issueToken(server);
+    const modelsFailed = await getCatalog(server, token.body.token);
+    assert.equal(modelsFailed.response.status, 502);
+    const consumed = await getCatalog(server, token.body.token);
+    assert.equal(consumed.response.status, 401, 'failed catalog use still consumes the capability');
+
+    await fetch(server.origin + '/__mock/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ catalog: { fail_models: false, token_delay_ms: 120, models_delay_ms: 120 } })
+    });
+    const started = Date.now();
+    const delayedToken = await issueToken(server);
+    assert.equal(delayedToken.response.status, 200);
+    assert.ok(Date.now() - started >= 100, 'token delay is measurable');
+    const delayedStart = Date.now();
+    const delayedCatalog = await getCatalog(server, delayedToken.body.token);
+    assert.equal(delayedCatalog.response.status, 200);
+    assert.ok(Date.now() - delayedStart >= 100, 'catalog delay is measurable');
+
+    const state = await (await fetch(server.origin + '/__mock/state')).json();
+    assert.deepEqual(state.catalog_control, {
+      token_delay_ms: 120,
+      models_delay_ms: 120,
+      fail_token: false,
+      fail_models: false
+    });
+    assert.ok(server.calls.every((call) => !('authorization' in call)));
   });
 });
 
