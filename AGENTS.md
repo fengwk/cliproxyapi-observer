@@ -1,15 +1,15 @@
 # Development rules
 
-- Keep this an independent, thin CLIProxyAPI v8 native observer. Never change CPA core.
-- Observe requests without modifying bodies, headers, model routing, retries or sessions.
+- Keep this an independent CLIProxyAPI v8 native plugin. Never change CPA core.
+- Own client Key authentication and admission only. Never modify bodies, headers, model routing, retries or sessions.
 - Request content is sensitive: capture is opt-in, bounded and management-authenticated.
 - Keep content separate from metadata; enforce expiry on reads, not just background cleanup.
-- Never store API keys, authorization headers, failure response bodies or browser credentials.
-- Use bounded, nonblocking ingestion. Report dropped observations instead of blocking inference.
+- Store only hashes of generated client Keys. Never store authorization headers, upstream secrets, failure response bodies or browser credentials.
+- Diagnostic capture is bounded and nonblocking. Accounting is transactional; a failed usage write pauses that Key's subsequent admissions, not an in-flight response.
 - Preserve complete model identities and persist normalized token accounting.
-- Use token-only preaggregated statistics, query-time prices and offset pagination; never scan for a page count.
+- Fix integer micro-USD costs at ingestion; keep independent Key accumulators, daily rollups and short-lived request details. No legacy migration or query-time repricing.
 - Quiesce releases storage; reconfigure must reopen after a failed native replacement.
 - Keep UI dependency-free, same-origin-frameable and aligned with CPA themes.
 - Use fake credentials and local mock upstreams only; never touch production configuration.
 - Verify Go/race/vet, Node/browser, native build and real CPA host integration.
-- Use isolated workspaces; ordinary feature merges never trigger automatic releases.
+- Use isolated workspaces; release only when explicitly authorized and verified.
