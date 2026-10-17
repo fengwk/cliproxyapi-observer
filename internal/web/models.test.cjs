@@ -1,477 +1,386 @@
-'use strict';
+"use strict";
 
 /*
  * Node 单元测试：`node --test internal/web/models.test.cjs`
  *
- * 覆盖目标（组件 DOM 由主任务的真实浏览器验收负责）：
- *  - 发现只请求固定的 auth-files 路由，最多四个请求并行。
- *  - 缓存五分钟、只保存公开字符串、刷新可强制绕过，部分失败不吞掉成功结果。
- *  - abort 会取消排队/在途请求，迟到结果不得写入缓存。
- *  - 选择助手实现“默认不限、显式非空、保留目录外 ID、手动精确 ID”语义。
- *  - 源码保持零依赖、纯文本渲染、可访问标签与 models-* 样式钩子。
+ * 覆盖目标：
+ *  - 目录加载只接受 {ids} 或字符串数组，五分钟缓存与 force 刷新。
+ *  - abort 不写入迟到结果；错误统一且不泄漏底层 secret。
+ *  - 默认不限、限制模式无选择抛错、目录外/手动 ID 保留、最多 100 可见。
+ *  - 模型 ID 的 provider/大小写/斜杠命名空间精确保留；DOM hook 稳定。
+ *
+ * 组件 DOM 由真实浏览器验收负责，这里保持纯 Node、零依赖。
  */
 
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 
-const models = require('./models.js');
-const source = fs.readFileSync(path.join(__dirname, 'models.js'), 'utf8');
-
-const FILES = models.AUTH_FILES_PATH;
+const models = require("./models.js");
+const source = fs.readFileSync(path.join(__dirname, "models.js"), "utf8");
 
 function abortError() {
-  return new DOMException('aborted', 'AbortError');
+  return new DOMException("aborted", "AbortError");
 }
 
-function wait(ms, signal) {
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function delay(ms, signal) {
   return new Promise((resolve, reject) => {
     if (signal && signal.aborted) {
       reject(abortError());
       return;
     }
-    const timer = setTimeout(() => {
-      cleanup();
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      cleanup();
-      reject(abortError());
-    };
-    function cleanup() {
-      if (signal) signal.removeEventListener('abort', onAbort);
+    const timer = setTimeout(resolve, ms);
+    if (signal) {
+      signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          reject(abortError());
+        },
+        { once: true },
+      );
     }
-    if (signal) signal.addEventListener('abort', onAbort, { once: true });
   });
-}
-
-function modelName(url) {
-  return new URL('http://local' + url).searchParams.get('name');
 }
 
 // ---------------------------------------------------------------------------
 // 导出面
 // ---------------------------------------------------------------------------
 
-test('exports the browser component plus pure discovery and selection helpers', () => {
-  assert.equal(typeof models.ObserverModels, 'function');
+test("exports the component, cache controls, loader and selection helpers", () => {
   for (const name of [
-    'discoverModels',
-    'createLimiter',
-    'createCache',
-    'parseFiles',
-    'parseModels',
-    'initialState',
-    'mergeAvailable',
-    'toggleSelection',
-    'addExactModel',
-    'readAllowed',
-    'filterModels',
-    'modelsPath'
+    "ObserverModels",
+    "clearCache",
+    "loadIDs",
+    "createCache",
+    "parseIDs",
+    "initialState",
+    "mergeAvailable",
+    "toggleSelection",
+    "addExactModel",
+    "readAllowed",
+    "filterModels",
   ]) {
-    assert.equal(typeof models[name], 'function', name);
+    assert.equal(typeof models[name], "function", name);
   }
-  assert.equal(models.AUTH_FILES_PATH, '/v0/management/auth-files');
+  assert.equal(typeof models.ObserverModels.clearCache, "function");
   assert.equal(models.CACHE_TTL_MS, 5 * 60 * 1000);
-  assert.equal(models.MAX_CONCURRENCY, 4);
-});
-
-// ---------------------------------------------------------------------------
-// 响应解析与模型身份
-// ---------------------------------------------------------------------------
-
-test('parses auth-file and model payloads defensively while preserving exact identities', () => {
-  // 无效条目被忽略，重复项去重，外层空白归一；provider 前缀等内部字符不改变。
-  assert.deepEqual(
-    models.parseFiles({
-      files: [{ name: 'a' }, { name: ' a ' }, { name: '' }, { name: 42 }, null, {}]
-    }),
-    ['a']
-  );
-  assert.deepEqual(models.parseFiles([{ name: 'x' }, 'y']), ['x', 'y']);
-  assert.deepEqual(models.parseFiles({ files: [] }), []);
-  assert.throws(() => models.parseFiles({}), /响应格式无效/);
-
-  assert.deepEqual(
-    models.parseModels({
-      models: [
-        { id: 'openai/gpt-4o' },
-        { id: 'openai/gpt-4o' },
-        { id: '  anthropic/claude-3.5-sonnet ' },
-        { id: '' },
-        { id: 7 },
-        null
-      ]
-    }),
-    ['openai/gpt-4o', 'anthropic/claude-3.5-sonnet']
-  );
-  assert.deepEqual(models.parseModels([{ id: 'x' }, 'y']), ['x', 'y']);
-  assert.throws(() => models.parseModels({ models: {} }), /响应格式无效/);
-  assert.equal(
-    models.modelsPath('a b&c'),
-    '/v0/management/auth-files/models?name=a%20b%26c'
-  );
+  assert.equal(models.MAX_VISIBLE, 100);
 });
 
 // ---------------------------------------------------------------------------
 // 选择语义
 // ---------------------------------------------------------------------------
 
-test('selection helpers default to unrestricted and enforce nonempty explicit restrictions', () => {
-  // 默认 all 必须映射为 read() === []；非空初始值进入显式限制。
+test("selection defaults to unrestricted and explicit restrictions fail closed", () => {
+  // 空数组是“不限模型”；非空（即使内容无效）必须进入显式限制。
   assert.deepEqual(models.initialState([]), {
     restricted: false,
     selected: [],
-    available: []
   });
-  assert.deepEqual(models.initialState([' a ', 'a', 'b']), {
+  assert.deepEqual(models.initialState([" a ", "a", "b"]), {
     restricted: true,
-    selected: ['a', 'b'],
-    available: ['a', 'b']
+    selected: ["a", "b"],
   });
-  // 非空但无效的初始值也必须 fail closed，不能退化成“不限模型”。
-  assert.deepEqual(models.initialState(['  ', null]), {
+  assert.deepEqual(models.initialState(["  ", null]), {
     restricted: true,
     selected: [],
-    available: []
   });
-  assert.deepEqual(models.readAllowed(false, ['a']), []);
-  assert.deepEqual(models.readAllowed(true, ['a', 'b']), ['a', 'b']);
+
+  assert.deepEqual(models.readAllowed(false, ["a"]), []);
+  assert.deepEqual(models.readAllowed(true, ["a", "b"]), ["a", "b"]);
   assert.throws(() => models.readAllowed(true, []), /至少选择一个模型/);
-  assert.throws(() => models.readAllowed(true, ['  ', null]), /至少选择一个模型/);
+  assert.throws(
+    () => models.readAllowed(true, ["  ", null]),
+    /至少选择一个模型/,
+  );
 });
 
-test('toggling two exact IDs yields both, unchecking removes one, and preserved IDs survive merge', () => {
-  // “选 2”场景：两个精确 ID 按选择顺序返回。
-  let selected = models.toggleSelection([], 'a', true);
-  selected = models.toggleSelection(selected, 'b', true);
-  assert.deepEqual(selected, ['a', 'b']);
-  assert.deepEqual(models.readAllowed(true, selected), ['a', 'b']);
+test("toggling two IDs preserves order and directory-missing IDs survive refresh merge", () => {
+  let selected = models.toggleSelection([], "a", true);
+  selected = models.toggleSelection(selected, "b", true);
+  assert.deepEqual(selected, ["a", "b"]);
+  assert.deepEqual(models.readAllowed(true, selected), ["a", "b"]);
 
-  selected = models.toggleSelection(selected, 'a', false);
-  assert.deepEqual(selected, ['b']);
-  assert.deepEqual(models.toggleSelection(selected, 'missing', false), ['b']);
+  selected = models.toggleSelection(selected, "a", false);
+  assert.deepEqual(selected, ["b"]);
+  assert.deepEqual(models.toggleSelection(selected, "missing", false), ["b"]);
 
-  // 已保留项（初始值或手动项）优先，即使目录刷新后不再出现也不会丢失。
+  // 初始未列出 ID 与手动 ID 排在目录结果之前，刷新后不丢失。
   assert.deepEqual(
-    models.mergeAvailable(['new', 'shared'], ['old', 'shared']),
-    ['old', 'shared', 'new']
+    models.mergeAvailable(["new", "shared"], ["old", "shared"]),
+    ["old", "shared", "new"],
   );
 });
 
-test('manual exact IDs are trimmed, deduplicated, auto-selected, and search is case-insensitive', () => {
-  assert.deepEqual(models.addExactModel(['a'], ['a'], ' openai/gpt-4o '), {
-    id: 'openai/gpt-4o',
-    available: ['a', 'openai/gpt-4o'],
-    selected: ['a', 'openai/gpt-4o']
+test("manual exact IDs are trimmed, deduplicated, auto-selected and searched case-insensitively", () => {
+  assert.deepEqual(models.addExactModel(["a"], ["a"], " openai/gpt-4o "), {
+    id: "openai/gpt-4o",
+    available: ["a", "openai/gpt-4o"],
+    selected: ["a", "openai/gpt-4o"],
   });
-  assert.throws(() => models.addExactModel([], [], '   '), /请输入精确模型 ID/);
-
-  assert.deepEqual(models.filterModels(['OpenAI/GPT-4o', 'claude-3'], 'gpt'), [
-    'OpenAI/GPT-4o'
+  assert.throws(() => models.addExactModel([], [], "   "), /请输入精确模型 ID/);
+  assert.deepEqual(models.filterModels(["OpenAI/GPT-4o", "claude-3"], "gpt"), [
+    "OpenAI/GPT-4o",
   ]);
-  assert.deepEqual(models.filterModels(['a', 'b'], '  '), ['a', 'b']);
+  assert.deepEqual(models.filterModels(["a", "b"], "  "), ["a", "b"]);
 });
 
 // ---------------------------------------------------------------------------
-// 发现、并发与缓存
+// 模型 ID 命名空间
 // ---------------------------------------------------------------------------
 
-test('discovery uses fixed routes, deduplicates IDs, bounds parallel calls to four, and reports progress', async () => {
-  const files = ['a', 'b', 'c', 'd', 'e', 'f'];
-  const paths = [];
-  const progress = [];
-  let active = 0;
-  let peak = 0;
+test("model namespaces are preserved exactly while trimming only outer whitespace", () => {
+  const direct = models.parseIDs([
+    " OpenAI/GPT-4o ",
+    "openai/gpt-4o",
+    "a/b",
+    "a/b",
+    "",
+    null,
+    7,
+  ]);
+  assert.deepEqual(direct, ["OpenAI/GPT-4o", "openai/gpt-4o", "a/b"]);
+  assert.deepEqual(models.parseIDs({ ids: ["x:y/z"] }), ["x:y/z"]);
 
-  async function discover(url, { signal }) {
-    paths.push(url);
-    active++;
-    peak = Math.max(peak, active);
-    try {
-      await wait(10, signal);
-      if (url === FILES) {
-        return { files: files.map((name) => ({ name, secret: 'ignored' })) };
-      }
-      const name = modelName(url);
-      return {
-        models: [{ id: 'model/' + name }, { id: 'shared' }],
-        secret: 'ignored'
-      };
-    } finally {
-      active--;
-    }
-  }
-
-  const result = await models.discoverModels(discover, {
-    limiter: models.createLimiter(4),
-    onProgress: (...args) => progress.push(args)
-  });
-
-  // 根目录请求完成后才并发 6 个账户，限流器必须把峰值压在 4。
-  assert.equal(peak, 4);
-  assert.equal(paths[0], FILES);
-  assert.equal(paths.filter((url) => url === FILES).length, 1);
-  assert.equal(paths.length, 7);
-  assert.ok(
-    paths
-      .slice(1)
-      .every((url) => url.startsWith(FILES + '/models?name='))
+  // 不接受旧 auth-files / models 兼容形状，避免把无效响应当成目录。
+  assert.throws(
+    () => models.parseIDs({ files: [] }),
+    (error) => {
+      return (
+        error.code === "MODEL_CATALOG_FAILED" &&
+        error.message === "模型目录加载失败"
+      );
+    },
   );
-
-  // 跨账户重复 ID 只保留一次，完整模型身份（含斜杠）不截断。
-  assert.equal(result.total, 6);
-  assert.equal(result.failures.length, 0);
-  assert.equal(result.models.length, 7);
-  assert.equal(result.models.filter((id) => id === 'shared').length, 1);
-  assert.ok(result.models.includes('model/f'));
-
-  // 进度从 0/N 到 N/N，每次账户完成都推进一次。
-  assert.deepEqual(progress[0], [0, 6, 0]);
-  assert.deepEqual(progress[progress.length - 1], [6, 6, 0]);
-  assert.equal(progress.length, 7);
+  assert.throws(() => models.parseIDs({ models: ["a"] }), /模型目录加载失败/);
 });
 
-test('successful discovery is cached for five minutes, refreshes bypass it, and only public strings are stored', async () => {
-  const cache = models.createCache();
+// ---------------------------------------------------------------------------
+// 缓存、force 与 clearCache
+// ---------------------------------------------------------------------------
+
+test("ids are cached for five minutes, copied on read, and force bypasses the cache", async () => {
+  const cache = models.createCache(() => now);
   let now = 1_000_000;
   let calls = 0;
-
-  async function discover(url, { signal }) {
+  async function loadCatalog() {
     calls++;
-    await wait(0, signal);
-    if (url === FILES) {
-      return {
-        files: [{ name: 'account', token: 'secret-root' }],
-        token: 'secret-root'
-      };
-    }
-    return {
-      models: [
-        { id: 'model-a', token: 'secret-model' },
-        { id: 'model-b' }
-      ],
-      token: 'secret-model'
-    };
+    return { ids: ["openai/GPT-4o", "a/b"] };
   }
 
-  const first = await models.discoverModels(discover, {
-    cache,
-    now: () => now
-  });
-  assert.deepEqual(first.models, ['model-a', 'model-b']);
-  assert.equal(calls, 2);
+  const first = await models.loadIDs(loadCatalog, { cache });
+  assert.deepEqual(first, ["openai/GPT-4o", "a/b"]);
+  assert.equal(calls, 1);
 
-  // 差一毫秒仍命中缓存。
+  // 缓存命中不调用 loader；返回值被修改也不能污染缓存。
+  first.push("mutated");
+  assert.deepEqual(await models.loadIDs(loadCatalog, { cache }), [
+    "openai/GPT-4o",
+    "a/b",
+  ]);
+  assert.equal(calls, 1);
+
   now += models.CACHE_TTL_MS - 1;
-  const second = await models.discoverModels(discover, {
-    cache,
-    now: () => now
-  });
-  assert.deepEqual(second.models, ['model-a', 'model-b']);
+  await models.loadIDs(loadCatalog, { cache });
+  assert.equal(calls, 1);
+
+  now += 1;
+  await models.loadIDs(loadCatalog, { cache });
   assert.equal(calls, 2);
 
-  // 达到 TTL 后失效并重新发现。
-  now += 1;
-  const third = await models.discoverModels(discover, {
-    cache,
-    now: () => now
-  });
-  assert.deepEqual(third.models, ['model-a', 'model-b']);
-  assert.equal(calls, 4);
+  await models.loadIDs(loadCatalog, { cache, force: true });
+  assert.equal(calls, 3);
 
-  // 刷新按钮使用 force，必须绕过缓存。
-  const forced = await models.discoverModels(discover, {
-    cache,
-    now: () => now,
-    force: true
-  });
-  assert.deepEqual(forced.models, ['model-a', 'model-b']);
-  assert.equal(calls, 6);
-
-  // 缓存条目只能是公开 ID 数组，不能出现任何响应字段或凭据。
-  for (const [key, entry] of cache) {
-    assert.ok(
-      key === FILES || key.startsWith(FILES + '/models?name='),
-      'cached key must be a fixed route'
-    );
-    assert.ok(Array.isArray(entry.ids));
-    for (const id of entry.ids) assert.equal(typeof id, 'string');
-    assert.equal(JSON.stringify(entry).includes('secret'), false);
-  }
+  // 缓存只保存字符串 ID，不保留 loader 响应的其他字段。
+  cache.set(["public/model"]);
+  assert.deepEqual(cache.get(), ["public/model"]);
 });
 
-test('partial account failures keep successful models and return generic warnings', async () => {
-  const cache = models.createCache();
-
-  async function discover(url, { signal }) {
-    await wait(0, signal);
-    if (url === FILES) {
-      return { files: [{ name: 'ok' }, { name: 'broken' }, { name: 'empty' }] };
-    }
-    const name = modelName(url);
-    if (name === 'broken') throw Error('sk-live-DO-NOT-LEAK');
-    if (name === 'empty') return { models: [] };
-    return { models: [{ id: 'model/ok' }, { id: 'shared' }] };
+test("clearCache and ObserverModels.clearCache both reset the shared cache", async () => {
+  let calls = 0;
+  async function loadCatalog() {
+    calls++;
+    return ["shared/model"];
   }
 
-  const result = await models.discoverModels(discover, { cache });
-  assert.deepEqual(result.models, ['model/ok', 'shared']);
-  assert.equal(result.total, 3);
-  assert.deepEqual(
-    result.failures.map((failure) => failure.name),
-    ['broken']
-  );
-  assert.equal(result.failures[0].message, '模型目录加载失败');
-  assert.equal(JSON.stringify(result).includes('DO-NOT-LEAK'), false);
+  models.clearCache();
+  await models.loadIDs(loadCatalog);
+  await models.loadIDs(loadCatalog);
+  assert.equal(calls, 1);
 
-  for (const entry of cache.values()) {
-    assert.equal(JSON.stringify(entry).includes('DO-NOT-LEAK'), false);
-  }
-});
+  models.ObserverModels.clearCache();
+  await models.loadIDs(loadCatalog);
+  assert.equal(calls, 2);
 
-test('a failed account is retried next time while successful account results stay cached', async () => {
-  const cache = models.createCache();
-  let flakyDown = true;
-  const calls = [];
-
-  async function discover(url, { signal }) {
-    calls.push(url);
-    await wait(0, signal);
-    if (url === FILES) {
-      return { files: [{ name: 'ok' }, { name: 'flaky' }] };
-    }
-    const name = modelName(url);
-    if (name === 'flaky' && flakyDown) throw Error('temporary outage');
-    return { models: [{ id: 'model/' + name }] };
-  }
-
-  const first = await models.discoverModels(discover, { cache });
-  assert.equal(first.failures.length, 1);
-  const firstCalls = calls.length;
-
-  flakyDown = false;
-  const second = await models.discoverModels(discover, { cache });
-  assert.deepEqual(second.failures, []);
-  assert.deepEqual(second.models, ['model/ok', 'model/flaky']);
-
-  // 根目录与成功账户来自缓存，只重试上次失败的账户。
-  assert.equal(calls.length, firstCalls + 1);
-});
-
-test('root discovery failures throw sanitized errors and never fabricate a directory', async () => {
-  await assert.rejects(
-    models.discoverModels(
-      async () => {
-        throw Error('upstream-body-secret');
-      },
-      { cache: models.createCache() }
-    ),
-    (error) =>
-      error.code === 'MODEL_DISCOVERY_FAILED' &&
-      /auth-files/.test(error.message) &&
-      !/secret/.test(error.message)
-  );
-
-  await assert.rejects(
-    models.discoverModels(async () => ({ files: {} }), {
-      cache: models.createCache()
-    }),
-    (error) => error.code === 'MODEL_DISCOVERY_FAILED'
-  );
+  models.clearCache();
+  await models.loadIDs(loadCatalog);
+  assert.equal(calls, 3);
 });
 
 // ---------------------------------------------------------------------------
-// 取消
+// 取消与错误
 // ---------------------------------------------------------------------------
 
-test('an already-aborted signal performs no discovery', async () => {
+// Logout must invalidate pending cache writers, even if transport ignores abort.
+test("clearing the session cache detaches in-flight catalog results", async () => {
+  models.clearCache();
+  let release;
+  const pending = models.loadIDs(
+    () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  );
+  await Promise.resolve();
+  models.clearCache();
+  release(["old-session/model"]);
+  await pending;
+  let calls = 0;
+  const current = await models.loadIDs(async () => {
+    calls++;
+    return ["new-session/model"];
+  });
+  assert.equal(calls, 1);
+  assert.deepEqual(current, ["new-session/model"]);
+  models.clearCache();
+});
+
+test("an already-aborted signal never calls the loader", async () => {
   const controller = new AbortController();
   controller.abort();
   let calls = 0;
 
   await assert.rejects(
-    models.discoverModels(
+    models.loadIDs(
       async () => {
         calls++;
-        return {};
+        return [];
       },
-      { signal: controller.signal }
+      { signal: controller.signal, cache: models.createCache() },
     ),
-    (error) => error.name === 'AbortError'
+    (error) => error.name === "AbortError",
   );
   assert.equal(calls, 0);
 });
 
-test('abort cancels queued and in-flight work without caching late model results', async () => {
+test("abort during load rejects and late results are never cached", async () => {
   const controller = new AbortController();
   const cache = models.createCache();
-  let modelCalls = 0;
+  let calls = 0;
 
-  async function discover(url, { signal }) {
-    if (url === FILES) return { files: [{ name: 'a' }, { name: 'b' }, { name: 'c' }] };
-    modelCalls++;
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(resolve, 200);
-      const onAbort = () => {
-        clearTimeout(timer);
-        reject(abortError());
-      };
-      if (signal) signal.addEventListener('abort', onAbort, { once: true });
-    });
-    return { models: [{ id: 'late' }] };
+  // loader 故意忽略 signal，验证模块自身在恢复后仍拒绝并跳过缓存写入。
+  let seenSignal = null;
+  async function loadCatalog(options) {
+    calls++;
+    seenSignal = options.signal;
+    await wait(30);
+    return ["late/model"];
   }
 
-  const pending = models.discoverModels(discover, {
+  const pending = models.loadIDs(loadCatalog, {
     cache,
     signal: controller.signal,
-    concurrency: 2,
-    onProgress: (done) => {
-      if (done === 0) setImmediate(() => controller.abort());
-    }
   });
+  await wait(0);
+  controller.abort();
+  await assert.rejects(pending, (error) => error.name === "AbortError");
+  await wait(40);
 
-  await assert.rejects(pending, (error) => error.name === 'AbortError');
-  // 并发上限为 2，第三个账户仍在队列时被 abort 直接拒绝。
-  assert.equal(modelCalls, 2);
-  assert.equal(
-    [...cache.keys()].some((key) => key.startsWith(FILES + '/models?name=')),
-    false
+  assert.equal(seenSignal, controller.signal);
+  assert.equal(calls, 1);
+  assert.equal(cache.get(), null);
+});
+
+test("loader failures are generic and never leak response bodies or secrets", async () => {
+  const cache = models.createCache();
+  await assert.rejects(
+    models.loadIDs(
+      async () => {
+        throw Error("upstream sk-live-DO-NOT-LEAK");
+      },
+      { cache },
+    ),
+    (error) =>
+      error.code === "MODEL_CATALOG_FAILED" &&
+      error.message === "模型目录加载失败" &&
+      !/DO-NOT-LEAK|upstream/.test(error.message),
+  );
+  assert.equal(cache.get(), null);
+
+  await assert.rejects(
+    models.loadIDs(async () => ({ models: [{ id: "x" }] }), { cache }),
+    (error) => error.code === "MODEL_CATALOG_FAILED",
+  );
+  await assert.rejects(
+    models.loadIDs(undefined, { cache }),
+    (error) => error.code === "MODEL_CATALOG_FAILED",
   );
 });
 
 // ---------------------------------------------------------------------------
-// 静态契约
+// 静态契约：DOM hooks 与已移除的旧发现路径
 // ---------------------------------------------------------------------------
 
-test('models.js is dependency-free, text-only, and keeps accessibility/style hooks', () => {
-  // 组件不得引入第三方依赖，也不得用标记注入渲染不可信模型 ID。
-  assert.equal(/https?:\/\//i.test(source), false);
-  for (const forbidden of [
-    'innerHTML',
-    'outerHTML',
-    'insertAdjacentHTML',
-    'document.write',
-    'eval(',
-    'new Function',
-    'window.open',
-    'textarea',
-    'require('
+test("models.js keeps DOM hooks and no longer contains auth-files, limiters or credentials", () => {
+  assert.match(source, /window\.ObserverModels\s*=\s*ObserverModels/);
+  assert.match(source, /ObserverModels\.clearCache\s*=/);
+  assert.match(source, /slice\(0, MAX_VISIBLE\)/);
+
+  for (const hook of [
+    "models-root",
+    "models-mode",
+    "models-restricted",
+    "models-list",
+    "models-search-field",
+    "models-item",
+    "models-empty",
+    "models-actions",
+    "models-select-all",
+    "models-clear",
+    "models-refresh",
+    "models-manual",
+    "models-add",
+    "models-note",
+    "models-hint",
+    "models-status",
+    "models-warning",
+    "models-missing",
+    'role: "status"',
+    'role: "alert"',
+    "aria-live",
+    "aria-label",
   ]) {
-    assert.equal(source.includes(forbidden), false, 'must not use ' + forbidden);
+    assert.ok(source.includes(hook), "missing DOM hook " + hook);
   }
 
-  assert.match(source, /window\.ObserverModels\s*=/);
-  assert.match(source, /ObserverUI/);
-  assert.match(source, /typeof UI\.el/);
-  assert.match(source, /typeof UI\.field/);
-  assert.match(source, /\/v0\/management\/auth-files/);
-  assert.match(source, /models-root/);
-  assert.match(source, /models-list/);
-  assert.match(source, /role: "status"/);
-  assert.match(source, /role: "alert"/);
-  assert.match(source, /aria-live/);
-  assert.match(source, /aria-label/);
+  for (const removed of [
+    "auth-files",
+    "createLimiter",
+    "MAX_CONCURRENCY",
+    "credential",
+  ]) {
+    assert.equal(source.includes(removed), false, "must not keep " + removed);
+  }
+  for (const forbidden of [
+    "innerHTML",
+    "outerHTML",
+    "insertAdjacentHTML",
+    "document.write",
+    "eval(",
+    "new Function",
+    "window.open",
+    "require(",
+  ]) {
+    assert.equal(
+      source.includes(forbidden),
+      false,
+      "must not use " + forbidden,
+    );
+  }
 });

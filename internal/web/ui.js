@@ -80,6 +80,7 @@
   function logout() {
     stop();
     key = "";
+    window.ObserverModels.clearCache();
     sessionStorage.removeItem("observer.management-key");
     document.querySelectorAll("dialog").forEach((d) => {
       d.querySelectorAll("input").forEach((i) => (i.value = ""));
@@ -91,9 +92,9 @@
     login.hidden = false;
     $("#tools").replaceChildren();
   }
-  async function api(path, options = {}, host = false) {
+  async function api(path, options = {}) {
     const { body, ...rest } = options;
-    const r = await fetch((host ? "" : apiBase) + path, {
+    const r = await fetch(apiBase + path, {
       ...rest,
       headers: {
         Authorization: "Bearer " + key,
@@ -642,6 +643,61 @@
   function confirmed(text, fn) {
     if (confirm(text)) mutate(fn);
   }
+  // The management credential never reaches the inference API. A capability is
+  // held only in this request's memory and is valid for one fixed catalog GET.
+  async function loadModelCatalog({ signal }) {
+    let capability = await api("/models/token", { method: "POST", signal });
+    try {
+      if (signal.aborted) throw new DOMException("已取消", "AbortError");
+      if (typeof capability?.token !== "string" || !capability.token)
+        throw Error("模型目录令牌无效");
+      const response = await fetch("/v1/models", {
+        method: "GET",
+        signal,
+        cache: "no-store",
+        mode: "same-origin",
+        credentials: "omit",
+        redirect: "error",
+        headers: { Authorization: "Bearer " + capability.token },
+      });
+      capability.token = "";
+      if (!response.ok)
+        throw Error("权威模型目录读取失败，请重试或手动添加精确 ID");
+      // Bound bytes before JSON parsing, not after allocating an unbounded body.
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let text = "",
+        bytes = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          bytes += value.byteLength;
+          if (bytes > 2 * 1024 * 1024) {
+            await reader.cancel();
+            throw Error("模型目录超过 2 MiB 上限，请手动添加精确 ID");
+          }
+          text += decoder.decode(value, { stream: true });
+        }
+        text += decoder.decode();
+      } finally {
+        reader.releaseLock();
+      }
+      const catalog = JSON.parse(text);
+      if (
+        !Array.isArray(catalog.data) ||
+        catalog.data.length > 10000 ||
+        catalog.data.some(
+          (m) => typeof m?.id !== "string" || !m.id || m.id.length > 2048,
+        )
+      )
+        throw Error("模型目录格式或数量超出限制，请手动添加精确 ID");
+      return catalog.data.map((model) => model.id);
+    } finally {
+      if (capability) capability.token = "";
+      capability = null;
+    }
+  }
   function keyForm(k) {
     const d = dialog(k ? "编辑 Key" : "新建 Key"),
       f = el("form"),
@@ -701,14 +757,7 @@
     const models = window.ObserverModels(
       modelHost,
       k?.allowed_models || [],
-      (path, options) => {
-        if (
-          path !== "/v0/management/auth-files" &&
-          !/^\/v0\/management\/auth-files\/models\?name=/.test(path)
-        )
-          throw Error("不受信任的模型目录路径");
-        return api(path, options, true);
-      },
+      loadModelCatalog,
       modelController.signal,
     );
     d.addEventListener("close", () => {
