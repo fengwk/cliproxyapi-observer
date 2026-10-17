@@ -91,9 +91,9 @@
     login.hidden = false;
     $("#tools").replaceChildren();
   }
-  async function api(path, options = {}) {
+  async function api(path, options = {}, host = false) {
     const { body, ...rest } = options;
-    const r = await fetch(apiBase + path, {
+    const r = await fetch((host ? "" : apiBase) + path, {
       ...rest,
       headers: {
         Authorization: "Bearer " + key,
@@ -473,7 +473,7 @@
     const d = dialog("请求详情");
     close(d);
     try {
-      const v = await api("/requests/" + encodeURIComponent(id));
+      const v = await api("/requests/detail?id=" + encodeURIComponent(id));
       if (!d.open) return;
       const status = {
         available: "可用",
@@ -517,6 +517,11 @@
       );
     return v;
   }
+  function utcShort(value, year = false) {
+    if (!value || !Number.isFinite(Date.parse(value))) return "—";
+    const iso = new Date(value).toISOString();
+    return iso.slice(year ? 0 : 5, 10) + " " + iso.slice(11, 16) + " UTC";
+  }
   const windows = { five_hour: "5小时", week: "周", month: "月", total: "总" };
   function keys(items) {
     content.replaceChildren(
@@ -532,28 +537,41 @@
             el("p", (k.enabled ? "启用" : "停用") + " · " + k.id),
             el("p", k.blocked_reason ? "计费暂停：" + k.blocked_reason : ""),
           );
-          const quotas = el("div");
-          Object.entries(windows).forEach(([w, n]) =>
-            quotas.append(
+          const quotas = el("div", null, { class: "key-quotas" });
+          Object.entries(windows).forEach(([w, n]) => {
+            const row = el("div", null, { class: "quota-line" });
+            row.append(
               el(
-                "p",
-                n +
+                "span",
+                (w === "five_hour" ? "5h" : n) +
                   " " +
                   usd(k.used?.[w]) +
                   "/" +
-                  (k.limits[w] ? usd(k.limits[w]) + "$" : "不限额") +
-                  " · 下次重置 " +
-                  (w === "total" ? "无" : k.resets?.[w] || "—"),
+                  (k.limits[w] ? usd(k.limits[w]) + "$" : "不限额"),
               ),
-            ),
-          );
+            );
+            const resetAt = k.resets?.[w];
+            row.append(
+              el(
+                "small",
+                w === "total"
+                  ? "无自动重置"
+                  : resetAt && Date.parse(resetAt) <= Date.now()
+                    ? "下次请求重启周期"
+                    : "重置 " + utcShort(resetAt),
+                { title: resetAt || "" },
+              ),
+            );
+            quotas.append(row);
+          });
           const actions = el("div", null, { class: "actions" });
           actions.append(
             button("编辑", () => keyForm(k)),
             button(k.enabled ? "停用" : "启用", () => {
-              if (k.enabled && !confirm("停用将阻止此 Key 的后续请求，确认？")) return;
+              if (k.enabled && !confirm("停用将阻止此 Key 的后续请求，确认？"))
+                return;
               mutate(() =>
-                api("/keys/" + k.id, {
+                api("/keys?id=" + encodeURIComponent(k.id), {
                   method: "PUT",
                   body: spec(k, { enabled: !k.enabled }),
                 }),
@@ -561,29 +579,43 @@
             }),
             button("撤销", () =>
               confirmed("撤销将立即使此 Key 失效，保留历史记录。", () =>
-                api("/keys/" + k.id, { method: "DELETE" }),
+                api("/keys?id=" + encodeURIComponent(k.id), {
+                  method: "DELETE",
+                }),
               ),
             ),
             button("轮换", () =>
               confirmed("轮换将立即使旧密钥失效。", async () =>
                 secret(
-                  await api("/keys/" + k.id + "/rotate", { method: "POST" }),
+                  await api("/keys/rotate?id=" + encodeURIComponent(k.id), {
+                    method: "POST",
+                  }),
                 ),
               ),
             ),
             button("重置", () => reset(k)),
           );
-          return [
-            label,
-            quotas,
-            (k.expires_at || "永不过期") +
-              " · 活跃 " +
-              k.active +
-              " / " +
-              (k.max_concurrent || "不限并发"),
-            (k.allowed_models || []).join("\n") || "不限模型",
-            actions,
-          ];
+          if (k.blocked_reason)
+            actions.append(button("核对后恢复", () => recover(k)));
+          const expiry = el(
+            "div",
+            k.expires_at ? utcShort(k.expires_at, true) : "永不过期",
+            { title: k.expires_at || "" },
+          );
+          if (k.expires_at && Date.parse(k.expires_at) <= Date.now())
+            expiry.append(el("small", "已过期", { class: "error" }));
+          expiry.append(
+            el(
+              "div",
+              "活跃 " + k.active + " / " + (k.max_concurrent || "不限并发"),
+            ),
+          );
+          const chips = el("div", null, { class: "model-chips" });
+          (k.allowed_models || []).forEach((id) =>
+            chips.append(el("span", id)),
+          );
+          if (!k.allowed_models?.length) chips.append(el("span", "不限模型"));
+          return [label, quotas, expiry, chips, actions];
         }),
       ),
     );
@@ -624,12 +656,6 @@
         k?.expires_at?.replace(/Z$/, "") || "",
       ],
       ["max_concurrent", "并发上限", "number", k?.max_concurrent || 0],
-      [
-        "allowed_models",
-        "允许模型",
-        "textarea",
-        (k?.allowed_models || []).join("\n"),
-      ],
     ]) {
       const i = el(
         t === "textarea" ? "textarea" : "input",
@@ -668,7 +694,35 @@
     grid.append(field("启用", enabled));
     const err = el("p", null, { role: "alert", class: "error" }),
       save = el("button", "保存");
-    f.append(grid, err, save);
+    d.classList.add("key-dialog");
+    const bodyArea = el("div", null, { class: "dialog-body" });
+    const modelHost = el("div");
+    const modelController = new AbortController();
+    const models = window.ObserverModels(
+      modelHost,
+      k?.allowed_models || [],
+      (path, options) => {
+        if (
+          path !== "/v0/management/auth-files" &&
+          !/^\/v0\/management\/auth-files\/models\?name=/.test(path)
+        )
+          throw Error("不受信任的模型目录路径");
+        return api(path, options, true);
+      },
+      modelController.signal,
+    );
+    d.addEventListener("close", () => {
+      modelController.abort();
+      models.dispose();
+    });
+    const footer = el("div", null, { class: "dialog-footer" });
+    footer.append(
+      err,
+      save,
+      button("取消", () => d.close()),
+    );
+    bodyArea.append(grid, modelHost);
+    f.append(bodyArea, footer);
     f.onsubmit = async (e) => {
       e.preventDefault();
       save.disabled = true;
@@ -680,10 +734,7 @@
             ? new Date(inputs.expires_at.value + "Z").toISOString()
             : null,
           max_concurrent: Number(inputs.max_concurrent.value),
-          allowed_models: inputs.allowed_models.value
-            .split("\n")
-            .map((s) => s.trim())
-            .filter(Boolean),
+          allowed_models: models.read(),
           limits: Object.fromEntries(
             Object.keys(windows).map((w) => [w, micro(inputs[w].value)]),
           ),
@@ -694,7 +745,7 @@
         )
           throw Error("并发需为非负整数");
         const result = await api(
-          "/keys" + (k ? "/" + encodeURIComponent(k.id) : ""),
+          "/keys" + (k ? "?id=" + encodeURIComponent(k.id) : ""),
           { method: k ? "PUT" : "POST", body },
         );
         d.close();
@@ -707,7 +758,6 @@
       }
     };
     d.append(f);
-    close(d);
   }
   function secret(result) {
     const d = dialog("密钥仅显示一次"),
@@ -746,6 +796,50 @@
       }),
     );
   }
+  function recover(k) {
+    const d = dialog("核对后恢复计费暂停");
+    d.append(
+      el(
+        "p",
+        "此 Key 因存储或计费异常暂停。系统会自动重试已保留的计费事件，请先修复存储并等待重试完成。",
+      ),
+      el(
+        "p",
+        "若崩溃后用量未知或丢失，管理员必须先核对并补偿缺失用量，再明确确认恢复。恢复不会重置金额、额度或历史费用。",
+      ),
+    );
+    const ack = el("input", null, { type: "checkbox" });
+    d.append(
+      field("我已核对并处理缺失用量，确认存储正常，承担未知用量核对责任", ack),
+    );
+    const action = button("确认核对后恢复", async () => {
+      if (
+        !ack.checked ||
+        !confirm(
+          "确认已核对并处理缺失用量？此操作仅解除暂停，不会重置已用金额。",
+        )
+      )
+        return;
+      action.disabled = true;
+      try {
+        await api("/keys/recover?id=" + encodeURIComponent(k.id), {
+          method: "POST",
+          body: { acknowledge: true },
+        });
+        d.close();
+        refresh();
+      } catch (e) {
+        note.textContent = e.message;
+      } finally {
+        action.disabled = !ack.checked;
+      }
+    });
+    action.disabled = true;
+    ack.onchange = () => (action.disabled = !ack.checked);
+    const note = el("p", null, { role: "alert" });
+    d.append(note, action);
+    close(d);
+  }
   function reset(k) {
     const d = dialog("重置额度"),
       checks = [];
@@ -760,7 +854,7 @@
         const selected = checks.filter((c) => c.checked).map((c) => c.value);
         if (selected.length && confirm("确认重置所选周期？"))
           mutate(async () => {
-            await api("/keys/" + encodeURIComponent(k.id) + "/reset", {
+            await api("/keys/reset?id=" + encodeURIComponent(k.id), {
               method: "POST",
               body: { windows: selected },
             });
