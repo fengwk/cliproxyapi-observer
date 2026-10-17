@@ -16,8 +16,9 @@ permissions:
 
 jobs:
   real-host:
+    # Host build plus the 300s integration suite must finish within ten minutes.
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

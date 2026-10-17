@@ -4,11 +4,11 @@
     {
       "id": "cliproxyapi-observer",
       "name": "Observer",
-      "description": "Local request observation, token accounting and 24h body inspection for CLIProxyAPI.",
+      "description": "Exclusive client Key management, USD quotas, fixed usage pricing and private request logs for CLIProxyAPI.",
       "author": "fengwk",
       "repository": "https://github.com/fengwk/cliproxyapi-observer",
       "license": "MIT",
-      "tags": ["observer", "statistics", "tokens", "logging"],
+      "tags": ["observer", "keys", "quota", "pricing", "logging"],
       "install": {
         "type": "github-release"
       }

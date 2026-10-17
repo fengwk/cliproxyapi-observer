@@ -36,7 +36,16 @@ type workflowDoc struct {
 		Uses        string                 `yaml:"uses"`
 		With        map[string]interface{} `yaml:"with"`
 		Permissions map[string]string      `yaml:"permissions"`
-		Steps       []workflowStep         `yaml:"steps"`
+		RunsOn      string                 `yaml:"runs-on"`
+		Timeout     int                    `yaml:"timeout-minutes"`
+		Env         map[string]string      `yaml:"env"`
+		Strategy    struct {
+			Matrix struct {
+				Include []map[string]interface{} `yaml:"include"`
+				CpaTag  []string                 `yaml:"cpa-tag"`
+			} `yaml:"matrix"`
+		} `yaml:"strategy"`
+		Steps []workflowStep `yaml:"steps"`
 	} `yaml:"jobs"`
 }
 

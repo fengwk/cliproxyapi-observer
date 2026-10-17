@@ -32,7 +32,7 @@ module github.com/fengwk/cliproxyapi-observer
 go 1.26.0
 
 require (
-	github.com/router-for-me/CLIProxyAPI/v8 v8.0.16
+	github.com/router-for-me/CLIProxyAPI/v8 v8.0.30
 )
 EOF
 printf 'license text\n' >"${repo}/LICENSE"
@@ -40,7 +40,7 @@ printf 'notice text\n' >"${repo}/NOTICE"
 printf '# readme\n' >"${repo}/README.md"
 printf 'fake dynamic library\n' >"${repo}/dist/linux/amd64/cliproxyapi-observer.so"
 
-version="0.1.0"
+version="0.6.0"
 archive="cliproxyapi-observer_${version}_linux_amd64.zip"
 
 run_package_case() {
@@ -83,9 +83,10 @@ run_package_case() {
 	if [[ "$ok" -eq 1 ]]; then
 		local meta
 		meta="$(unzip -p "$out" metadata.json)"
-		if [[ "$meta" != *"\"version\": \"${version}\""* || "$meta" != *"\"commit\": \"deadbeef\""* ]]; then
+		if [[ "$meta" != *"\"version\": \"${version}\""* || "$meta" != *"\"commit\": \"deadbeef\""* ||
+			"$meta" != *'"sdk": "github.com/router-for-me/CLIProxyAPI/v8 v8.0.30"'* ]]; then
 			ok=0
-			reason="metadata.json missing version/commit"
+			reason="metadata.json missing version/commit/pinned SDK"
 		fi
 	fi
 

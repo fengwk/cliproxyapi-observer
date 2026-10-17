@@ -1,81 +1,15 @@
-# Minimal CLIProxyAPI configuration for the cliproxyapi-observer plugin.
-# Merge these fragments into an existing CPA v8 config; do not overwrite it.
-# Replace every placeholder and never commit real client or management secrets.
-config-version: 8
-server:
-  host: "127.0.0.1"
-  port: 8317
-# The management API protects the observation routes and is required to open the
-# plugin UI. Keep remote management off unless you also terminate HTTPS.
-management:
-  allow-remote: false
-  secret-key: "replace-with-management-password"
-  disable-control-panel: true
+# 将片段合入现有 CPA >=v8.0.30（schema 6）配置，不要覆盖现有配置。
+# 管理登录使用宿主已有管理密钥；不要在示例或仓库中放真实凭据。
 plugins:
   enabled: true
   dir: "./plugins"
-  # Add this source, then install Observer from the CPA plugin store.
   store-sources:
     - "https://raw.githubusercontent.com/fengwk/cliproxyapi-observer/main/registry.json"
   configs:
     cliproxyapi-observer:
       enabled: true
-      # Relative paths resolve against the CPA working directory.
-      db: "data/cliproxyapi-observer.db"
-      # Aggregated statistics are retained longer than raw request metadata.
-      stats-retention-days: 365
-      # Request metadata and captured bodies expire independently (max 24h).
-      request-retention: "24h"
-      body-retention: "24h"
-      # Bodies are opt-in: capture stays off unless an operator enables it.
-      capture-bodies: false
-      # Body caps must be positive; an explicit 0 (or negative) is rejected.
-      max-body-bytes: 1048576
-      max-body-storage-bytes: 268435456
-      flush: "1s"
-      # Automatic storage compaction attempt interval (always active).
-      compact-interval: "15m"
-      # Minimum reclaimable free+pending page bytes, also requiring >=25% of file size.
-      compact-min-bytes: 8388608
-      # Current USD-per-million prices for exact, full model IDs. Historical
-      # request and aggregate costs are recalculated at query time.
-      # Incomplete accounting stays unpriced; model names do not imply semantics.
-      prices:
-        "claude-3-5-sonnet-20241022":
-          input: 3.0
-          output: 15.0
-          cache-read: 0.3
-          cache-creation: 3.75
-      # Optional ordered first-match rules. These prices/times are illustrative.
-      # Total input includes cached tokens; threshold is strictly >, conditions AND.
-      # Daily time is UTC; start inclusive, end exclusive, overnight supported.
-      # price-rules:
-      #   - model: "example-model"
-      #     input-tokens-gt: 256000
-      #     time-range: "22:00-06:00"
-      #     price: {input: 2, output: 8, cache-read: 0.2, cache-creation: 2}
-      #   - model: "example-model"
-      #     price: {input: 1, output: 4, cache-read: 0.1, cache-creation: 1}
-
-# Native library location (see `make build` and the release archives):
-#   <plugins.dir>/<goos>/<goarch>/cliproxyapi-observer.so
-# Install the library as cliproxyapi-observer.so / .dylib / .dll.
-#
-# Embedded plugin UI resource (served by CPA, no build step):
-#   GET /v0/resource/plugins/cliproxyapi-observer/ui
-#
-# Authenticated observation & management API. Every route requires the CPA management key.
-# CPA v8 hosts mount these plugin-owned routes under /v0/management, not /v8/management:
-#   GET /v0/management/plugins/cliproxyapi-observer/summary
-#   GET /v0/management/plugins/cliproxyapi-observer/requests
-#   GET /v0/management/plugins/cliproxyapi-observer/body?request_id=<id>
-#   GET /v0/management/plugins/cliproxyapi-observer/settings
-#   GET /v0/management/plugins/cliproxyapi-observer/health
-#   POST /v0/management/plugins/cliproxyapi-observer/validate
-# Query parameters `from`/`to` are RFC3339 and default to the last 24 hours.
-# Both summary and requests accept client_key_id (full 64-hex fingerprint),
-# auth_index (16-hex upstream credential/file index), or unknown for legacy rows.
-# Current file names/labels come from GET /v8/management/credentials; no file download.
-# Requests use offset=0..2147483647 (default 0) and limit=1..100 (default 50);
-# the response contains items, offset, limit and has_more, not a total count.
-# Captured bodies are only available while `capture-bodies: true` and unexpired.
+      # 相对路径以 CPA 工作目录解析。必须使用新库，不迁移或删除旧数据库。
+      db: "data/cliproxyapi-observer-v2.db"
+# 首次启动后：管理面板 Observer -> 管理密钥登录 -> Key 管理 -> 创建新客户端 Key。
+# 采集/保留期/定价由插件设置页管理，不是宿主 YAML 字段。
+# 独占客户端认证：CPA 内置 Key 不能复用。请勿在繁忙时热更新插件。
