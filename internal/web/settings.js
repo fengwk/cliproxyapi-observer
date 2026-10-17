@@ -1413,7 +1413,13 @@
             var snapshot = unwrapObject(result, "snapshot");
             state.snapshot = normalizeSnapshot(snapshot);
             renderSnapshot();
-            setStatus(pricingStatus, "价格目录已刷新", false);
+            setStatus(
+              pricingStatus,
+              state.snapshot.error
+                ? "刷新失败，已保留最后有效缓存：" + state.snapshot.error
+                : "价格目录已刷新",
+              Boolean(state.snapshot.error),
+            );
           })
           .catch(function (err) {
             setStatus(pricingStatus, errorMessage(err), true);

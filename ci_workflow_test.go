@@ -143,6 +143,37 @@ func TestRealHostIntegrationTimeout(t *testing.T) {
 	}
 }
 
+// Native browser acceptance must not silently become an optional skip in CI.
+// The reusable lane covers both baseline/latest and archives real host evidence.
+func TestRealHostBrowserIsRequiredAndArchived(t *testing.T) {
+	doc, _ := loadWorkflow(t, ".github/workflows/real-host.yml")
+	job := doc.Jobs["real-host"]
+	var node22 bool
+	for _, step := range job.Steps {
+		if strings.HasPrefix(step.Uses, "actions/setup-node@") && fmt.Sprint(step.With["node-version"]) == "22" {
+			node22 = true
+		}
+	}
+	if !node22 || job.Env["CHROME_BIN"] != "/usr/bin/google-chrome-stable" {
+		t.Fatal("real-host browser requires Node 22 and installed Chrome")
+	}
+	verify, ok := stepByName(job.Steps, "Verify installed Chrome")
+	if !ok || !strings.Contains(verify.Run, "test -x \"$CHROME_BIN\"") {
+		t.Fatal("real-host must verify Chrome before testing")
+	}
+	run, ok := stepByName(job.Steps, "Run real-host integration suite")
+	if !ok || run.Env["OBSERVER_BROWSER"] != "1" ||
+		!strings.Contains(run.Env["CPA_TEST_ARTIFACTS"], "runner.temp") {
+		t.Fatal("real-host CI must enable native browser and retain artifacts")
+	}
+	upload, ok := stepByName(job.Steps, "Upload native host and browser evidence")
+	if !ok || !strings.Contains(upload.If, "always()") ||
+		!strings.HasPrefix(upload.Uses, "actions/upload-artifact@") ||
+		!strings.Contains(fmt.Sprint(upload.With["path"]), "native-host-report") {
+		t.Fatal("real-host evidence must always be archived")
+	}
+}
+
 // The Makefile is the canonical local interface: Node tests include the model
 // catalog suite, browser acceptance invokes the documented Chrome runner, and
 // integration requires a real host binary with a 300s Go test timeout.

@@ -42,9 +42,10 @@ Linux 产物不适用于 musl/Alpine。手动构建需 Go 1.26+、C 编译器和
 - **设置**：采集、保留期、定价、刷新公共价格缓存、健康与物理压缩。
 
 先创建新 Key，复制仅在创建/轮换时显示一次的明文，交给推理客户端使用。
-数据库只存 SHA-256 哈希；撤销使旧密钥失效但保留历史。Observer **独占前端认证**，
-即使插件被禁用或静默停用也不能退回 CPA 内置 Key：原有 CPA `api-keys` 不能复用为
-Observer Key。管理密钥也不用于推理。
+数据库只存 SHA-256 哈希；撤销使旧密钥失效但保留历史。Observer 能力保持注册期间
+**独占前端认证**：原有 CPA `api-keys` 不能复用为 Observer Key，存储故障或插件内部
+暂停也不回退内置认证。**不要在宿主中停用或卸载插件后，仍期待 Observer 保护请求**：
+宿主移除认证能力后可恢复自身认证，未加载的插件无法拦截。管理密钥也不用于推理。
 
 模型限制默认**全部模型**；勾选后仅允许精确的请求模型 ID。选择器可搜索、多选，保留
 暂不可用的已选 ID，也允许手填完整 ID。可用模型通过管理认证
@@ -134,7 +135,7 @@ CHROME_BIN=/usr/bin/google-chrome-stable make browser
 # 可指定 BROWSER_REPORT_DIR 保存 report.json / summary.txt / screenshots
 bash scripts/build-cpa-host.sh v8.0.30 /absolute/temp/cli-proxy-api
 CPA_BINARY=/absolute/path/to/cli-proxy-api make integration
-# 原生宿主浏览器验收（支持该入口的集成候选）
+# 原生宿主浏览器验收
 OBSERVER_BROWSER=1 CHROME_BIN=/usr/bin/google-chrome-stable \
   CPA_TEST_ARTIFACTS=/absolute/temp/native-report \
   CPA_BINARY=/absolute/path/to/cli-proxy-api make integration
@@ -146,7 +147,8 @@ python3 scripts/test_auto_release.py
 python3 scripts/test_publish_release.py
 ```
 
-`integration` 必须提供真实宿主，不会缺省伪通过；CI 基线 v8.0.30 + 最新稳定 v8。
+`integration` 必须提供真实宿主，不会缺省伪通过；CI 基线 v8.0.30 + 最新稳定 v8，
+两条宿主检查均启用实际 Chrome。
 浏览器入口见 [现有说明](internal/web/browser/README.md)，使用本地假数据和实际 Chrome，
 CI 上传报告及截图。`make build` 验证本机 c-shared；发布矩阵仍构建三个平台。
 版本通过 `internal/plugin.Version` ldflags 注入，正式版本来自 tag，开发构建为
@@ -154,7 +156,7 @@ CI 上传报告及截图。`make build` 验证本机 c-shared；发布矩阵仍�
 
 现有依赖维护策略保留：仅白名单 Go/官方 Actions 纯版本升级可经完整 CI 后自动合并，
 普通功能合并不会触发自动发版；不可变发布器校验源码、三个平台归档与校验和，
-不覆盖公开 Release。**v0.6.0 必须由负责人完成最终合并审查与全量验收后才可授权发布**；
-本交付切片不执行 push/tag/release，不把分支测试当作最终候选验收。
+不覆盖公开 Release。发布前必须完成最终合并审查与全量验收并获得发布授权；
+正式 GitHub Release 包含本版不兼容变更说明。
 
 MIT；SDK 与 bbolt 归属见 [NOTICE](NOTICE)。独立实现，非 cpa-plugin-tokens-statistic 的 fork。

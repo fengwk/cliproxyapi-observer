@@ -3239,6 +3239,33 @@ async function runBrowserSuite(server, cdp) {
     settingsReady = settingsReady || ok;
   });
 
+  await step('设置: 目录刷新失败不伪报成功且保留缓存', async () => {
+    const originalSync = server.state.pricesLastSync;
+    server.state.pricesError = 'fixture catalog unavailable';
+    try {
+      await clickSettingsTestId(cdp, 'prices-refresh');
+      await cdp.waitFor(
+        '(document.querySelector(\'[id$="-pricing-status"]\')?.textContent || "").includes("fixture catalog unavailable")',
+        15000,
+        '目录失败状态'
+      );
+      const status = await cdp.evaluate(pageFn(
+        'const e=document.querySelector(\'[id$="-pricing-status"]\');' +
+        'return {text:e.textContent,error:e.getAttribute("role")==="alert"};'
+      ));
+      check('目录失败显示错误而不是已刷新', status.error && /刷新失败.*保留最后有效缓存/.test(status.text) && !/已刷新/.test(status.text), JSON.stringify(status));
+      check('目录失败不更新时间戳或清空缓存', server.state.pricesLastSync === originalSync && server.state.settings.pricing.prices.length > 0);
+    } finally {
+      server.state.pricesError = '';
+    }
+    await clickSettingsTestId(cdp, 'prices-refresh');
+    await cdp.waitFor(
+      'document.querySelector(\'[id$="-pricing-status"]\')?.textContent === "价格目录已刷新"',
+      15000,
+      '目录恢复成功状态'
+    );
+  });
+
   await step('设置: 1 GiB 总存储上限与精确边界保存', async () => {
     await gotoPage(cdp, 'settings');
     await waitVisible(cdp, '[data-testid="settings-general-save"]', 15000, '设置保存按钮');

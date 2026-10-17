@@ -258,7 +258,8 @@ dialog textarea {
 textarea {
   min-height: 80px;
 }
-.error {
+.error,
+.settings-error {
   color: var(--error);
 }
 .settings-pricing-row,

@@ -674,7 +674,7 @@ function pricingSnapshot(state) {
   return {
     prices: clone(state.settings.pricing.prices).concat(catalog),
     last_sync: state.pricesLastSync,
-    error: '',
+    error: state.pricesError || '',
     refreshing: false
   };
 }
@@ -1324,7 +1324,7 @@ function createServer(options) {
 
       if (suffix === '/prices/refresh') {
         requireMethod(req, 'POST');
-        state.pricesLastSync = iso(Date.now());
+        if (!state.pricesError) state.pricesLastSync = iso(Date.now());
         state.counters.priceRefreshes += 1;
         sendJson(res, 200, pricingSnapshot(state));
         return;

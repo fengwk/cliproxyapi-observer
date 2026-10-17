@@ -19,6 +19,8 @@ jobs:
     # Host build plus the 300s integration suite must finish within ten minutes.
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      CHROME_BIN: /usr/bin/google-chrome-stable
     steps:
       - uses: actions/checkout@v4
 
@@ -26,6 +28,16 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Verify installed Chrome
+        run: |
+          set -euo pipefail
+          test -x "$CHROME_BIN"
+          "$CHROME_BIN" --version
 
       - name: Resolve host tag
         id: tag
@@ -46,4 +58,15 @@ jobs:
       - name: Run real-host integration suite
         env:
           CPA_BINARY: ${{ runner.temp }}/cpa/cli-proxy-api
+          CPA_TEST_ARTIFACTS: ${{ runner.temp }}/native-host-report
+          OBSERVER_BROWSER: "1"
         run: make integration
+
+      - name: Upload native host and browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-host-${{ inputs.cpa-tag }}
+          path: ${{ runner.temp }}/native-host-report/
+          if-no-files-found: warn
+          retention-days: 14

@@ -264,8 +264,11 @@ Management key stays in sessionStorage once; don't require a second field or
 client Key for manager. Resource shell may be public, but all data authenticated.
 
 Plugin frontend auth extracts bearer/x-api-key/x-goog-api-key and supported
-query key/auth_token, disallows conflicting material. Always declares exclusive
-frontend auth even when disabled/quiesced to prevent unmanaged fallback.
+query key/auth_token, disallows conflicting material. While the host retains the
+registered capability, always declares exclusive frontend auth even when
+internally disabled/quiesced to prevent unmanaged fallback. Host-level disabling,
+unloading or removing the plugin removes that protection; an unloaded plugin
+cannot enforce authentication or prevent the host restoring its own providers.
 Before-interceptor validates principal metadata, makes admission once;
 after-interceptor no-op. Complete releases by RequestID. Do not mutate or
 return incoming headers/body. Correct lifecycle fence/failed-reconfigure restore.
