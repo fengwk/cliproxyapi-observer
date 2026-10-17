@@ -28,6 +28,7 @@ const (
 	routesPrefix = "/plugins/" + PluginID
 
 	routeHealth        = routesPrefix + "/health"
+	routeModelsToken   = routesPrefix + "/models/token"
 	routeKeys          = routesPrefix + "/keys"
 	routeKeyRotate     = routeKeys + "/rotate"
 	routeKeyReset      = routeKeys + "/reset"
@@ -75,6 +76,7 @@ func managementRegistration() managementRegistrationResponse {
 	return managementRegistrationResponse{
 		Routes: []pluginapi.ManagementRoute{
 			{Method: http.MethodGet, Path: routeHealth, Description: "Observer health and lifecycle counters."},
+			{Method: http.MethodPost, Path: routeModelsToken, Description: "Issue a single-use capability for GET /v1/models only."},
 			{Method: http.MethodGet, Path: routeKeys, Description: "List client keys."},
 			{Method: http.MethodPost, Path: routeKeys, Description: "Create a client key; the plaintext secret is returned once."},
 			{Method: http.MethodPut, Path: routeKeys, Description: "Replace a client key selected by the id query parameter."},
@@ -191,6 +193,14 @@ func acceptsManagementBody(req managementRequest) bool {
 
 func (m *Manager) dispatchManagementRoute(req managementRequest, route string) pluginapi.ManagementResponse {
 	switch route {
+	case "/models/token":
+		if len(req.Query) != 0 {
+			return invalidQueryResponse()
+		}
+		if req.Method != http.MethodPost {
+			return methodNotAllowedResponse()
+		}
+		return m.serveCatalogToken()
 	case "/health":
 		if len(req.Query) != 0 {
 			return invalidQueryResponse()

@@ -89,6 +89,13 @@ type Manager struct {
 	workers            sync.WaitGroup
 	scopes             sync.Map // host caller_scope -> stable principal; never contains secrets
 	billingFaults      sync.Map // key ID -> accounting callback fault; explicit recovery only
+	capsMu             sync.Mutex
+	catalogCaps        map[[32]byte]time.Time
+}
+
+type callerScope struct {
+	KeyID    string
+	Generate bool
 }
 
 func NewManager(assets AssetFunc) *Manager { return &Manager{assets: assets, now: time.Now} }
@@ -251,6 +258,9 @@ func (m *Manager) openLocked(c Config) error {
 	return nil
 }
 func (m *Manager) closeLocked() error {
+	m.capsMu.Lock()
+	m.catalogCaps = nil
+	m.capsMu.Unlock()
 	if m.cancel != nil {
 		m.cancel()
 		m.workers.Wait()
@@ -311,14 +321,21 @@ func (m *Manager) authenticate(raw []byte) ([]byte, error) {
 	if m.store == nil {
 		return okEnvelope(pluginapi.FrontendAuthResponse{})
 	}
+	if m.consumeCatalog(r, secret) {
+		return okEnvelope(pluginapi.FrontendAuthResponse{Authenticated: true, Principal: "observer-catalog"})
+	}
 	k, e := m.store.Authenticate(secret)
 	if e != nil {
 		return okEnvelope(pluginapi.FrontendAuthResponse{})
 	}
+	generate := !countTokenPath(r.Path)
 	principal := "observer:" + k.ID
+	if !generate {
+		principal = "observer-count:" + k.ID
+	}
 	// handlers.requestCallerScope hashes Gin userApiKey via the pinned SDK helper.
 	// userApiKey itself is NOT present in RequestInterceptRequest.Metadata.
-	m.scopes.Store(session.CallerScope(principal), principal)
+	m.scopes.Store(session.CallerScope(principal), callerScope{KeyID: k.ID, Generate: generate})
 	return okEnvelope(pluginapi.FrontendAuthResponse{Authenticated: true, Principal: principal})
 }
 func denied(status int) pluginapi.RequestInterceptResponse {
@@ -339,23 +356,19 @@ func (m *Manager) before(raw []byte) ([]byte, error) {
 	if !ok {
 		return okEnvelope(denied(401))
 	}
-	principal, _ := v.(string)
-	if !validPrincipal(principal) {
+	caller, ok := v.(callerScope)
+	if !ok || caller.KeyID == "" {
 		return okEnvelope(denied(401))
 	}
 	model := r.RequestedModel
 	if model == "" {
 		model = r.Model
 	}
-	id := strings.TrimPrefix(principal, "observer:")
+	id := caller.KeyID
 	e := m.store.Authorize(id, model)
-	generate := true
+	generate := caller.Generate
 	if b, ok := r.Metadata[coreexecutor.GenerateMetadataKey].(bool); ok {
-		generate = b
-	}
-	path, _ := r.Metadata[coreexecutor.RequestPathMetadataKey].(string)
-	if strings.Contains(strings.ToLower(path), "counttokens") || strings.Contains(path, "count_tokens") {
-		generate = false
+		generate = generate && b
 	}
 	if e == nil && generate {
 		if _, fault := m.billingFaults.Load(id); fault {

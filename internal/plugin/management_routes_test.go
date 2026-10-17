@@ -31,6 +31,7 @@ func dispatchForTest(t *testing.T, m *Manager, method, path string, query url.Va
 func TestManagementRegistrationHasOnlyStaticExactRoutes(t *testing.T) {
 	reg := managementRegistration()
 	want := map[string]bool{
+		"POST " + routeModelsToken:   true,
 		"GET " + routeHealth:         true,
 		"GET " + routeKeys:           true,
 		"POST " + routeKeys:          true,
