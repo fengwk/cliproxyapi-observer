@@ -269,15 +269,28 @@ func TestFilteredLogsCaptureRedactionAndBounds(t *testing.T) {
 	}
 }
 
-// Reject malformed/legacy query inputs, unknown JSON and unauthenticated detail.
+// Each intentional unauthenticated probe has its own host so CPA's management
+// IP-ban threshold cannot contaminate subsequent valid-auth contract checks.
+func TestManagementRoutesRequireAuthentication(t *testing.T) {
+	for _, path := range []string{"/keys", "/requests", "/summary", "/settings", "/health", "/requests/detail?id=nonexistent", "/models/token"} {
+		t.Run(path, func(t *testing.T) {
+			h := newHarness(t)
+			method := "GET"
+			if path == "/models/token" {
+				method = "POST"
+			}
+			status, body, err := h.rawRequest(method, "/v0/management/plugins/"+pluginID+path, nil, nil)
+			if err != nil || status != 401 {
+				t.Fatalf("management auth %s status=%d err=%v body=%s", path, status, err, body)
+			}
+		})
+	}
+}
+
+// Reject malformed/legacy query inputs and unknown JSON with valid management
+// credentials; this host has never received an intentional bad-auth request.
 func TestManagementStrictInputs(t *testing.T) {
 	h := newHarness(t)
-	for _, path := range []string{"/keys", "/requests", "/summary", "/settings", "/health", "/requests/detail?id=nonexistent"} {
-		status, _, err := h.rawRequest("GET", "/v0/management/plugins/"+pluginID+path, nil, nil)
-		if err != nil || (status != 401 && status != 403) {
-			t.Fatalf("management auth %s status %d err %v", path, status, err)
-		}
-	}
 	for _, query := range []string{"limit=1", "offset=0", "unknown=x", "page=0", "page_size=101", "status=bogus", "from=bad", "from=2026-01-02T00:00:00Z&to=2026-01-01T00:00:00Z"} {
 		for _, route := range []string{"/requests?", "/summary?"} {
 			raw := h.api(t, "GET", route+query, nil, 400, nil)

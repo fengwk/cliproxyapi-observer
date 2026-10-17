@@ -246,7 +246,7 @@ func TestCrashRecoveryIsKeyScopedAndRequiresAcknowledgment(t *testing.T) {
 	// acknowledgment; the binding behavior is the 400 rejection. Assert the
 	// sanitized error object without pinning an unpublished code string.
 	var rejected recoveryErrorResponse
-	h.api(t, http.MethodPost, recoverPath, map[string]any{"acknowledge": false}, http.StatusBadRequest, &rejected)
+	restarted.api(t, http.MethodPost, recoverPath, map[string]any{"acknowledge": false}, http.StatusBadRequest, &rejected)
 	if rejected.Error.Code == "" || rejected.Error.Message == "" {
 		t.Errorf("recovery rejection = %+v, want a sanitized error code and message", rejected)
 	}
@@ -258,7 +258,7 @@ func TestCrashRecoveryIsKeyScopedAndRequiresAcknowledgment(t *testing.T) {
 	beforeHistory := recoveryTakeHistory(t, restarted)
 
 	var recovered recoveryKeyState
-	h.api(t, http.MethodPost, recoverPath, map[string]any{"acknowledge": true}, http.StatusOK, &recovered)
+	restarted.api(t, http.MethodPost, recoverPath, map[string]any{"acknowledge": true}, http.StatusOK, &recovered)
 	if recovered.ID != created.Key.ID {
 		t.Fatalf("recovered key id = %q, want %q", recovered.ID, created.Key.ID)
 	}
