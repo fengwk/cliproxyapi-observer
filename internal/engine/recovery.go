@@ -76,28 +76,64 @@ func (s *Store) RecoverKey(id string, acknowledge bool) (Key, error) {
 	if s.blocked[id] {
 		return Key{}, ErrAccounting
 	}
-	if s.writeFault != nil {
-		if e := s.writeFault(); e != nil {
-			return Key{}, ErrAccounting
-		}
+	path, e := interruptionPath(s.path, id)
+	if e != nil {
+		return Key{}, e
 	}
-	k, e := s.mutate(id, func(k *storedKey) error {
-		if (s.unknown[id] || k.BlockedReason != "") && !acknowledge {
+	var recovered Key
+	e = withInterruptionLock(path, func() error {
+		present, err := markerPresent(s.path, id)
+		if err != nil {
+			s.unknown[id] = true
+			s.lastError = interruptionIOReason
 			return ErrAccounting
 		}
-		k.BlockedReason = ""
+		if present {
+			s.unknown[id] = true
+			s.lastError = interruptionReason
+		}
+		if s.writeFault != nil {
+			if err = s.writeFault(); err != nil {
+				return ErrAccounting
+			}
+		}
+		// Persist a DB fence BEFORE unlink. If unlink or directory fsync fails, the
+		// fence survives both this process and restart even if the file is gone.
+		if present {
+			if !acknowledge {
+				return ErrAccounting
+			}
+			if _, err = s.mutate(id, func(k *storedKey) error { k.BlockedReason = unknownReason; return nil }); err != nil {
+				return err
+			}
+			if err = removeInterruption(path); err != nil {
+				s.lastError = interruptionIOReason
+				return ErrAccounting
+			}
+		}
+		recovered, err = s.mutate(id, func(k *storedKey) error {
+			if (s.unknown[id] || k.BlockedReason != "") && !acknowledge {
+				return ErrAccounting
+			}
+			k.BlockedReason = ""
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		delete(s.unknown, id)
+		if len(s.unknown) == 0 && len(s.pending) == 0 {
+			s.lastError = ""
+		}
+		recovered.BlockedReason = ""
 		return nil
 	})
 	if e != nil {
 		return Key{}, e
 	}
-	delete(s.unknown, id)
-	if len(s.unknown) == 0 && len(s.pending) == 0 {
-		s.lastError = ""
-	}
-	k.BlockedReason = ""
-	return s.decorate(k), nil
+	return s.decorate(recovered), nil
 }
+
 func (s *Store) pruneCompletedLocked() {
 	cutoff := s.now().Add(-completedTTL)
 	for id, a := range s.completed {

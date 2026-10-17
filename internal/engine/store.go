@@ -130,7 +130,7 @@ func Open(o Options) (*Store, error) {
 			return e
 		}
 		for _, k := range keys {
-			if unclean {
+			if s.observeInterruption(k.ID) || unclean {
 				k.BlockedReason = unknownReason
 				if e := put(kb, k.ID, k); e != nil {
 					return e
@@ -233,6 +233,11 @@ func (s *Store) UpdateSettings(v Settings) (Settings, error) {
 func (s *Store) Health() Health {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.closed {
+		s.db.View(func(tx *bolt.Tx) error {
+			return tx.Bucket([]byte("keys")).ForEach(func(id, _ []byte) error { s.observeInterruption(string(id)); return nil })
+		})
+	}
 	h := Health{DroppedCaptures: s.dropped.Load(), PendingUsage: len(s.pending), ActiveRequests: len(s.active), LastError: s.lastError}
 	if st, e := os.Stat(s.path); e == nil {
 		h.DatabaseBytes = st.Size()

@@ -73,6 +73,7 @@ func roll(k *Key, t time.Time) {
 	}
 }
 func (s *Store) decorate(k Key) Key {
+	s.observeInterruption(k.ID)
 	// Effective display only: leave anchors untouched until actual admission.
 	now := s.now()
 	if !now.Before(k.Resets.FiveHour) {
@@ -294,6 +295,9 @@ func (s *Store) Admit(a Admission) error {
 	}
 	if a.RequestID == "" {
 		return ErrInvalid
+	}
+	if s.observeInterruption(a.KeyID) {
+		return ErrAccounting
 	}
 	if old, ok := s.active[a.RequestID]; ok {
 		if old.KeyID != a.KeyID || old.Model != a.Model || old.TraceID != a.TraceID {

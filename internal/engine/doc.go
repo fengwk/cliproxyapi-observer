@@ -14,8 +14,27 @@
 // Open marks the session running durably. An unclean shutdown conservatively
 // fences existing Keys, but never future new Keys. Close always releases the
 // handle, draining capture and retrying accounting; unsettled/active principals
-// become durable unknown-accounting fences. Hosts must stop callbacks before
-// closing. Closed APIs return ErrClosed even if Close itself reported debt.
+// become durable unknown-accounting fences. Closed APIs return ErrClosed even
+// if Close itself reported debt. Hosts should stop/drain callbacks before close;
+// a callback delivered after detachment, or an unexpected callback panic, must
+// call RecordInterruption. Ordinary retryable writes stay in the pending queue.
+//
+// RecordInterruption uses a constant, atomic 0600 marker at
+// <db>.interrupted/<64-lowercase-hex-Key-ID>, without opening bbolt. A stable
+// <db>.interrupted.lock flock serializes writers and recovery across independent
+// native runtimes on Linux/macOS. Normal Open/accounting/close creates no sidecar.
+// Open, admission and Key/health reads observe newly published markers. Close
+// never removes them. Recovery requires acknowledgement and no retained target
+// debt; it persists a DB fence before removing/fsyncing the marker, then clears
+// the fence durably, all under that file lock. A removal/sync failure thus stays
+// paused across restart. Marker failures expose only sanitized health text.
+//
+// Markers only pause: they cannot reconstruct missing usage or a known cost.
+// CPA's non-durable queue may never deliver some source events, so this package
+// makes no exactly-once source delivery claim. If all storage is unwritable or
+// cannot sync, marker persistence cannot be guaranteed: RecordInterruption
+// returns an error which the caller must expose. The running flag still protects
+// an unclean session, but cannot substitute for delivery or functioning storage.
 //
 // Completed admission IDs expire after 24 hours, with a hard 4096-entry cap.
 // Execution replay protection covers 7 days by the immutable RequestedAt time.
