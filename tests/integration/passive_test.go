@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -81,7 +82,7 @@ func TestCountTokensDoesNotAdmitOrCharge(t *testing.T) {
 	}
 	h.await(t, "generation recorded without token-count usage", func() bool { return len(h.page(t, "page_size=100").Items) == 1 && h.keys(t)[0].Active == 0 })
 	spec.AllowedModels = []string{"other-model"}
-	h.api(t, "PUT", "/keys/"+created.Key.ID, spec, 200, nil)
+	h.api(t, "PUT", "/keys?id="+url.QueryEscape(created.Key.ID), spec, 200, nil)
 	status, _, err = h.rawRequest("POST", "/v1/messages/count_tokens", body, map[string]string{"x-api-key": created.Secret})
 	if err != nil || status != 403 {
 		t.Fatalf("count bypassed model authorization: %d %v", status, err)
@@ -93,7 +94,7 @@ func TestCountTokensDoesNotAdmitOrCharge(t *testing.T) {
 			past := time.Now().Add(-time.Hour)
 			spec.ExpiresAt = &past
 		}
-		h.api(t, "PUT", "/keys/"+created.Key.ID, spec, 200, nil)
+		h.api(t, "PUT", "/keys?id="+url.QueryEscape(created.Key.ID), spec, 200, nil)
 		status, _, err = h.rawRequest("POST", "/v1/messages/count_tokens", body, map[string]string{"x-api-key": created.Secret})
 		if err != nil || (status != 401 && status != 403) {
 			t.Fatalf("count bypassed disabled/expiry authorization: %d %v", status, err)

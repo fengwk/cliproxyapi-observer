@@ -230,7 +230,7 @@ func (m *mockUpstream) validateChat(r *http.Request, body []byte) {
 		m.violationf("malformed chat body: %v", err)
 		return
 	}
-	if payload.Model != upstreamModel {
+	if payload.Model != upstreamModel && payload.Model != upstreamModelTwo {
 		m.violationf("model = %q, want %q", payload.Model, upstreamModel)
 	}
 	m.mu.Lock()

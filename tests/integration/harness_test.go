@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -35,8 +36,10 @@ const (
 
 	// modelName is the client-facing alias; upstreamModel is what the upstream
 	// sees. Keeping them different proves full model identity is preserved.
-	modelName     = "observer-mock-model"
-	upstreamModel = "observer-upstream-model"
+	modelName        = "observer-mock-model"
+	upstreamModel    = "observer-upstream-model"
+	modelNameTwo     = "observer-mock-model-two"
+	upstreamModelTwo = "observer-upstream-model-two"
 
 	// compatProviderName is the OpenAI-compatibility provider identifier. It
 	// contains "openai" so the host applies OpenAI subset token semantics.
@@ -358,13 +361,15 @@ api-keys:
     models:
       - name: %q
         alias: %q
+      - name: %q
+        alias: %q
 plugins:
   enabled: %t
   dir: %q
   configs:
     %s:
       enabled: true
-`, port, mgmtKey, clientKey, clientKeyTwo, authDir, compatProviderName, mockURL+"/v1", upstreamKey, extraKey, upstreamModel, modelName, !opts.PluginDisabled, pluginsDir, pluginID))
+`, port, mgmtKey, clientKey, clientKeyTwo, authDir, compatProviderName, mockURL+"/v1", upstreamKey, extraKey, upstreamModel, modelName, upstreamModelTwo, modelNameTwo, !opts.PluginDisabled, pluginsDir, pluginID))
 }
 
 // hostEnv builds a minimal environment that cannot inherit production CPA
@@ -479,7 +484,7 @@ func (h *harness) Stop() {
 	h.mu.Unlock()
 
 	if h.cmd != nil && h.cmd.Process != nil {
-		_ = h.cmd.Process.Signal(os.Interrupt)
+		_ = h.cmd.Process.Signal(syscall.SIGTERM)
 		select {
 		case <-h.done:
 		case <-time.After(10 * time.Second):
@@ -489,6 +494,19 @@ func (h *harness) Stop() {
 			case <-time.After(5 * time.Second):
 			}
 		}
+	}
+	if root := os.Getenv("CPA_TEST_ARTIFACTS"); root != "" {
+		logDir := filepath.Join(root, fmt.Sprintf("%s-%d", strings.ReplaceAll(h.t.Name(), "/", "_"), h.port))
+		if err := os.MkdirAll(logDir, 0700); err != nil {
+			h.t.Errorf("create host artifacts: %v", err)
+			return
+		}
+		for name, content := range map[string]string{"stdout.log": h.stdout.String(), "stderr.log": h.stderr.String()} {
+			if err := os.WriteFile(filepath.Join(logDir, name), []byte(content), 0600); err != nil {
+				h.t.Errorf("write host artifacts: %v", err)
+			}
+		}
+		h.t.Logf("host artifacts: %s", logDir)
 	}
 }
 
