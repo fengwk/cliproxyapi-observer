@@ -15,9 +15,10 @@ type Rates struct {
 	Reasoning  *int64 `json:"reasoning,omitempty"`
 }
 type Price struct {
-	Model  string `json:"model"`
-	Rates  Rates  `json:"rates"`
-	Source string `json:"source"`
+	Model    string `json:"model"`
+	Provider string `json:"provider,omitempty"` // snapshot only; manual overrides are model-wide
+	Rates    Rates  `json:"rates"`
+	Source   string `json:"source"`
 }
 type Rule struct {
 	ID            string `json:"id"`
@@ -102,7 +103,7 @@ func Validate(c Config) error {
 	}
 	models, ids := map[string]bool{}, map[string]bool{}
 	for _, p := range c.Prices {
-		if !validIdentity(p.Model) || models[p.Model] || !validRates(p.Rates) {
+		if !validIdentity(p.Model) || models[p.Model] || !validRates(p.Rates) || p.Provider != "" || (p.Source != "" && p.Source != "manual") {
 			return errInvalid
 		}
 		models[p.Model] = true

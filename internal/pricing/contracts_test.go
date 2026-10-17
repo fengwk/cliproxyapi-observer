@@ -60,11 +60,11 @@ func TestPublicDefaultsAndCatalogNumbers(t *testing.T) {
 	}
 	// Equal cross-provider rates are safe, unlike differently priced matches.
 	entries = []entry{{Model: "m", Provider: "a", Rates: Rates{Input: 1}}, {Model: "m", Provider: "b", Rates: Rates{Input: 1}}}
-	if r, ok := lookup(entries, "m", ""); !ok || r.Input != 1 {
+	if r, ok := lookup(indexCatalog(entries), "m", ""); !ok || r.Input != 1 {
 		t.Fatal(r, ok)
 	}
 	entries[1].Rates.Reasoning = ptr(0)
-	if _, ok := lookup(entries, "m", ""); ok {
+	if _, ok := lookup(indexCatalog(entries), "m", ""); ok {
 		t.Fatal("reasoning ambiguity")
 	}
 }

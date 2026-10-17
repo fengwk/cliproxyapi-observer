@@ -14,7 +14,7 @@ func (s *Service) effective(model, provider string) Quote {
 		}
 	}
 	if s.config.Auto {
-		if r, ok := lookup(s.entries, model, provider); ok {
+		if r, ok := lookup(s.catalog, model, provider); ok {
 			return Quote{Source: "auto", Rates: cloneRates(r)}
 		}
 	}
@@ -29,10 +29,15 @@ func (s *Service) Quote(model, provider string, t Tokens, at time.Time) (Quote, 
 	if t.Reasoning > t.Output {
 		return Quote{}, errInvalid
 	}
+	// Context thresholds include the whole prompt, not just billable uncached
+	// input. big.Int also handles legitimate sums exceeding signed int64.
+	prompt := new(big.Int).SetInt64(t.Input)
+	prompt.Add(prompt, big.NewInt(t.CacheRead))
+	prompt.Add(prompt, big.NewInt(t.CacheWrite))
 	s.mu.Lock()
 	q := s.effective(model, provider)
 	for _, r := range s.config.Rules {
-		if r.Model != model || (r.InputTokensGT != nil && t.Input <= *r.InputTokensGT) {
+		if r.Model != model || (r.InputTokensGT != nil && prompt.Cmp(big.NewInt(*r.InputTokensGT)) <= 0) {
 			continue
 		}
 		if r.TimeRange != "" {
@@ -73,7 +78,7 @@ func (s *Service) Snapshot() Snapshot {
 	seen := map[string]bool{}
 	for k := range s.observed {
 		q := s.effective(k.Model, k.Provider)
-		out.Prices = append(out.Prices, Price{Model: k.Model, Rates: q.Rates, Source: q.Source})
+		out.Prices = append(out.Prices, Price{Model: k.Model, Provider: k.Provider, Rates: q.Rates, Source: q.Source})
 		seen[k.Model] = true
 	}
 	for _, p := range s.config.Prices {
@@ -84,6 +89,9 @@ func (s *Service) Snapshot() Snapshot {
 	sort.Slice(out.Prices, func(i, j int) bool {
 		if out.Prices[i].Model != out.Prices[j].Model {
 			return out.Prices[i].Model < out.Prices[j].Model
+		}
+		if out.Prices[i].Provider != out.Prices[j].Provider {
+			return out.Prices[i].Provider < out.Prices[j].Provider
 		}
 		if out.Prices[i].Source != out.Prices[j].Source {
 			return out.Prices[i].Source < out.Prices[j].Source

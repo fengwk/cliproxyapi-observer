@@ -121,20 +121,30 @@ func ratesEqual(a, b Rates) bool {
 	return a.Input == b.Input && a.Output == b.Output && a.CacheRead == b.CacheRead && a.CacheWrite == b.CacheWrite &&
 		((a.Reasoning == nil && b.Reasoning == nil) || (a.Reasoning != nil && b.Reasoning != nil && *a.Reasoning == *b.Reasoning))
 }
-func unique(entries []entry, model, provider string) (Rates, bool) {
-	var r Rates
-	found := false
+
+type catalogMatch struct {
+	rates     Rates
+	ambiguous bool
+}
+type catalogIndex map[identity]catalogMatch
+
+// Build once per catalog replacement. The empty-provider key summarizes all
+// providers, retaining ambiguity instead of picking a map iteration winner.
+func indexCatalog(entries []entry) catalogIndex {
+	index := make(catalogIndex, len(entries)*2)
 	for _, e := range entries {
-		if e.Model != model || (provider != "" && e.Provider != provider) {
-			continue
+		for _, provider := range []string{e.Provider, ""} {
+			k := identity{Model: e.Model, Provider: provider}
+			old, found := index[k]
+			if !found {
+				index[k] = catalogMatch{rates: cloneRates(e.Rates)}
+			} else if !ratesEqual(old.rates, e.Rates) {
+				old.ambiguous = true
+				index[k] = old
+			}
 		}
-		if found && !ratesEqual(r, e.Rates) {
-			return Rates{}, false
-		}
-		r = e.Rates
-		found = true
 	}
-	return r, found
+	return index
 }
 func normalize(model string) string {
 	// Only explicit transport decoration is removed; dates/version suffixes
@@ -152,20 +162,16 @@ func normalize(model string) string {
 	}
 	return model
 }
-func lookup(entries []entry, model, provider string) (Rates, bool) {
+func lookup(index catalogIndex, model, provider string) (Rates, bool) {
 	// A provider-specific exact identity is authoritative even when normalized
 	// identities exist elsewhere. Ambiguous exact matches must not fall back.
 	for _, candidate := range []string{model, normalize(model)} {
 		for _, p := range []string{provider, ""} {
-			has := false
-			for _, e := range entries {
-				if e.Model == candidate && (p == "" || p == e.Provider) {
-					has = true
-					break
+			if match, found := index[identity{Model: candidate, Provider: p}]; found {
+				if match.ambiguous {
+					return Rates{}, false
 				}
-			}
-			if has {
-				return unique(entries, candidate, p)
+				return match.rates, true
 			}
 		}
 	}
@@ -222,7 +228,7 @@ func (s *Service) loadCache() {
 		}
 		seen[k] = true
 	}
-	s.entries = d.Entries
+	s.catalog = indexCatalog(d.Entries)
 	s.lastSync = d.LastSync
 }
 func (s *Service) saveCache(d diskCache) error {

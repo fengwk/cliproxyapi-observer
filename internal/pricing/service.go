@@ -20,7 +20,7 @@ type Service struct {
 	config      Config
 	client      *http.Client
 	cachePath   string
-	entries     []entry
+	catalog     catalogIndex
 	observed    map[identity]struct{}
 	lastSync    time.Time
 	lastError   string
@@ -110,6 +110,12 @@ func (s *Service) Refresh(ctx context.Context) error {
 	s.lastAttempt = time.Now()
 	s.mu.Unlock()
 	entries, err := s.fetch(ctx)
+	// Expensive construction is outside the request-path mutex. Publish the
+	// immutable index atomically so every quote sees one complete generation.
+	var index catalogIndex
+	if entries != nil {
+		index = indexCatalog(entries)
+	}
 	now := time.Now().UTC()
 	if err == nil {
 		if e := s.saveCache(diskCache{LastSync: now, Entries: entries}); e != nil {
@@ -118,7 +124,7 @@ func (s *Service) Refresh(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	if entries != nil {
-		s.entries = entries
+		s.catalog = index
 		s.lastSync = now
 	}
 	s.lastError = ""

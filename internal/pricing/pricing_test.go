@@ -111,7 +111,7 @@ func TestRulesAndValidation(t *testing.T) {
 func TestDeepCopyAndZero(t *testing.T) {
 	c := Config{Auto: true, Prices: []Price{{Model: "m", Rates: Rates{Reasoning: ptr(0)}}}, Rules: []Rule{{ID: "r", Model: "other", InputTokensGT: ptr(1)}}}
 	s := service(t, c)
-	s.entries = []entry{{Model: "m", Provider: "p", Rates: Rates{Input: 100}}}
+	s.catalog = indexCatalog([]entry{{Model: "m", Provider: "p", Rates: Rates{Input: 100}}})
 	*c.Prices[0].Rates.Reasoning = 99
 	c.Prices[0].Model = "oops"
 	*c.Rules[0].InputTokensGT = 99
@@ -268,7 +268,7 @@ func TestPersistenceAndFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	bad, _ := NewService(DefaultConfig(), path, client)
-	if bad.Snapshot().Error == "" || len(bad.entries) != 0 {
+	if bad.Snapshot().Error == "" || len(bad.catalog) != 0 {
 		t.Fatal("corrupt cache accepted")
 	}
 	// A non-directory parent deterministically fails even under root.
