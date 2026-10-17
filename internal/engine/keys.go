@@ -73,14 +73,27 @@ func roll(k *Key, t time.Time) {
 	}
 }
 func (s *Store) decorate(k Key) Key {
+	// Effective display only: leave anchors untouched until actual admission.
+	now := s.now()
+	if !now.Before(k.Resets.FiveHour) {
+		k.Used.FiveHour = 0
+	}
+	if !now.Before(k.Resets.Week) {
+		k.Used.Week = 0
+	}
+	if !now.Before(k.Resets.Month) {
+		k.Used.Month = 0
+	}
 	k.Active = 0
 	for _, a := range s.active {
 		if a.KeyID == k.ID {
 			k.Active++
 		}
 	}
-	if s.fatal || s.blocked[k.ID] {
-		k.BlockedReason = "accounting unavailable"
+	if s.unknown[k.ID] {
+		k.BlockedReason = unknownReason
+	} else if s.blocked[k.ID] {
+		k.BlockedReason = "pending accounting"
 	}
 	return k
 }
@@ -288,13 +301,14 @@ func (s *Store) Admit(a Admission) error {
 		}
 		return nil
 	}
+	s.pruneCompletedLocked()
 	if old, ok := s.completed[a.RequestID]; ok {
 		if old.KeyID != a.KeyID || old.Model != a.Model || old.TraceID != a.TraceID {
 			return ErrInvalid
 		}
 		return nil
 	}
-	if s.fatal || s.blocked[a.KeyID] {
+	if s.unknown[a.KeyID] || s.blocked[a.KeyID] {
 		return ErrAccounting
 	}
 	e := s.db.Update(func(tx *bolt.Tx) error {
@@ -316,7 +330,7 @@ func (s *Store) Admit(a Admission) error {
 		if k.MaxConcurrent > 0 && s.decorate(k.Key).Active >= k.MaxConcurrent {
 			return ErrConcurrency
 		}
-		if e := correlate(tx, a.KeyID, a.TraceID, a.RequestID); e != nil {
+		if e := correlate(tx, a.KeyID, a.TraceID, a.RequestID, s.now().UTC()); e != nil {
 			return e
 		}
 		return put(b, k.ID, k)
@@ -334,7 +348,9 @@ func (s *Store) Complete(id string, _ time.Time) error {
 	}
 	if a, ok := s.active[id]; ok {
 		delete(s.active, id)
+		a.At = s.now().UTC()
 		s.completed[id] = a
+		s.pruneCompletedLocked()
 	}
 	return nil
 }

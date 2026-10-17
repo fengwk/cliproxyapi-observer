@@ -32,6 +32,8 @@ type recordData struct {
 	CaptureEnabled bool
 }
 type Store struct {
+	cutoff     time.Time
+	usageFault func(pending) error
 	writeFault func() error // fault injection for transaction failure tests
 
 	mu        sync.Mutex
@@ -45,7 +47,7 @@ type Store struct {
 	completed map[string]Admission
 	pending   map[string]pending
 	blocked   map[string]bool
-	fatal     bool
+	unknown   map[string]bool
 	lastError string
 	dropped   atomic.Uint64
 	captures  chan CaptureInput
@@ -56,6 +58,9 @@ type Store struct {
 
 func DefaultSettings() Settings {
 	return Settings{MaxBodyBytes: 1 << 20, MaxBodyStorageBytes: 256 << 20, RawRetentionHours: 24, DailyRetentionDays: 365, Pricing: pricing.DefaultConfig()}
+}
+func validSettings(v Settings) bool {
+	return v.MaxBodyBytes >= 1 && v.MaxBodyBytes <= maxCaptureBody && v.MaxBodyStorageBytes >= 1 && v.MaxBodyStorageBytes <= maxCaptureStorage && v.RawRetentionHours >= 1 && v.RawRetentionHours <= 168 && v.DailyRetentionDays >= 1 && v.DailyRetentionDays <= 3650
 }
 func Open(o Options) (*Store, error) {
 	if o.Pricer == nil || o.DataPath == "" {
@@ -97,7 +102,7 @@ func Open(o Options) (*Store, error) {
 	if e != nil {
 		return nil, e
 	}
-	s := &Store{db: db, path: o.DataPath, now: o.Now, pricer: o.Pricer, settings: DefaultSettings(), active: map[string]Admission{}, completed: map[string]Admission{}, pending: map[string]pending{}, blocked: map[string]bool{}, captures: make(chan CaptureInput, 64)}
+	s := &Store{db: db, path: o.DataPath, now: o.Now, pricer: o.Pricer, settings: DefaultSettings(), active: map[string]Admission{}, completed: map[string]Admission{}, pending: map[string]pending{}, blocked: map[string]bool{}, unknown: map[string]bool{}, captures: make(chan CaptureInput, 64)}
 	s.closeDone = make(chan struct{})
 	e = db.Update(func(tx *bolt.Tx) error {
 		for _, n := range buckets {
@@ -111,15 +116,32 @@ func Open(o Options) (*Store, error) {
 				return e
 			}
 		}
-		// An unclean session cannot prove all host executions have settled. Fence
-		// every existing key permanently; neither reset nor rotation removes debt.
-		if string(m.Get([]byte("running"))) == "1" {
-			s.fatal = true
-			s.lastError = "unclean shutdown: accounting reconciliation required"
+		unclean := string(m.Get([]byte("running"))) == "1"
+		var keys []storedKey
+		kb := tx.Bucket([]byte("keys"))
+		if e := kb.ForEach(func(_, v []byte) error {
+			var k storedKey
+			if e := decode(v, &k); e != nil {
+				return e
+			}
+			keys = append(keys, k)
+			return nil
+		}); e != nil {
+			return e
 		}
-		if string(m.Get([]byte("fence"))) == "1" {
-			s.fatal = true
-			s.lastError = "irreversible accounting failure"
+		for _, k := range keys {
+			if unclean {
+				k.BlockedReason = unknownReason
+				if e := put(kb, k.ID, k); e != nil {
+					return e
+				}
+			}
+			if k.BlockedReason != "" {
+				s.unknown[k.ID] = true
+			}
+		}
+		if !validSettings(s.settings) {
+			return ErrInvalid
 		}
 		if e := m.Put([]byte("schema"), []byte("2")); e != nil {
 			return e
@@ -134,12 +156,15 @@ func Open(o Options) (*Store, error) {
 		db.Close()
 		return nil, e
 	}
+	if len(s.unknown) > 0 {
+		s.lastError = unknownReason
+	}
 	s.worker.Add(1)
 	go s.captureWorker()
 	return s, nil
 }
 func put(b *bolt.Bucket, k string, v any) error {
-	p, e := json.Marshal(v)
+	p, e := encode(v)
 	if e != nil {
 		return e
 	}
@@ -150,7 +175,7 @@ func get(b *bolt.Bucket, k string, v any) error {
 	if p == nil {
 		return ErrNotFound
 	}
-	return json.Unmarshal(p, v)
+	return decode(p, v)
 }
 func (s *Store) check() error {
 	if s.closed {
@@ -175,7 +200,7 @@ func (s *Store) UpdateSettings(v Settings) (Settings, error) {
 	if e := s.check(); e != nil {
 		return Settings{}, e
 	}
-	if v.MaxBodyBytes < 1 || int64(v.MaxBodyBytes) > maxSafe || v.MaxBodyStorageBytes < 1 || v.MaxBodyStorageBytes > maxSafe || v.RawRetentionHours < 1 || v.RawRetentionHours > 168 || v.DailyRetentionDays < 1 || v.DailyRetentionDays > 3650 {
+	if !validSettings(v) {
 		return Settings{}, ErrInvalid
 	}
 	if e := pricing.Validate(v.Pricing); e != nil {
@@ -197,7 +222,7 @@ func (s *Store) UpdateSettings(v Settings) (Settings, error) {
 		return put(tx.Bucket([]byte("meta")), "settings", v)
 	}); e != nil {
 		if rollback := s.pricer.Configure(s.settings.Pricing); rollback != nil {
-			s.fenceLocked()
+			s.fenceAllLocked()
 		}
 		return Settings{}, e
 	}
@@ -229,11 +254,30 @@ func (s *Store) Close() (result error) {
 	defer s.mu.Unlock()
 	defer func() { s.closeErr = result; close(s.closeDone) }()
 	e := s.retryLocked()
-	if len(s.active) > 0 || len(s.pending) > 0 || s.fatal {
-		s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket([]byte("meta")).Put([]byte("fence"), []byte("1")) })
+	for _, a := range s.active {
+		s.unknown[a.KeyID] = true
+	}
+	for _, p := range s.pending {
+		s.unknown[p.Record.KeyID] = true
+	}
+	durable := s.db.Update(func(tx *bolt.Tx) error {
+		for id := range s.unknown {
+			var k storedKey
+			b := tx.Bucket([]byte("keys"))
+			if err := get(b, id, &k); err != nil {
+				return err
+			}
+			k.BlockedReason = unknownReason
+			if err := put(b, id, k); err != nil {
+				return err
+			}
+		}
+		return tx.Bucket([]byte("meta")).Put([]byte("running"), []byte("0"))
+	})
+	if durable != nil {
+		e = durable
+	} else if len(s.active) > 0 || len(s.pending) > 0 {
 		e = ErrAccounting
-	} else if e == nil {
-		e = s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket([]byte("meta")).Put([]byte("running"), []byte("0")) })
 	}
 	ce := s.db.Close()
 	if e != nil {

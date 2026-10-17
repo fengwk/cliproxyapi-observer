@@ -43,21 +43,32 @@ func captureID(key, trace string) string {
 	return string(v)
 }
 
-// correlate never treats an execution ID as an admission identity.
-func correlate(tx *bolt.Tx, key, trace, request string) error {
+type correlation struct {
+	RequestID string
+	At        time.Time
+}
+
+// Collisions remain fenced for a complete retention interval after last use.
+func correlate(tx *bolt.Tx, key, trace, request string, at time.Time) error {
 	if trace == "" || request == "" {
 		return nil
 	}
 	b := tx.Bucket([]byte("correlations"))
 	id := captureID(key, trace)
-	old := b.Get([]byte(id))
-	if old != nil && string(old) != request {
-		if e := tx.Bucket([]byte("captures")).Delete([]byte(id)); e != nil {
+	c := correlation{RequestID: request, At: at}
+	if old := b.Get([]byte(id)); old != nil {
+		var prior correlation
+		if e := decode(old, &prior); e != nil {
 			return e
 		}
-		return b.Put([]byte(id), []byte{0})
+		if prior.RequestID != request {
+			if e := tx.Bucket([]byte("captures")).Delete([]byte(id)); e != nil {
+				return e
+			}
+			c.RequestID = ""
+		}
 	}
-	return b.Put([]byte(id), []byte(request))
+	return put(b, id, c)
 }
 func secretField(k string) bool {
 	k = strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(k, "-", ""), "_", ""))
@@ -123,12 +134,16 @@ func (s *Store) Capture(v CaptureInput) bool {
 	if s.closed || !s.settings.CaptureEnabled || v.KeyID == "" || v.TraceID == "" || v.RequestID == "" {
 		return false
 	}
-	if len(v.Body) > s.settings.MaxBodyBytes {
-		s.dropped.Add(1)
-		return false
+	truncated := len(v.Body) > s.settings.MaxBodyBytes
+	if truncated {
+		v.Body = nil
+	} else {
+		v.Body = bytes.Clone(v.Body)
 	}
-	v.Body = bytes.Clone(v.Body)
 	headers := http.Header{}
+	if truncated {
+		headers.Set("X-Observer-Truncated", "1")
+	}
 	size := 0
 	for _, k := range []string{"Content-Type", "Accept", "User-Agent"} {
 		for _, value := range v.Headers.Values(k) {
@@ -164,20 +179,29 @@ func (s *Store) captureWorker() {
 				c.Headers[k] = a
 			}
 		}
+		if v.Headers.Get("X-Observer-Truncated") == "1" {
+			c.Status = "truncated"
+		}
 		var body any
 		dec := json.NewDecoder(bytes.NewReader(v.Body))
 		dec.UseNumber()
 		if e := dec.Decode(&body); e != nil {
-			c.Status = "redacted"
+			if c.Status != "truncated" {
+				c.Status = "redacted"
+			}
 			body = nil
 		} else {
 			var extra any
 			if dec.Decode(&extra) != io.EOF {
 				body = nil
-				c.Status = "redacted"
+				if c.Status != "truncated" {
+					c.Status = "redacted"
+				}
 			} else if redacted, changed := redactValue(body); changed {
 				body = redacted
-				c.Status = "redacted"
+				if c.Status != "truncated" {
+					c.Status = "redacted"
+				}
 			}
 		}
 		raw, _ := json.Marshal(body)
@@ -197,12 +221,16 @@ func (s *Store) captureWorker() {
 			if e := get(tx.Bucket([]byte("keys")), v.KeyID, &key); e != nil {
 				return e
 			}
-			if e := correlate(tx, v.KeyID, v.TraceID, v.RequestID); e != nil {
+			if e := correlate(tx, v.KeyID, v.TraceID, v.RequestID, s.now().UTC()); e != nil {
 				return e
 			}
 			b := tx.Bucket([]byte("captures"))
 			id := captureID(v.KeyID, v.TraceID)
-			if string(tx.Bucket([]byte("correlations")).Get([]byte(id))) == "\x00" {
+			var correlation correlation
+			if e := get(tx.Bucket([]byte("correlations")), id, &correlation); e != nil {
+				return e
+			}
+			if correlation.RequestID == "" {
 				return nil
 			}
 			if old := b.Get([]byte(id)); old != nil {
@@ -218,7 +246,7 @@ func (s *Store) captureWorker() {
 				previous.Status = "missing"
 				return put(b, id, previous)
 			}
-			p, e := json.Marshal(c)
+			p, e := encode(c)
 			if e != nil {
 				return e
 			}
