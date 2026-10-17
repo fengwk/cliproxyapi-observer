@@ -251,8 +251,8 @@ func TestPricingDefaultMissingPriceManualAndImmutable(t *testing.T) {
 }
 
 // TestPricingRulesFirstMatchThresholdAndTime proves ordered rules are evaluated
-// top-to-bottom, the threshold is strict greater-than on canonical uncached
-// input, the UTC time window is enforced, and each successful rule produces an
+// top-to-bottom, the threshold is strict greater-than on full prompt context,
+// the UTC time window is enforced, and each successful rule produces an
 // exact micro-USD cost. It also pins rule > manual precedence.
 func TestPricingRulesFirstMatchThresholdAndTime(t *testing.T) {
 	h := newHarness(t)
@@ -270,16 +270,16 @@ func TestPricingRulesFirstMatchThresholdAndTime(t *testing.T) {
 	nonmatchingWindow := acceptanceTimeRange(now.Add(2*time.Hour), 10*time.Minute)
 
 	// Manual is intentionally more expensive than every rule so a rule match
-	// proves rules take precedence. Rule 1 has input == 6, which must not
-	// satisfy "> 6". Rule 2 satisfies the threshold but misses the time window.
+	// proves rules take precedence. Rule 1 has full prompt == 10, which must not
+	// satisfy "> 10". Rule 2 satisfies the threshold but misses the time window.
 	// Rule 3 is the first full match. Rule 4 would also match but comes later.
 	base := acceptancePricing{
 		Auto:   false,
 		Prices: []acceptancePrice{{Model: model, Rates: acceptanceRatesAll(7_000_000), Source: "manual"}},
 		Rules: []acceptanceRule{
-			{ID: "threshold-equal", Model: model, InputTokensGT: acceptanceInt64(6), TimeRange: matchingWindow, Rates: acceptanceRatesAll(5_000_000)},
-			{ID: "time-miss", Model: model, InputTokensGT: acceptanceInt64(5), TimeRange: nonmatchingWindow, Rates: acceptanceRatesAll(4_000_000)},
-			{ID: "winner", Model: model, InputTokensGT: acceptanceInt64(5), TimeRange: matchingWindow, Rates: acceptanceRatesAll(3_000_000)},
+			{ID: "threshold-equal", Model: model, InputTokensGT: acceptanceInt64(10), TimeRange: matchingWindow, Rates: acceptanceRatesAll(5_000_000)},
+			{ID: "time-miss", Model: model, InputTokensGT: acceptanceInt64(9), TimeRange: nonmatchingWindow, Rates: acceptanceRatesAll(4_000_000)},
+			{ID: "winner", Model: model, InputTokensGT: acceptanceInt64(9), TimeRange: matchingWindow, Rates: acceptanceRatesAll(3_000_000)},
 			{ID: "later-match", Model: model, Rates: acceptanceRatesAll(1_000_000)},
 		},
 	}
@@ -297,7 +297,7 @@ func TestPricingRulesFirstMatchThresholdAndTime(t *testing.T) {
 	reordered := base
 	reordered.Rules = []acceptanceRule{
 		{ID: "later-match", Model: model, Rates: acceptanceRatesAll(1_000_000)},
-		{ID: "winner", Model: model, InputTokensGT: acceptanceInt64(5), TimeRange: matchingWindow, Rates: acceptanceRatesAll(3_000_000)},
+		{ID: "winner", Model: model, InputTokensGT: acceptanceInt64(9), TimeRange: matchingWindow, Rates: acceptanceRatesAll(3_000_000)},
 	}
 	acceptancePutPricing(t, h, reordered)
 
@@ -409,6 +409,9 @@ func TestSettingsHealthCompactRestartPreserveKeysAndCosts(t *testing.T) {
 	restarted, err := h.restartPreservingConfig(t)
 	if err != nil {
 		t.Fatalf("restart: %v", err)
+	}
+	if exitErr := h.waitError(); exitErr != nil {
+		t.Fatalf("normal SIGTERM shutdown did not exit cleanly (forced kill is not a graceful restart): %v", exitErr)
 	}
 
 	afterKeys := restarted.keys(t)

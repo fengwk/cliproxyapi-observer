@@ -55,17 +55,17 @@ func TestExclusiveKeyAuthenticationAndInvalidation(t *testing.T) {
 	}
 	spec := validSpec()
 	spec.Enabled = false
-	h.api(t, "PUT", "/keys/"+created.Key.ID, spec, 200, nil)
+	h.api(t, "PUT", "/keys?id="+url.QueryEscape(created.Key.ID), spec, 200, nil)
 	denyInference(t, h, created.Secret)
 	spec.Enabled = true
 	expired := time.Now().UTC().Add(-time.Hour)
 	spec.ExpiresAt = &expired
-	h.api(t, "PUT", "/keys/"+created.Key.ID, spec, 200, nil)
+	h.api(t, "PUT", "/keys?id="+url.QueryEscape(created.Key.ID), spec, 200, nil)
 	denyInference(t, h, created.Secret)
 	spec.ExpiresAt = nil
-	h.api(t, "PUT", "/keys/"+created.Key.ID, spec, 200, nil)
+	h.api(t, "PUT", "/keys?id="+url.QueryEscape(created.Key.ID), spec, 200, nil)
 	var rotated createdKey
-	h.api(t, "POST", "/keys/"+created.Key.ID+"/rotate", nil, 200, &rotated)
+	h.api(t, "POST", "/keys/rotate?id="+url.QueryEscape(created.Key.ID), nil, 200, &rotated)
 	if rotated.Secret == "" || rotated.Secret == created.Secret {
 		t.Fatal("rotation did not replace secret")
 	}
@@ -73,7 +73,7 @@ func TestExclusiveKeyAuthenticationAndInvalidation(t *testing.T) {
 	if status, _ := h.infer(t, rotated.Secret, false); status != 200 {
 		t.Fatal("rotated key rejected")
 	}
-	h.api(t, "DELETE", "/keys/"+created.Key.ID, nil, 204, nil)
+	h.api(t, "DELETE", "/keys?id="+url.QueryEscape(created.Key.ID), nil, 204, nil)
 	denyInference(t, h, rotated.Secret)
 	for _, path := range []string{"/keys", "/health", "/requests?page_size=100", "/summary"} {
 		raw := h.api(t, "GET", path, nil, 200, nil)
@@ -132,7 +132,7 @@ func TestQuotaWindowsResetAndModelAuthorization(t *testing.T) {
 				t.Fatal("exhausted quota reached upstream")
 			}
 			var reset keyView
-			h.api(t, "POST", "/keys/"+created.Key.ID+"/reset", map[string]any{"windows": []string{window}}, 200, &reset)
+			h.api(t, "POST", "/keys/reset?id="+url.QueryEscape(created.Key.ID), map[string]any{"windows": []string{window}}, 200, &reset)
 			want := limitsView{15, 15, 15, 15}
 			switch window {
 			case "five_hour":
@@ -186,7 +186,7 @@ func TestFilteredLogsCaptureRedactionAndBounds(t *testing.T) {
 		Headers       http.Header     `json:"headers"`
 		CaptureStatus string          `json:"capture_status"`
 	}
-	h.api(t, "GET", "/requests/"+disabled.ID, nil, 200, &detail)
+	h.api(t, "GET", "/requests/detail?id="+url.QueryEscape(disabled.ID), nil, 200, &detail)
 	if detail.CaptureStatus != "disabled" || string(detail.Body) != "null" {
 		t.Fatalf("disabled capture: %+v", detail)
 	}
@@ -199,7 +199,7 @@ func TestFilteredLogsCaptureRedactionAndBounds(t *testing.T) {
 	}
 	r := acceptanceAwaitNewRecord(t, h, known)
 	h.await(t, "capture detail available", func() bool {
-		h.api(t, "GET", "/requests/"+r.ID, nil, 200, &detail)
+		h.api(t, "GET", "/requests/detail?id="+url.QueryEscape(r.ID), nil, 200, &detail)
 		return detail.CaptureStatus == "available" || detail.CaptureStatus == "redacted"
 	})
 	if detail.Record.ID != r.ID || !bytes.Contains(detail.Body, []byte(upstreamPrompt)) {
@@ -261,7 +261,7 @@ func TestFilteredLogsCaptureRedactionAndBounds(t *testing.T) {
 	}
 	truncated := acceptanceAwaitNewRecord(t, h, known)
 	h.await(t, "bounded capture status", func() bool {
-		h.api(t, "GET", "/requests/"+truncated.ID, nil, 200, &detail)
+		h.api(t, "GET", "/requests/detail?id="+url.QueryEscape(truncated.ID), nil, 200, &detail)
 		return detail.CaptureStatus == "truncated"
 	})
 	if len(detail.Body) > 64 {
@@ -272,7 +272,7 @@ func TestFilteredLogsCaptureRedactionAndBounds(t *testing.T) {
 // Reject malformed/legacy query inputs, unknown JSON and unauthenticated detail.
 func TestManagementStrictInputs(t *testing.T) {
 	h := newHarness(t)
-	for _, path := range []string{"/keys", "/requests", "/summary", "/settings", "/health", "/requests/nonexistent"} {
+	for _, path := range []string{"/keys", "/requests", "/summary", "/settings", "/health", "/requests/detail?id=nonexistent"} {
 		status, _, err := h.rawRequest("GET", "/v0/management/plugins/"+pluginID+path, nil, nil)
 		if err != nil || (status != 401 && status != 403) {
 			t.Fatalf("management auth %s status %d err %v", path, status, err)
