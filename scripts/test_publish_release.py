@@ -177,6 +177,11 @@ class PublishTest(unittest.TestCase):
         write_executable(self.gh_bin, FAKE_GH)
         self.assets = os.path.join(self.work, "pkg")
         os.makedirs(self.assets)
+        # Isolate trusted checkout notes without touching the project's docs.
+        self.repo = os.path.join(self.work, "repo")
+        os.makedirs(os.path.join(self.repo, "scripts"))
+        self.script = os.path.join(self.repo, "scripts", "publish_release.py")
+        shutil.copyfile(SCRIPT, self.script)
 
     def write_assets(self, *, version=VERSION, commit=COMMIT, targets=TARGETS, plugin_id=PLUGIN_ID,
                      metadata_override=None, extra_member=None, metadata_raw=None,
@@ -230,7 +235,7 @@ class PublishTest(unittest.TestCase):
             }
         )
         proc = subprocess.run(
-            [sys.executable, SCRIPT, "--tag", TAG, "--assets", self.assets],
+            [sys.executable, self.script, "--tag", TAG, "--assets", self.assets],
             env=env,
             capture_output=True,
             text=True,
@@ -274,6 +279,59 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("checksum mismatch", err)
         self.assertEqual(final.get("creates", []), [])
+
+    def write_notes(self, notes):
+        docs = os.path.join(self.repo, "docs")
+        os.makedirs(docs, exist_ok=True)
+        path = os.path.join(docs, "release-notes-%s.md" % TAG)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(notes)
+        return path
+
+    def test_checkout_notes_are_used_only_for_draft_creation(self):
+        # Keep UTF-8 and Markdown verbatim, including the breaking-change warning.
+        notes = "# 发布说明\n\n**必须使用新数据库与新 Key。**\n"
+        self.write_notes(notes)
+        self.write_assets()
+        code, out, err, final = self.run_publisher(self.base_state())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(final["creates"]), 1)
+        create = final["creates"][0]
+        self.assertIn("--draft", create)
+        self.assertEqual(create[create.index("--notes") + 1], notes)
+        # Publishing the populated draft still only changes its draft flag.
+        self.assertEqual(final["edits"], [
+            ["release", "edit", TAG, "--repo", REPO, "--draft=false"]
+        ])
+
+    def test_absent_checkout_notes_preserve_generic_notes(self):
+        self.write_assets()
+        code, out, err, final = self.run_publisher(self.base_state())
+        self.assertEqual(code, 0, err)
+        create = final["creates"][0]
+        self.assertEqual(
+            create[create.index("--notes") + 1],
+            "Native CLIProxyAPI plugin artifacts built from %s. "
+            "Verify downloads against checksums.txt." % TAG,
+        )
+
+    def test_published_release_is_noop_even_with_checkout_notes(self):
+        self.write_assets()
+        path = self.write_notes("# 新说明，不能更改已发布版本\n")
+        for content in (b"new notes", b"\xff"):
+            # Even unreadable UTF-8 cannot affect an already public release.
+            with open(path, "wb") as handle:
+                handle.write(content)
+            with self.subTest(content=content):
+                published = self.release_record(draft=False)
+                code, out, err, final = self.run_publisher(
+                    self.base_state(existing_release=published)
+                )
+                self.assertEqual(code, 0, err)
+                self.assertEqual(final["existing_release"], published)
+                self.assertEqual(final.get("creates", []), [])
+                self.assertEqual(final.get("edits", []), [])
+                self.assertEqual(final.get("deletes", []), [])
 
     def test_missing_checksum_entry_blocks_publication(self):
         self.write_assets(omit_checksum_for=archive_name(VERSION, "darwin", "arm64"))

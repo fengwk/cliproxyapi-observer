@@ -24,6 +24,7 @@ import argparse
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -225,6 +226,14 @@ def publish(tag, assets_dir, repo):
             # id (never the tag) so the next attempt starts from a clean upload.
             delete_release(bin_path, repo, current["id"])
 
+    # Read only from the trusted default-branch checkout, never release assets.
+    notes_path = Path(__file__).resolve().parent.parent / "docs" / ("release-notes-%s.md" % tag)
+    notes = (
+        notes_path.read_text(encoding="utf-8")
+        if notes_path.is_file()
+        else "Native CLIProxyAPI plugin artifacts built from %s. "
+        "Verify downloads against checksums.txt." % tag
+    )
     run_gh(
         bin_path,
         [
@@ -238,8 +247,7 @@ def publish(tag, assets_dir, repo):
             "--title",
             tag,
             "--notes",
-            "Native CLIProxyAPI plugin artifacts built from %s. "
-            "Verify downloads against checksums.txt." % tag,
+            notes,
         ]
         + archives,
     )
