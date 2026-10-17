@@ -2,254 +2,329 @@ package plugin
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"net/http"
+	"errors"
+	"io"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/fengwk/cliproxyapi-observer/internal/engine"
+	"github.com/fengwk/cliproxyapi-observer/internal/pricing"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
-
-	"github.com/fengwk/cliproxyapi-observer/internal/observer"
+	"gopkg.in/yaml.v3"
 )
 
-// Manager owns the observation store lifecycle and dispatches every RPC method.
-// It is safe for concurrent use. Observation paths never fail the host and never
-// block inference: they take a short snapshot of the live store and call it
-// without holding the manager lock, so a slow quiesce/close can not stall them.
+type Config struct {
+	Enabled bool   `yaml:"enabled"`
+	DB      string `yaml:"db"`
+}
+
+func parseConfig(raw []byte) (Config, error) {
+	c := Config{true, "data/cliproxyapi-observer-v2.db"}
+	d := yaml.NewDecoder(bytes.NewReader(raw))
+	d.KnownFields(true)
+	if len(bytes.TrimSpace(raw)) > 0 {
+		var doc yaml.Node
+		if yaml.Unmarshal(raw, &doc) != nil || len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
+			return c, engine.ErrInvalid
+		}
+		fields := doc.Content[0].Content
+		for i := 0; i < len(fields); i += 2 {
+			key, value := fields[i], fields[i+1]
+			if key.Kind != yaml.ScalarNode || value.Kind != yaml.ScalarNode ||
+				(key.Value == "enabled" && value.Tag != "!!bool") ||
+				(key.Value == "db" && value.Tag != "!!str") {
+				return c, engine.ErrInvalid
+			}
+		}
+		if err := d.Decode(&c); err != nil {
+			return c, err
+		}
+		var extra any
+		if err := d.Decode(&extra); err != io.EOF {
+			return c, engine.ErrInvalid
+		}
+	}
+	if strings.TrimSpace(c.DB) == "" || strings.ContainsRune(c.DB, 0) {
+		return c, engine.ErrInvalid
+	}
+	c.DB = filepath.Clean(c.DB)
+	return c, nil
+}
+
+// mu fences every live store operation against close; lifeMu serializes config.
+// Network workers are canceled and joined before releasing the database.
 type Manager struct {
-	opener Opener
-	assets AssetFunc
-	now    func() time.Time
-
-	// mu guards the live store and its configuration snapshot. It is only ever
-	// held for pointer copies; store calls happen after the lock is released.
-	mu        sync.RWMutex
-	store     Store
-	cfg       observer.Config
-	raw       []byte
-	hasConfig bool
-	closed    bool
-
-	// lifeMu serializes lifecycle transitions (register, reconfigure, quiesce,
-	// shutdown) so a quiesce/reopen cycle can not interleave.
-	lifeMu sync.Mutex
+	mu                 sync.RWMutex
+	lifeMu             sync.Mutex
+	store              *engine.Store
+	prices             *pricing.Service
+	assets             AssetFunc
+	now                func() time.Time
+	cfg                Config
+	configured, closed bool
+	cancel             context.CancelFunc
+	workers            sync.WaitGroup
+	scopes             sync.Map // host caller_scope -> stable principal; never contains secrets
 }
 
-// NewManager returns a dispatcher backed by opener and, for management
-// resources, assets. assets may be nil when no UI slice is wired in.
-func NewManager(opener Opener, assets AssetFunc) *Manager {
-	return &Manager{opener: opener, assets: assets, now: time.Now}
-}
+func NewManager(assets AssetFunc) *Manager { return &Manager{assets: assets, now: time.Now} }
 
-// lifecycleRequest mirrors the host plugin.register/plugin.reconfigure payload.
 type lifecycleRequest struct {
 	ConfigYAML    []byte `json:"config_yaml"`
 	SchemaVersion uint32 `json:"schema_version"`
 }
 
-// HandleCall dispatches one RPC method. Handler failures travel inside the
-// envelope; a recovered panic becomes a plugin_error envelope so the host
-// process is never taken down by this plugin.
-func (m *Manager) HandleCall(method string, request []byte) (resp []byte, err error) {
+func (m *Manager) HandleCall(method string, raw []byte) (out []byte, err error) {
 	defer func() {
-		if recovered := recover(); recovered != nil {
-			resp, err = mustEnvelope(errorResult("plugin_error", "internal error handling "+method, http.StatusInternalServerError))
-			err = nil
+		if recover() != nil {
+			if method == pluginabi.MethodRequestInterceptBefore {
+				out, err = okEnvelope(denied(503))
+			} else {
+				out, err = errorEnvelope(&PluginError{"plugin_error", "internal error", 503})
+			}
 		}
 	}()
 	switch method {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
-		return m.handleLifecycle(request)
-	case pluginabi.MethodPluginQuiesce:
-		m.quiesce()
+		var r lifecycleRequest
+		if json.Unmarshal(raw, &r) != nil {
+			return fail("invalid_request", 400)
+		}
+		if r.SchemaVersion < 6 {
+			return fail("unsupported_schema", 400)
+		}
+		c, e := parseConfig(r.ConfigYAML)
+		if e != nil {
+			return fail("invalid_config", 400)
+		}
+		m.lifeMu.Lock()
+		defer m.lifeMu.Unlock()
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.closed {
+			return fail("unavailable", 503)
+		}
+		if m.configured && c == m.cfg && (m.store != nil || !c.Enabled) {
+			return okEnvelope(registrationResponse())
+		}
+		if m.store != nil {
+			h := m.store.Health()
+			if h.ActiveRequests != 0 || h.PendingUsage != 0 {
+				return fail("busy", 409)
+			}
+		}
+		old, had := m.cfg, m.configured
+		if e = m.closeLocked(); e != nil {
+			return fail("storage_unavailable", 503)
+		}
+		if e = m.openLocked(c); e != nil {
+			if had {
+				_ = m.openLocked(old)
+			} else if method == pluginabi.MethodPluginRegister {
+				// Keep the exclusive provider installed on storage faults. Failing
+				// registration here would allow the host's built-in keys to win.
+				m.cfg, m.configured = c, true
+				return okEnvelope(registrationResponse())
+			}
+			return fail("storage_unavailable", 503)
+		}
+		m.cfg = c
+		m.configured = true
+		return okEnvelope(registrationResponse())
+	case pluginabi.MethodPluginQuiesce, pluginabi.MethodPluginShutdown:
+		m.lifeMu.Lock()
+		defer m.lifeMu.Unlock()
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.store != nil {
+			h := m.store.Health()
+			if h.ActiveRequests != 0 || h.PendingUsage != 0 {
+				return fail("busy", 409)
+			}
+		}
+		if m.closeLocked() != nil {
+			return fail("storage_unavailable", 503)
+		}
+		if method == pluginabi.MethodPluginShutdown {
+			m.closed = true
+		}
 		return okEnvelope(struct{}{})
-	case pluginabi.MethodPluginShutdown:
-		m.shutdown()
-		return okEnvelope(struct{}{})
-	case pluginabi.MethodUsageHandle:
-		m.handleUsage(request)
-		return okEnvelope(struct{}{})
+	case pluginabi.MethodFrontendAuthIdentifier:
+		return okEnvelope(map[string]string{"identifier": AuthIdentifier})
+	case pluginabi.MethodFrontendAuthAuthenticate:
+		return m.authenticate(raw)
 	case pluginabi.MethodRequestInterceptBefore:
-		m.handleInterceptBefore(request)
-		return okEnvelope(pluginapi.RequestInterceptResponse{})
+		return m.before(raw)
 	case pluginabi.MethodRequestInterceptAfter:
-		// The observer never modifies an after-auth request.
 		return okEnvelope(pluginapi.RequestInterceptResponse{})
 	case pluginabi.MethodRequestComplete:
-		// Terminal completion is acknowledged with no body changes; the observer
-		// does not declare the request lifecycle capability.
+		var r pluginapi.RequestCompletion
+		if json.Unmarshal(raw, &r) != nil {
+			return fail("invalid_request", 400)
+		}
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		if m.store != nil {
+			_ = m.store.Complete(r.RequestID, r.CompletedAt)
+		}
+		return okEnvelope(struct{}{})
+	case pluginabi.MethodUsageHandle:
+		var r pluginapi.UsageRecord
+		if json.Unmarshal(raw, &r) == nil && r.Generate && r.AccessProvider == AccessProvider && validPrincipal(r.APIKey) {
+			m.mu.RLock()
+			defer m.mu.RUnlock()
+			if m.store != nil {
+				_ = m.store.RecordUsage(r)
+			}
+		}
 		return okEnvelope(struct{}{})
 	case pluginabi.MethodManagementRegister:
 		return okEnvelope(managementRegistration())
 	case pluginabi.MethodManagementHandle:
-		return m.handleManagement(request)
+		return m.handleManagement(raw)
 	default:
-		return mustEnvelope(errorResult("unknown_method", "unknown method: "+method, 0))
+		return fail("unknown_method", 400)
 	}
 }
-
-func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
-	var req lifecycleRequest
-	if len(request) > 0 {
-		if err := json.Unmarshal(request, &req); err != nil {
-			return errorEnvelope(&PluginError{Code: "invalid_request", Message: "malformed lifecycle request", HTTPStatus: http.StatusBadRequest})
+func fail(code string, status int) ([]byte, error) {
+	return errorEnvelope(&PluginError{code, strings.ReplaceAll(code, "_", " "), status})
+}
+func (m *Manager) openLocked(c Config) error {
+	if !c.Enabled {
+		return nil
+	}
+	p, e := pricing.NewService(pricing.DefaultConfig(), c.DB+".prices.json", nil)
+	if e != nil {
+		return e
+	}
+	s, e := engine.Open(engine.Options{DataPath: c.DB, Now: m.now, Pricer: p})
+	if e != nil {
+		return e
+	}
+	m.store = s
+	m.prices = p
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	m.workers.Add(2)
+	go func() { defer m.workers.Done(); p.Run(ctx) }()
+	go func() {
+		defer m.workers.Done()
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				_ = s.Maintenance()
+			}
 		}
-	}
-	m.lifeMu.Lock()
-	defer m.lifeMu.Unlock()
-	return m.applyLocked(req.ConfigYAML, req.SchemaVersion)
+	}()
+	return nil
 }
-
-// applyLocked validates a candidate configuration, releases the live store and
-// opens the candidate. A failed open rolls back to the previous configuration
-// so an in-place reconfigure never leaves the plugin without a working store.
-//
-// The previous store is detached and nil-ed under a short lock, then closed
-// outside it, so an in-flight observation never waits on a slow close.
-func (m *Manager) applyLocked(raw []byte, schema uint32) ([]byte, error) {
-	m.mu.RLock()
-	closed := m.closed
-	m.mu.RUnlock()
-	if closed {
-		return errorEnvelope(&PluginError{Code: "unavailable", Message: "observer is shut down", HTTPStatus: http.StatusServiceUnavailable})
+func (m *Manager) closeLocked() error {
+	if m.cancel != nil {
+		m.cancel()
+		m.workers.Wait()
+		m.cancel = nil
 	}
-
-	// Validate the candidate before the live store is released.
-	cfg, err := m.opener.Parse(raw)
-	if err != nil {
-		return errorEnvelope(&PluginError{Code: "invalid_config", Message: "invalid observer configuration", HTTPStatus: http.StatusBadRequest})
-	}
-	m.mu.RLock()
-	unchanged := m.store != nil && m.hasConfig && bytes.Equal(m.raw, raw)
-	m.mu.RUnlock()
-	if unchanged {
-		// Host-wide synchronization can resend identical plugin config.
-		// A quiesced store is nil and must still reopen for replacement rollback.
-		return okEnvelope(registrationResponse(schema))
-	}
-
-	m.mu.Lock()
-	previousRaw := m.raw
-	previousHasConfig := m.hasConfig
-	previous := m.store
-	m.store = nil
-	m.mu.Unlock()
-
-	if previous != nil {
-		_ = previous.Close()
-	}
-
-	store, err := m.opener.Open(cfg)
-	if err != nil {
-		// Roll back to the previous configuration, including an empty/default
-		// one, as long as a store was configured before.
-		if previousHasConfig {
-			m.restore(previousRaw)
+	if m.store != nil {
+		if e := m.store.Close(); e != nil {
+			return e
 		}
-		return errorEnvelope(&PluginError{Code: "storage_unavailable", Message: "observer storage unavailable", HTTPStatus: http.StatusServiceUnavailable})
+		m.store = nil
 	}
-
-	m.mu.Lock()
-	m.store = store
-	m.cfg = cfg
-	m.raw = append([]byte(nil), raw...)
-	m.hasConfig = true
-	m.mu.Unlock()
-	return okEnvelope(registrationResponse(schema))
+	m.prices = nil
+	return nil
 }
-
-// restore reopens the configuration that was live before a failed reconfigure.
-// raw may be empty when the previous configuration was the YAML default. It is
-// best effort: if the previous store can not be reopened the plugin stays
-// degraded and keeps serving inference without observation.
-func (m *Manager) restore(raw []byte) {
-	cfg, err := m.opener.Parse(raw)
-	if err != nil {
-		return
+func validPrincipal(s string) bool {
+	return strings.HasPrefix(s, "observer:") && len(s) > len("observer:") && !strings.ContainsAny(s, " /\\\t\r\n")
+}
+func (m *Manager) authenticate(raw []byte) ([]byte, error) {
+	var r pluginapi.FrontendAuthRequest
+	if json.Unmarshal(raw, &r) != nil {
+		return okEnvelope(pluginapi.FrontendAuthResponse{})
 	}
-	store, err := m.opener.Open(cfg)
-	if err != nil {
-		return
+	secret, e := credential(r)
+	if e != nil {
+		return okEnvelope(pluginapi.FrontendAuthResponse{})
 	}
-	m.mu.Lock()
-	m.store = store
-	m.cfg = cfg
-	m.raw = append([]byte(nil), raw...)
-	m.hasConfig = true
-	m.mu.Unlock()
-}
-
-// detach atomically removes the live store under a short lock and returns it.
-func (m *Manager) detach() Store {
-	m.mu.Lock()
-	store := m.store
-	m.store = nil
-	m.mu.Unlock()
-	return store
-}
-
-// quiesce releases the database and drains the writer. It is reversible: a
-// later reconfigure reopens the store from the same configuration.
-func (m *Manager) quiesce() {
-	m.lifeMu.Lock()
-	defer m.lifeMu.Unlock()
-	if store := m.detach(); store != nil {
-		_ = store.Close()
-	}
-}
-
-// shutdown releases the store and makes the manager terminal. It is idempotent.
-func (m *Manager) shutdown() {
-	m.lifeMu.Lock()
-	defer m.lifeMu.Unlock()
-	m.mu.Lock()
-	store := m.store
-	m.store = nil
-	m.closed = true
-	m.mu.Unlock()
-	if store != nil {
-		_ = store.Close()
-	}
-}
-
-// snapshot returns the live store and configuration without holding the lock.
-func (m *Manager) snapshot() (Store, observer.Config, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.store, m.cfg, m.hasConfig
+	if m.store == nil {
+		return okEnvelope(pluginapi.FrontendAuthResponse{})
+	}
+	k, e := m.store.Authenticate(secret)
+	if e != nil {
+		return okEnvelope(pluginapi.FrontendAuthResponse{})
+	}
+	principal := "observer:" + k.ID
+	// handlers.requestCallerScope hashes Gin userApiKey via the pinned SDK helper.
+	// userApiKey itself is NOT present in RequestInterceptRequest.Metadata.
+	m.scopes.Store(session.CallerScope(principal), principal)
+	return okEnvelope(pluginapi.FrontendAuthResponse{Authenticated: true, Principal: principal})
 }
-
-// handleUsage enqueues one usage record. A malformed payload is acknowledged
-// without observation rather than failing the host call, and a quiesced or
-// shut-down manager silently skips the record.
-func (m *Manager) handleUsage(request []byte) {
-	var record pluginapi.UsageRecord
-	if len(request) > 0 {
-		if err := json.Unmarshal(request, &record); err != nil {
-			return
-		}
-	}
-	store, _, _ := m.snapshot()
-	if store == nil {
-		return
-	}
-	store.SubmitUsage(record)
+func denied(status int) pluginapi.RequestInterceptResponse {
+	return pluginapi.RequestInterceptResponse{Terminate: true, StatusCode: status, ResponseBody: []byte(`{"error":{"code":"admission_denied","message":"request not admitted"}}`)}
 }
-
-// handleInterceptBefore enqueues the observed request body association. The
-// store decides whether capture is enabled; the plugin never modifies the
-// request and never fails the host call.
-func (m *Manager) handleInterceptBefore(request []byte) {
-	var req pluginapi.RequestInterceptRequest
-	if len(request) > 0 {
-		if err := json.Unmarshal(request, &req); err != nil {
-			return
+func (m *Manager) before(raw []byte) ([]byte, error) {
+	var r pluginapi.RequestInterceptRequest
+	if json.Unmarshal(raw, &r) != nil {
+		return okEnvelope(denied(400))
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.store == nil {
+		return okEnvelope(denied(503))
+	}
+	scope, _ := r.Metadata[coreexecutor.CallerScopeMetadataKey].(string)
+	v, ok := m.scopes.Load(scope)
+	if !ok {
+		return okEnvelope(denied(401))
+	}
+	principal, _ := v.(string)
+	if !validPrincipal(principal) {
+		return okEnvelope(denied(401))
+	}
+	model := r.RequestedModel
+	if model == "" {
+		model = r.Model
+	}
+	id := strings.TrimPrefix(principal, "observer:")
+	e := m.store.Authorize(id, model)
+	generate := true
+	if b, ok := r.Metadata[coreexecutor.GenerateMetadataKey].(bool); ok {
+		generate = b
+	}
+	path, _ := r.Metadata[coreexecutor.RequestPathMetadataKey].(string)
+	if strings.Contains(strings.ToLower(path), "counttokens") || strings.Contains(path, "count_tokens") {
+		generate = false
+	}
+	if e == nil && generate {
+		if r.RequestID == "" {
+			return okEnvelope(denied(400))
 		}
+		e = m.store.Admit(engine.Admission{RequestID: r.RequestID, TraceID: r.TraceID, KeyID: id, Model: model, At: m.now()})
 	}
-	store, _, _ := m.snapshot()
-	if store == nil {
-		return
+	if e != nil {
+		status := 403
+		if errors.Is(e, engine.ErrQuota) || errors.Is(e, engine.ErrConcurrency) {
+			status = 429
+		}
+		if errors.Is(e, engine.ErrAccounting) || errors.Is(e, engine.ErrClosed) {
+			status = 503
+		}
+		return okEnvelope(denied(status))
 	}
-	store.Capture(req)
+	if generate {
+		m.store.Capture(engine.CaptureInput{RequestID: r.RequestID, TraceID: r.TraceID, KeyID: id, Headers: r.Headers, Body: r.Body, At: m.now()})
+	}
+	return okEnvelope(pluginapi.RequestInterceptResponse{})
 }

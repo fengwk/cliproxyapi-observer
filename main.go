@@ -45,26 +45,12 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 
-	"github.com/fengwk/cliproxyapi-observer/internal/observer"
 	"github.com/fengwk/cliproxyapi-observer/internal/plugin"
 	"github.com/fengwk/cliproxyapi-observer/internal/web"
 )
 
-// storeOpener adapts the storage slice's public API to the plugin's Opener.
-// Parsing is separate from opening so a reconfigure validates a candidate
-// before the live database is released.
-type storeOpener struct{}
-
-func (storeOpener) Parse(raw []byte) (observer.Config, error) {
-	return observer.ParseConfig(raw)
-}
-
-func (storeOpener) Open(cfg observer.Config) (plugin.Store, error) {
-	return observer.Open(cfg)
-}
-
-// manager is the single dispatcher shared by every exported ABI entry point.
-var manager = plugin.NewManager(storeOpener{}, web.Asset)
+// manager is shared by all native entry points.
+var manager = plugin.NewManager(web.Asset)
 
 // maxBufferLen guards the size_t to C.int conversion in C.GoBytes; requests at
 // or above 2^31 would truncate to a negative length and panic outside recover.
@@ -100,6 +86,10 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	if method == nil {
 		writeResponse(response, errorEnvelope("invalid_method", "method is required"))
 		return 1
+	}
+	if request == nil && requestLen != 0 {
+		writeResponse(response, errorEnvelope("invalid_request", "missing request buffer"))
+		return 0
 	}
 	var req []byte
 	if request != nil && requestLen > 0 {
