@@ -372,13 +372,9 @@ func TestSettingsHealthCompactRestartPreserveKeysAndCosts(t *testing.T) {
 	acceptanceAssertTokens(t, priced)
 	acceptanceAssertCost(t, priced, 15, "manual")
 
-	// Wait for the execution to settle so health and restart observe a quiescent
-	// store rather than a transient in-flight request.
-	h.await(t, "all requests settle before health inspection", func() bool {
-		var health acceptanceHealth
-		h.api(t, http.MethodGet, "/health", nil, http.StatusOK, &health)
-		return health.ActiveRequests == 0 && health.PendingUsage == 0
-	})
+	// Both paid/unpriced rows and completion callbacks must settle before the
+	// planned restart; HTTP response flush alone is not a lifecycle fence.
+	h.awaitGracefulRestartReady(t, 2)
 
 	var health acceptanceHealth
 	h.api(t, http.MethodGet, "/health", nil, http.StatusOK, &health)
