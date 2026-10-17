@@ -9,6 +9,7 @@ package integration
 import (
 	"bytes"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -25,8 +26,7 @@ import (
 
 // Fixed test identities. Every credential here is fake and safe to log.
 const (
-	pluginID   = "cliproxyapi-observer"
-	pluginName = "Observer"
+	pluginID = "cliproxyapi-observer"
 
 	clientKey    = "fake-client-key"
 	clientKeyTwo = "fake-client-key-two"
@@ -104,6 +104,11 @@ func repoRoot() (string, error) {
 // TestMain validates the runtime contract and builds the native plugin once so
 // every test case only pays the (small) copy cost.
 func TestMain(m *testing.M) {
+	flag.Parse()
+	// Compile-only validation must not require a finished native implementation.
+	if flag.Lookup("test.run").Value.String() == "^$" {
+		os.Exit(m.Run())
+	}
 	if _, err := requireCPABinary(); err != nil {
 		fmt.Fprintln(os.Stderr, "integration: "+err.Error())
 		os.Exit(2)
@@ -190,17 +195,12 @@ type harness struct {
 
 // hostOptions selects the observer plugin settings a test host runs with.
 type hostOptions struct {
-	// CaptureBodies toggles request-body capture for the observer plugin.
-	CaptureBodies bool
-	// StatsRetentionDays overrides the statistics retention; zero keeps the
-	// host/plugin default.
-	StatsRetentionDays int
-	// DatabasePath overrides the observer database file; empty derives one
-	// inside the harness directory.
-	DatabasePath string
+	// Baseline only: start CPA without the plugin to measure normal routing.
+	PluginDisabled bool
+	TwoUpstreams   bool
 }
 
-func defaultHostOptions() hostOptions { return hostOptions{CaptureBodies: true} }
+func defaultHostOptions() hostOptions { return hostOptions{} }
 
 // newHarness starts one mock upstream and one CPA host against it and registers
 // teardown. The host is stopped before the mock is closed.
@@ -249,10 +249,7 @@ func startHostWith(t *testing.T, mock *mockUpstream, dir string, opts hostOption
 	if err := os.MkdirAll(authDir, 0o755); err != nil {
 		return nil, err
 	}
-	dbPath := opts.DatabasePath
-	if dbPath == "" {
-		dbPath = filepath.Join(dir, "observer.db")
-	}
+	dbPath := filepath.Join(dir, "data", "cliproxyapi-observer-v2.db")
 
 	port, err := freePort()
 	if err != nil {
@@ -261,7 +258,7 @@ func startHostWith(t *testing.T, mock *mockUpstream, dir string, opts hostOption
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 
 	configPath := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(configPath, hostConfig(port, authDir, pluginsDir, dbPath, mock.baseURL(), opts), 0o600); err != nil {
+	if err := os.WriteFile(configPath, hostConfig(port, authDir, pluginsDir, mock.baseURL(), opts), 0o600); err != nil {
 		return nil, err
 	}
 
@@ -327,10 +324,10 @@ func installPlugin(pluginsDir string) error {
 // The compatibility provider name contains "openai" so the host classifies it
 // with OpenAI subset token semantics (cached tokens are a subset of the prompt),
 // matching the accounting the mock fixture exercises.
-func hostConfig(port int, authDir, pluginsDir, dbPath, mockURL string, opts hostOptions) []byte {
-	var retention string
-	if opts.StatsRetentionDays > 0 {
-		retention = fmt.Sprintf("\n      stats-retention-days: %d", opts.StatsRetentionDays)
+func hostConfig(port int, authDir, pluginsDir, mockURL string, opts hostOptions) []byte {
+	extraKey := ""
+	if opts.TwoUpstreams {
+		extraKey = "\n      - api-key: \"fake-upstream-key-two\""
 	}
 	return []byte(fmt.Sprintf(`config-version: 8
 server:
@@ -347,37 +344,27 @@ access:
     - %q
 oauth:
   auth-dir: %q
-openai-compatibility:
+routing:
+  retry:
+    request-retry: 1
+  cooldown:
+    disable-cooling: true
+api-keys:
+ openai-compatibility:
   - name: %q
     base-url: %q
-    api-key-entries:
-      - api-key: %q
+    keys:
+      - api-key: %q%s
     models:
       - name: %q
         alias: %q
 plugins:
-  enabled: true
+  enabled: %t
   dir: %q
   configs:
     %s:
       enabled: true
-      db: %q
-      flush: "1s"
-      capture-bodies: %t%s
-`, port, mgmtKey, clientKey, clientKeyTwo, authDir, compatProviderName, mockURL+"/v1", upstreamKey, upstreamModel, modelName, pluginsDir, pluginID, dbPath, opts.CaptureBodies, retention))
-}
-
-// rewriteConfig rewrites the host config with new observer plugin options and
-// the same port/auth/plugin paths, letting the host's config watcher apply a
-// plugin reconfigure. An empty DatabasePath keeps the current database.
-func (h *harness) rewriteConfig(t *testing.T, opts hostOptions) error {
-	t.Helper()
-	dbPath := opts.DatabasePath
-	if dbPath == "" {
-		dbPath = h.dbPath
-	}
-	content := hostConfig(h.port, h.authDir, filepath.Join(h.dir, "plugins"), dbPath, h.mock.baseURL(), opts)
-	return os.WriteFile(filepath.Join(h.dir, "config.yaml"), content, 0o600)
+`, port, mgmtKey, clientKey, clientKeyTwo, authDir, compatProviderName, mockURL+"/v1", upstreamKey, extraKey, upstreamModel, modelName, !opts.PluginDisabled, pluginsDir, pluginID))
 }
 
 // hostEnv builds a minimal environment that cannot inherit production CPA
@@ -389,7 +376,8 @@ func hostEnv(home string) []string {
 			env = append(env, key+"="+value)
 		}
 	}
-	env = append(env, "NO_PROXY=*", "no_proxy=*")
+	// Block optional catalog refresh egress, but keep mock/management loopback.
+	env = append(env, "HTTP_PROXY=http://127.0.0.1:1", "HTTPS_PROXY=http://127.0.0.1:1", "NO_PROXY=127.0.0.1,localhost", "no_proxy=127.0.0.1,localhost")
 	return env
 }
 
@@ -403,7 +391,8 @@ func freePort() (int, error) {
 	return listener.Addr().(*net.TCPAddr).Port, nil
 }
 
-// awaitReady checks the server, client catalog and authenticated observer.
+// awaitReady checks the server and authenticated observer. Builtin client keys
+// are deliberately not used: the observer owns exclusive frontend auth.
 // Startup synchronization may temporarily leave the observer unavailable.
 func (h *harness) awaitReady(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
@@ -428,12 +417,8 @@ func (h *harness) awaitReady(timeout time.Duration) error {
 	if time.Now().After(deadline) {
 		return fmt.Errorf("host did not become ready: %v", lastErr)
 	}
-	status, body, err := h.rawRequest(http.MethodGet, "/v1/models", nil, map[string]string{"Authorization": "Bearer " + clientKey})
-	if err != nil {
-		return fmt.Errorf("readiness models request: %w", err)
-	}
-	if status != http.StatusOK {
-		return fmt.Errorf("readiness /v1/models status %d body %s", status, truncate(body, 400))
+	if h.opts.PluginDisabled {
+		return nil
 	}
 	for time.Now().Before(deadline) {
 		select {
@@ -441,7 +426,7 @@ func (h *harness) awaitReady(timeout time.Duration) error {
 			return fmt.Errorf("host exited during observer readiness: %v", h.waitError())
 		default:
 		}
-		status, body, err = h.rawRequest(http.MethodGet, "/v0/management/plugins/"+pluginID+"/health", nil, map[string]string{"Authorization": "Bearer " + mgmtKey})
+		status, body, err := h.rawRequest(http.MethodGet, "/v0/management/plugins/"+pluginID+"/health", nil, map[string]string{"Authorization": "Bearer " + mgmtKey})
 		if err == nil && status == http.StatusOK {
 			return nil
 		}
@@ -529,7 +514,11 @@ func (h *harness) rawRequestWithHeaders(method, path string, body []byte, header
 	if body != nil && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := h.httpClient().Do(req)
+	client := h.httpClient()
+	if strings.HasPrefix(path, "/v0/management/") || path == "/healthz" {
+		client.Timeout = 2 * time.Second
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, nil, nil, err
 	}
@@ -543,31 +532,6 @@ func (h *harness) rawRequestWithHeaders(method, path string, body []byte, header
 
 func (h *harness) httpClient() *http.Client {
 	return &http.Client{Timeout: 60 * time.Second}
-}
-
-// clientRequest issues a client API request authenticated with the fake client
-// key.
-func (h *harness) clientRequest(t *testing.T, method, path string, body []byte) (int, []byte) {
-	t.Helper()
-	status, data, err := h.rawRequest(method, path, body, map[string]string{
-		"Authorization": "Bearer " + clientKey,
-		"Content-Type":  "application/json",
-	})
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
-	return status, data
-}
-
-// managementRequest issues a management API request authenticated with the fake
-// management key.
-func (h *harness) managementRequest(t *testing.T, method, path string) (int, http.Header, []byte) {
-	t.Helper()
-	status, header, data, err := h.rawRequestWithHeaders(method, path, nil, map[string]string{"Authorization": "Bearer " + mgmtKey})
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
-	return status, header, data
 }
 
 func truncate(data []byte, limit int) string {

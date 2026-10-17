@@ -39,16 +39,36 @@ type mockCall struct {
 	Body   []byte
 }
 
+// mockBarrier makes one upstream attempt observable and blocks it until the
+// test releases it. entered is closed once the request reaches the mock;
+// release is closed by the test. The handler also watches the request context
+// so client cancellation cannot leave the mock blocked.
+type mockBarrier struct {
+	entered     chan struct{}
+	canceled    chan struct{}
+	release     chan struct{}
+	releaseOnce sync.Once
+}
+
+// open releases the blocked request. It is idempotent so tests can also call it
+// from cleanup while unwinding a failed assertion.
+func (b *mockBarrier) open() {
+	b.releaseOnce.Do(func() { close(b.release) })
+}
+
 // mockUpstream is an OpenAI-compatible chat endpoint supporting synchronous and
 // SSE responses. It verifies the request contract in-line and records
 // candidate violations for the test to assert.
 type mockUpstream struct {
 	server *httptest.Server
 
-	mu         sync.Mutex
-	calls      []mockCall
-	violations []string
-	wantPrompt string
+	mu            sync.Mutex
+	calls         []mockCall
+	violations    []string
+	wantPrompt    string
+	gate          *mockBarrier
+	failStatus    int
+	failRemaining int
 }
 
 func newMockUpstream(t *testing.T) *mockUpstream {
@@ -75,6 +95,44 @@ func (m *mockUpstream) baseURL() string { return m.server.URL }
 
 func (m *mockUpstream) Close() { m.server.Close() }
 
+// holdNextRequest installs a one-shot barrier for the next chat request. Tests
+// wait on entered instead of sleeping, then close release to let the attempt
+// continue. The barrier is consumed before the handler performs the upstream
+// response, so the request has already passed observer admission.
+func (m *mockUpstream) holdNextRequest() *mockBarrier {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	gate := &mockBarrier{entered: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{})}
+	m.gate = gate
+	return gate
+}
+
+// failNextRequests scripts the first count chat attempts to fail with status
+// before any successful response. It lets a test drive real host retry behavior
+// without relying on external failures; the script is consumed atomically.
+func (m *mockUpstream) failNextRequests(status, count int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failStatus = status
+	m.failRemaining = count
+}
+
+// callCount reports how many chat attempts reached the mock.
+func (m *mockUpstream) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.calls)
+}
+
+// callsSnapshot copies the recorded calls for assertions.
+func (m *mockUpstream) callsSnapshot() []mockCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]mockCall, len(m.calls))
+	copy(out, m.calls)
+	return out
+}
+
 func (m *mockUpstream) violationf(format string, args ...any) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -96,9 +154,36 @@ func (m *mockUpstream) handleChat(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	m.mu.Lock()
 	m.calls = append(m.calls, mockCall{Method: r.Method, Path: r.URL.Path, Header: r.Header.Clone(), Body: body})
+	gate := m.gate
+	m.gate = nil
+	failStatus := 0
+	if m.failRemaining > 0 {
+		m.failRemaining--
+		failStatus = m.failStatus
+	}
 	m.mu.Unlock()
 
 	m.validateChat(r, body)
+
+	if gate != nil {
+		close(gate.entered)
+		select {
+		case <-gate.release:
+		case <-r.Context().Done():
+			close(gate.canceled)
+			// The observer must release its admission slot when the client
+			// disconnects even though the upstream attempt never finished.
+			return
+		}
+	}
+	if failStatus != 0 {
+		// A scripted upstream failure lets tests exercise host retry rounds.
+		// The body intentionally contains no credentials or usage counters.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(failStatus)
+		_, _ = io.WriteString(w, fmt.Sprintf(`{"error":{"message":"scripted upstream failure","type":"server_error","status":%d}}`, failStatus))
+		return
+	}
 
 	var payload struct {
 		Stream bool `json:"stream"`
@@ -128,7 +213,7 @@ func (m *mockUpstream) validateChat(r *http.Request, body []byte) {
 	if r.Method != http.MethodPost {
 		m.violationf("method = %s, want POST", r.Method)
 	}
-	if got := r.Header.Get("Authorization"); got != "Bearer "+upstreamKey {
+	if got := r.Header.Get("Authorization"); got != "Bearer "+upstreamKey && got != "Bearer fake-upstream-key-two" {
 		m.violationf("Authorization = %q, want the fake upstream key", got)
 	}
 	if r.Header.Get("x-api-key") != "" {
@@ -165,23 +250,28 @@ func (m *mockUpstream) validateChat(r *http.Request, body []byte) {
 	}
 }
 
+// mockSSEPayloads is the exact ordered SSE data payload sequence the mock
+// emits. Tests compare the client-visible stream against it to prove the
+// observer neither rewrites nor reorders streaming output.
+func mockSSEPayloads() []string {
+	return []string{
+		fmt.Sprintf(`{"id":"chatcmpl-observer","object":"chat.completion.chunk","created":1,"model":%q,"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`, upstreamModel),
+		fmt.Sprintf(`{"id":"chatcmpl-observer","object":"chat.completion.chunk","created":1,"model":%q,"choices":[{"index":0,"delta":{"content":%q},"finish_reason":null}]}`, upstreamModel, fixtureText),
+		fmt.Sprintf(`{"id":"chatcmpl-observer","object":"chat.completion.chunk","created":1,"model":%q,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`, upstreamModel),
+		fmt.Sprintf(`{"id":"chatcmpl-observer","object":"chat.completion.chunk","created":1,"choices":[],"usage":%s}`, usageFixtureJSON()),
+		"[DONE]",
+	}
+}
+
 func (m *mockUpstream) writeSSE(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
-	write := func(chunk string) {
-		_, _ = io.WriteString(w, "data: "+chunk+"\n\n")
+	for _, payload := range mockSSEPayloads() {
+		_, _ = io.WriteString(w, "data: "+payload+"\n\n")
 		if flusher != nil {
 			flusher.Flush()
 		}
-	}
-	write(fmt.Sprintf(`{"id":"chatcmpl-observer","object":"chat.completion.chunk","created":1,"model":%q,"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`, upstreamModel))
-	write(fmt.Sprintf(`{"id":"chatcmpl-observer","object":"chat.completion.chunk","created":1,"model":%q,"choices":[{"index":0,"delta":{"content":%q},"finish_reason":null}]}`, upstreamModel, fixtureText))
-	write(fmt.Sprintf(`{"id":"chatcmpl-observer","object":"chat.completion.chunk","created":1,"model":%q,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`, upstreamModel))
-	write(fmt.Sprintf(`{"id":"chatcmpl-observer","object":"chat.completion.chunk","created":1,"choices":[],"usage":%s}`, usageFixtureJSON()))
-	_, _ = io.WriteString(w, "data: [DONE]\n\n")
-	if flusher != nil {
-		flusher.Flush()
 	}
 }
 
@@ -223,6 +313,24 @@ func sseContent(body []byte) string {
 		}
 	}
 	return out.String()
+}
+
+// sseDataPayloads returns every non-empty data payload in order, including the
+// terminating [DONE] marker. It lets a test compare the complete client-visible
+// stream, not just concatenated assistant text.
+func sseDataPayloads(body []byte) []string {
+	var out []string
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data != "" {
+			out = append(out, data)
+		}
+	}
+	return out
 }
 
 // jsonContent extracts the first assistant message content from a sync body.
