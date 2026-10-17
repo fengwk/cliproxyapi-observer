@@ -78,6 +78,10 @@ func (s *Store) Summary(q Query) (Summary, error) {
 		return out, ErrInvalid
 	}
 	cut := s.now().Add(-time.Duration(s.settings.RawRetentionHours) * time.Hour)
+	hourly := !q.From.Before(cut)
+	if hourly {
+		out.Granularity = "hour"
+	}
 	if (q.From.Before(cut) && !q.From.Equal(day(q.From))) || (q.From.Before(cut) && day(q.To).Before(cut) && !q.To.Equal(day(q.To))) {
 		return out, ErrInvalid
 	}
@@ -102,7 +106,7 @@ func (s *Store) Summary(q Query) (Summary, error) {
 	}
 	dailyCut := day(s.now()).AddDate(0, 0, -s.settings.DailyRetentionDays)
 	full := func(t time.Time) bool {
-		return !t.Before(q.From) && !t.AddDate(0, 0, 1).After(q.To) && !t.Before(dailyCut)
+		return !hourly && !t.Before(q.From) && !t.AddDate(0, 0, 1).After(q.To) && !t.Before(dailyCut)
 	}
 	e := s.db.View(func(tx *bolt.Tx) error {
 		if e := tx.Bucket([]byte("daily")).ForEach(func(_, v []byte) error {
@@ -125,7 +129,11 @@ func (s *Store) Summary(q Query) (Summary, error) {
 			if full(day(r.Time)) || r.Time.Before(cut) || r.Time.Before(q.From) || !r.Time.Before(q.To) || !matches(q, r.KeyID, r.Model, r.Provider, r.AuthIndex, r.Failed) {
 				return nil
 			}
-			b := Bucket{Time: day(r.Time)}
+			bt := day(r.Time)
+			if hourly {
+				bt = r.Time.UTC().Truncate(time.Hour)
+			}
+			b := Bucket{Time: bt}
 			if e := accumulate(&b, r); e != nil {
 				return e
 			}
@@ -134,6 +142,13 @@ func (s *Store) Summary(q Query) (Summary, error) {
 	})
 	if e != nil {
 		return out, e
+	}
+	if hourly && q.To.Sub(q.From) <= 168*time.Hour {
+		for t := q.From.UTC().Truncate(time.Hour); t.Before(q.To); t = t.Add(time.Hour) {
+			if bs[t] == nil {
+				bs[t] = &Bucket{Time: t}
+			}
+		}
 	}
 	for _, b := range bs {
 		out.Buckets = append(out.Buckets, *b)

@@ -15,14 +15,16 @@ func (s *Store) Maintenance() error {
 	if e := s.check(); e != nil {
 		return e
 	}
-	if e := s.retryLocked(); e != nil {
-		return e
-	}
+	retryErr := s.retryLocked()
+	s.pruneCompletedLocked()
 	now := s.now().UTC()
 	cut := now.Add(-time.Duration(s.settings.RawRetentionHours) * time.Hour)
 	dc := day(now).AddDate(0, 0, -s.settings.DailyRetentionDays)
 	e := s.db.Update(func(tx *bolt.Tx) error {
-		for _, name := range []string{"records", "captures", "daily"} {
+		if e := s.advanceCutoff(tx); e != nil {
+			return e
+		}
+		for _, name := range []string{"records", "captures", "daily", "dedup", "correlations"} {
 			b := tx.Bucket([]byte(name))
 			c := b.Cursor()
 			for k, v := c.First(); k != nil; k, v = c.Next() {
@@ -45,6 +47,18 @@ func (s *Store) Maintenance() error {
 						return e
 					}
 					expired = r.At.Before(cut)
+				case "dedup":
+					var entry dedupEntry
+					if e := decode(v, &entry); e != nil {
+						return e
+					}
+					expired = entry.Time.Before(s.cutoff)
+				case "correlations":
+					var entry correlation
+					if e := decode(v, &entry); e != nil {
+						return e
+					}
+					expired = entry.At.Before(cut)
 				case "daily":
 					var r daily
 					if e := decode(v, &r); e != nil {
@@ -70,9 +84,11 @@ func (s *Store) Maintenance() error {
 	}
 	free := int64(s.db.Stats().FreePageN) * int64(s.db.Info().PageSize)
 	if free > 16<<20 && free > st.Size()/4 {
-		return s.compactLocked()
+		if e := s.compactLocked(); e != nil {
+			return e
+		}
 	}
-	return nil
+	return retryErr
 }
 func (s *Store) Compact() error {
 	s.mu.Lock()

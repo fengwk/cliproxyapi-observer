@@ -2,7 +2,7 @@ package engine
 
 import (
 	"encoding/json"
-	"math"
+	"errors"
 	"strings"
 	"time"
 
@@ -12,9 +12,8 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-func decode(b []byte, v any) error { return json.Unmarshal(b, v) }
 func add(a, b int64) (int64, error) {
-	if a < 0 || b < 0 || a > math.MaxInt64-b {
+	if a < 0 || b < 0 || b > maxSafe || a > maxSafe-b {
 		return 0, ErrAccounting
 	}
 	return a + b, nil
@@ -29,11 +28,6 @@ func normalize(u pluginapi.UsageRecord) Record {
 	}
 	return r
 }
-func (s *Store) fenceLocked() {
-	s.fatal = true
-	s.lastError = "irreversible accounting failure"
-	s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket([]byte("meta")).Put([]byte("fence"), []byte("1")) })
-}
 func (s *Store) RecordUsage(u pluginapi.UsageRecord) error {
 	if !u.Generate || !strings.HasPrefix(u.APIKey, "observer:") {
 		return nil
@@ -43,20 +37,23 @@ func (s *Store) RecordUsage(u pluginapi.UsageRecord) error {
 	if e := s.check(); e != nil {
 		return e
 	}
-	if u.RequestID == "" {
-		s.fenceLocked()
-		return ErrAccounting
-	}
 	var seen bool
 	var key storedKey
 	if e := s.db.View(func(tx *bolt.Tx) error {
+		if e := s.loadCutoff(tx); e != nil {
+			return e
+		}
 		seen = tx.Bucket([]byte("dedup")).Get([]byte(u.RequestID)) != nil
 		return get(tx.Bucket([]byte("keys")), strings.TrimPrefix(u.APIKey, "observer:"), &key)
 	}); e != nil {
 		if e == ErrNotFound {
 			return e
 		}
-		s.fenceLocked()
+		s.fenceLocked(strings.TrimPrefix(u.APIKey, "observer:"))
+		return ErrAccounting
+	}
+	if u.RequestID == "" {
+		s.fenceLocked(key.ID)
 		return ErrAccounting
 	}
 	if seen {
@@ -65,15 +62,16 @@ func (s *Store) RecordUsage(u pluginapi.UsageRecord) error {
 	if _, ok := s.pending[u.RequestID]; ok {
 		return ErrAccounting
 	}
+	if u.RequestedAt.IsZero() || u.RequestedAt.Before(s.cutoff) || u.RequestedAt.After(s.now()) {
+		s.fenceLocked(key.ID)
+		return ErrAccounting
+	}
 	r := normalize(u)
 	at := s.now().UTC()
-	if r.Time.IsZero() {
-		r.Time = at
-	}
 	s.pricer.Observe(r.Model, r.Provider)
 	q, e := s.pricer.Quote(r.Model, r.Provider, r.Tokens, at)
-	if e != nil || q.CostMicroUSD < 0 {
-		s.fenceLocked()
+	if e != nil || q.CostMicroUSD < 0 || q.CostMicroUSD > maxSafe {
+		s.fenceLocked(strings.TrimPrefix(u.APIKey, "observer:"))
 		return ErrAccounting
 	}
 	r.CostMicroUSD = q.CostMicroUSD
@@ -87,10 +85,14 @@ func (s *Store) RecordUsage(u pluginapi.UsageRecord) error {
 	if e = s.persistLocked(p); e == nil {
 		return nil
 	}
+	if errors.Is(e, ErrAccounting) {
+		s.fenceLocked(r.KeyID)
+		return ErrAccounting
+	}
 	s.blocked[r.KeyID] = true
 	s.lastError = "usage persistence failed"
 	if len(s.pending) >= 1024 {
-		s.fenceLocked()
+		s.fenceLocked(strings.TrimPrefix(u.APIKey, "observer:"))
 		return ErrAccounting
 	}
 	s.pending[r.ID] = p
@@ -130,12 +132,20 @@ func accumulate(b *Bucket, r Record) error {
 	return e
 }
 func (s *Store) persistLocked(p pending) error {
+	if s.usageFault != nil {
+		if e := s.usageFault(p); e != nil {
+			return e
+		}
+	}
 	if s.writeFault != nil {
 		if e := s.writeFault(); e != nil {
 			return e
 		}
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
+		if e := s.advanceCutoff(tx); e != nil {
+			return e
+		}
 		r := p.Record
 		if tx.Bucket([]byte("dedup")).Get([]byte(r.ID)) != nil {
 			return nil
@@ -184,19 +194,46 @@ func (s *Store) persistLocked(p pending) error {
 		if e := tx.Bucket([]byte("timeline")).Put([]byte(timeID(r)), []byte(r.ID)); e != nil {
 			return e
 		}
-		return tx.Bucket([]byte("dedup")).Put([]byte(r.ID), []byte(r.KeyID))
+		cb := tx.Bucket([]byte("correlations"))
+		cid := captureID(r.KeyID, r.TraceID)
+		if value := cb.Get([]byte(cid)); value != nil {
+			var c correlation
+			if e := decode(value, &c); e != nil {
+				return e
+			}
+			if p.At.After(c.At) {
+				c.At = p.At
+			}
+			if e := put(cb, cid, c); e != nil {
+				return e
+			}
+		}
+		return put(tx.Bucket([]byte("dedup")), r.ID, dedupEntry{Time: r.Time, KeyID: r.KeyID})
 	})
 }
 func (s *Store) retryLocked() error {
+	var result error
 	for id, p := range s.pending {
 		if e := s.persistLocked(p); e != nil {
-			return ErrAccounting
+			result = ErrAccounting
+			if errors.Is(e, ErrAccounting) {
+				s.fenceLocked(p.Record.KeyID)
+				delete(s.pending, id)
+			}
+			continue
 		}
 		delete(s.pending, id)
 	}
 	clear(s.blocked)
-	if !s.fatal {
-		s.lastError = ""
+	for _, p := range s.pending {
+		s.blocked[p.Record.KeyID] = true
 	}
-	return nil
+	if result != nil {
+		s.lastError = "usage persistence failed"
+	} else if len(s.unknown) == 0 {
+		s.lastError = ""
+	} else {
+		s.lastError = unknownReason
+	}
+	return result
 }

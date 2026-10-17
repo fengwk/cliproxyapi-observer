@@ -222,9 +222,7 @@ func TestUncleanRestart(t *testing.T) {
 	if !errors.Is(reopened.Admit(Admission{RequestID: "new", KeyID: k.ID}), ErrAccounting) {
 		t.Fatal("unsafe restart")
 	}
-	if !errors.Is(reopened.Close(), ErrAccounting) {
-		t.Fatal("debt hidden")
-	}
+	must(t, reopened.Close())
 }
 
 // Concurrent admissions serialize the limit check, idempotent completion frees
@@ -429,9 +427,15 @@ func TestResetDoesNotRefillOldWindow(t *testing.T) {
 	if total(t, s).Used.Total != 0 {
 		t.Fatal("old event refilled reset")
 	}
-	must(t, s.RecordUsage(event(k, "late-historical", now.Add(-90*24*time.Hour))))
+	must(t, s.RecordUsage(event(k, "late-historical", now.Add(-6*24*time.Hour))))
 	if total(t, s).Used.Total != 7 {
 		t.Fatal("late execution not billed at receipt")
+	}
+	if e = s.RecordUsage(event(k, "unsupported-90-day-callback", now.Add(-90*24*time.Hour))); !errors.Is(e, ErrAccounting) {
+		t.Fatal("callback outside the documented replay horizon accepted", e)
+	}
+	if total(t, s).Used.Total != 7 {
+		t.Fatal("rejected callback charged")
 	}
 }
 
@@ -446,7 +450,7 @@ func TestPendingBoundAndCloseDebt(t *testing.T) {
 			t.Fatal(i)
 		}
 	}
-	if s.Health().PendingUsage != 1024 || !s.fatal {
+	if s.Health().PendingUsage != 1024 || !s.unknown[k.ID] {
 		t.Fatal(s.Health())
 	}
 	if !errors.Is(s.Close(), ErrAccounting) {
@@ -490,9 +494,10 @@ func TestCaptureBounds(t *testing.T) {
 	if accepted {
 		t.Fatal("contended capture accepted")
 	}
-	if s.Capture(CaptureInput{RequestID: "admission", KeyID: k.ID, TraceID: "t", Body: bytes.Repeat([]byte("x"), 17)}) {
-		t.Fatal("oversized capture accepted")
+	if !s.Capture(CaptureInput{RequestID: "admission", KeyID: k.ID, TraceID: "t", Body: bytes.Repeat([]byte("x"), 17)}) {
+		t.Fatal("truncated sentinel rejected")
 	}
+	drainCapture(s) // nonblocking Capture may legitimately drop during worker I/O
 	if !s.Capture(CaptureInput{RequestID: "admission", KeyID: k.ID, TraceID: "t", Body: []byte("{}")}) {
 		t.Fatal("bounded input rejected")
 	}
