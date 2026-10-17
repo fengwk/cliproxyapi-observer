@@ -201,6 +201,8 @@ type hostOptions struct {
 	// Baseline only: start CPA without the plugin to measure normal routing.
 	PluginDisabled bool
 	TwoUpstreams   bool
+	// GeminiURL adds a standard api-keys.gemini upstream at this local URL.
+	GeminiURL string
 }
 
 func defaultHostOptions() hostOptions { return hostOptions{} }
@@ -332,6 +334,21 @@ func hostConfig(port int, authDir, pluginsDir, mockURL string, opts hostOptions)
 	if opts.TwoUpstreams {
 		extraKey = "\n      - api-key: \"fake-upstream-key-two\""
 	}
+	geminiSection := ""
+	if opts.GeminiURL != "" {
+		// The v8 Gemini group keeps endpoint settings on the group and the
+		// fake credential/models on nested entries, beside openai-compatibility.
+		geminiSection = fmt.Sprintf(`
+ gemini:
+   - name: "observer-gemini"
+     base-url: %q
+     keys:
+       - api-key: %q
+     models:
+       - name: %q
+         alias: %q
+`, opts.GeminiURL, geminiUpstreamKey, geminiUpstreamModel, geminiModelName)
+	}
 	return []byte(fmt.Sprintf(`config-version: 8
 server:
   host: "127.0.0.1"
@@ -362,14 +379,14 @@ api-keys:
       - name: %q
         alias: %q
       - name: %q
-        alias: %q
+        alias: %q%s
 plugins:
   enabled: %t
   dir: %q
   configs:
     %s:
       enabled: true
-`, port, mgmtKey, clientKey, clientKeyTwo, authDir, compatProviderName, mockURL+"/v1", upstreamKey, extraKey, upstreamModel, modelName, upstreamModelTwo, modelNameTwo, !opts.PluginDisabled, pluginsDir, pluginID))
+`, port, mgmtKey, clientKey, clientKeyTwo, authDir, compatProviderName, mockURL+"/v1", upstreamKey, extraKey, upstreamModel, modelName, upstreamModelTwo, modelNameTwo, geminiSection, !opts.PluginDisabled, pluginsDir, pluginID))
 }
 
 // hostEnv builds a minimal environment that cannot inherit production CPA

@@ -3,109 +3,56 @@
 package integration
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"sort"
 	"testing"
+	"time"
 )
 
-// Host management discovery wire shapes. The test deliberately reads the real
-// CPA responses instead of importing plugin or host packages.
-type modelsAuthFilesResponse struct {
-	Files []struct {
-		Name string `json:"name"`
-	} `json:"files"`
+type catalogCapability struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
-type modelsAuthFileModelsResponse struct {
-	Models []struct {
-		ID string `json:"id"`
-	} `json:"models"`
+func issueCatalogToken(t *testing.T, h *harness) catalogCapability {
+	t.Helper()
+	var token catalogCapability
+	before := time.Now()
+	h.api(t, "POST", "/models/token", nil, 200, &token)
+	if token.Token == "" || !token.ExpiresAt.After(before) || token.ExpiresAt.After(time.Now().Add(31*time.Second)) {
+		t.Fatal("invalid catalog capability lifetime")
+	}
+	return token
 }
 
-// modelsListAuthFiles asks the actual host for its management auth files. The
-// harness configures the local models as runtime compatibility credentials.
-func modelsListAuthFiles(h *harness) ([]string, error) {
-	status, raw, err := h.rawRequest(http.MethodGet, "/v0/management/auth-files", nil, map[string]string{
-		"Authorization": "Bearer " + mgmtKey,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("auth-files status %d: %s", status, truncate(raw, 300))
-	}
-	var listing modelsAuthFilesResponse
-	if err := json.Unmarshal(raw, &listing); err != nil {
-		return nil, fmt.Errorf("auth-files JSON: %w", err)
-	}
-	names := make([]string, 0, len(listing.Files))
-	for _, file := range listing.Files {
-		if file.Name != "" {
-			names = append(names, file.Name)
-		}
-	}
-	return names, nil
-}
-
-// modelsListFileIDs reads the model IDs the host registered for one auth file.
-func modelsListFileIDs(h *harness, name string) ([]string, error) {
-	path := "/v0/management/auth-files/models?name=" + url.QueryEscape(name)
-	status, raw, err := h.rawRequest(http.MethodGet, path, nil, map[string]string{
-		"Authorization": "Bearer " + mgmtKey,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("auth-files/models status %d: %s", status, truncate(raw, 300))
-	}
-	var listing modelsAuthFileModelsResponse
-	if err := json.Unmarshal(raw, &listing); err != nil {
-		return nil, fmt.Errorf("auth-files/models JSON: %w", err)
-	}
-	ids := make([]string, 0, len(listing.Models))
-	for _, model := range listing.Models {
-		if model.ID != "" {
-			ids = append(ids, model.ID)
-		}
-	}
-	return ids, nil
-}
-
-// modelsDiscoverLocalModels uses the actual host management endpoints and polls
-// until the runtime model registration is visible. The harness configures
-// exactly two local models, so both must be returned and nothing else.
+// The management nonce authenticates the actual host catalog, not a copied
+// pricing/config catalog. Refresh a single-use nonce on each bounded poll.
 func modelsDiscoverLocalModels(t *testing.T, h *harness) []string {
 	t.Helper()
-
 	var ids []string
-	// Host registers runtime credentials asynchronously. Poll the real listing,
-	// never synthesize a discovery-only credential to hide an empty result.
-	h.await(t, "host auth-files lists runtime credentials and auth-files/models exposes both local models", func() bool {
-		names, err := modelsListAuthFiles(h)
-		if err != nil {
-			t.Fatalf("host auth-files discovery: %v", err)
+	h.await(t, "catalog capability exposes both local models", func() bool {
+		token := issueCatalogToken(t, h)
+		status, raw, err := h.rawRequest("GET", "/v1/models", nil, map[string]string{"Authorization": "Bearer " + token.Token})
+		if err != nil || status != 200 {
+			t.Fatalf("catalog status=%d error=%v body=%s", status, err, raw)
 		}
-		if len(names) == 0 {
-			return false
+		var catalog struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
 		}
-		set := make(map[string]struct{})
-		for _, name := range names {
-			got, err := modelsListFileIDs(h, name)
-			if err != nil {
-				return false
-			}
-			for _, id := range got {
-				set[id] = struct{}{}
-			}
+		if err := json.Unmarshal(raw, &catalog); err != nil {
+			t.Fatal(err)
 		}
-		ids = ids[:0]
-		for id := range set {
-			ids = append(ids, id)
+		ids = nil
+		for _, model := range catalog.Data {
+			ids = append(ids, model.ID)
 		}
 		sort.Strings(ids)
 		return slices.Contains(ids, modelName) && slices.Contains(ids, modelNameTwo)
@@ -170,15 +117,58 @@ func modelsKeyByID(t *testing.T, h *harness, id string) keyView {
 	return keyView{}
 }
 
-// TestLocalModelDiscovery proves the real host management auth-files surface
-// lists the two local runtime models. It intentionally fails when the host does
-// not expose configured runtime credentials instead of fabricating a
-// discovery-only credential, so the cross-layer gap stays visible.
+// Catalog access is a one-shot, read-only capability, never a frontend bypass
+// for management/builtin keys and never usable for generation or token counting.
 func TestLocalModelDiscovery(t *testing.T) {
 	h := newHarness(t)
 	discovered := modelsDiscoverLocalModels(t, h)
 	if !slices.Equal(discovered, []string{modelName, modelNameTwo}) {
 		t.Fatalf("discovered models = %v, want [%s %s]", discovered, modelName, modelNameTwo)
+	}
+	for _, secret := range []string{clientKey, mgmtKey} {
+		status, _, err := h.rawRequest("GET", "/v1/models", nil, map[string]string{"Authorization": "Bearer " + secret})
+		if err != nil || (status != 401 && status != 403) {
+			t.Fatalf("catalog bypass status=%d err=%v", status, err)
+		}
+	}
+	token := issueCatalogToken(t, h)
+	for i := 0; i < 2; i++ {
+		status, _, err := h.rawRequest("GET", "/v1/models", nil, map[string]string{"Authorization": "Bearer " + token.Token})
+		if err != nil || (i == 0 && status != 200) || (i == 1 && status != 401 && status != 403) {
+			t.Fatalf("single-use catalog attempt %d status=%d err=%v", i, status, err)
+		}
+	}
+	tokens := []string{token.Token}
+	before := h.mock.callCount()
+	for _, path := range []string{"/v1/chat/completions", "/v1/messages/count_tokens"} {
+		fresh := issueCatalogToken(t, h)
+		tokens = append(tokens, fresh.Token)
+		status, _, err := h.rawRequest("POST", path, chatBody(false), map[string]string{"Authorization": "Bearer " + fresh.Token})
+		if err != nil || (status != 401 && status != 403) {
+			t.Fatalf("catalog token escaped read-only scope: %s status=%d err=%v", path, status, err)
+		}
+	}
+	if h.mock.callCount() != before {
+		t.Fatal("catalog token forwarded inference")
+	}
+	for _, path := range []string{"/keys", "/health", "/requests", "/settings"} {
+		raw := h.api(t, "GET", path, nil, 200, nil)
+		for _, secret := range tokens {
+			if bytes.Contains(raw, []byte(secret)) {
+				t.Fatal("catalog token persisted in metadata")
+			}
+		}
+	}
+	h.Stop()
+	db, err := os.ReadFile(h.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := []byte(h.stdout.String() + h.stderr.String())
+	for _, secret := range tokens {
+		if bytes.Contains(db, []byte(secret)) || bytes.Contains(logs, []byte(secret)) {
+			t.Fatal("catalog token persisted in DB/logs")
+		}
 	}
 }
 
