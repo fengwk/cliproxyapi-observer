@@ -164,6 +164,7 @@ func (*Store) UpdateKey(string,KeySpec) (Key,error)
 func (*Store) RotateKey(string) (Key,string,error)
 func (*Store) RevokeKey(string) error // disable + invalidate secret, retain history
 func (*Store) ResetKey(string,[]string) (Key,error) // five_hour/week/month/total
+func (*Store) RecoverKey(string,bool /* acknowledge unknown usage */) (Key,error)
 func (*Store) Keys() ([]Key,error)
 func (*Store) Authenticate(string) (Key,error) // enabled + expiry only
 func (*Store) Authorize(keyID, model string) error // enabled/expiry/model, no reservation
@@ -242,10 +243,11 @@ Standard direct JSON response (not RPC envelope) and errors
 
 - GET `/health` -> Health plus `version`, `schema_version:2`
 - GET `/keys` -> `{"items":[Key...]}`; POST `/keys` KeySpec ->201 `{"key":Key,"secret":"..."}`
-- PUT `/keys/{id}` KeySpec -> Key; DELETE ->204 (revoke)
-- POST `/keys/{id}/rotate` -> `{"key":Key,"secret":"..."}`
-- POST `/keys/{id}/reset` `{"windows":["five_hour",...]}` ->Key
-- GET `/requests` ->RequestPage, GET `/requests/{id}` ->Detail
+- PUT `/keys?id={id}` KeySpec -> Key; DELETE `/keys?id={id}` ->204 (revoke)
+- POST `/keys/rotate?id={id}` -> `{"key":Key,"secret":"..."}`
+- POST `/keys/reset?id={id}` `{"windows":["five_hour",...]}` ->Key
+- POST `/keys/recover?id={id}` `{"acknowledge":true}` ->Key (see safety below)
+- GET `/requests` ->RequestPage, GET `/requests/detail?id={id}` ->Detail
 - GET `/summary` ->Summary
 - GET/PUT `/settings` ->Settings; GET `/prices` ->pricing.Snapshot
 - POST `/prices/refresh` ->Snapshot, POST `/compact` ->Health
@@ -288,3 +290,40 @@ hosts, use local mock upstream, prove strict auth, correct request bytes, fixed
 prices, limits, reset, concurrency slot release, stream/cancel/count-tokens,
 filtered logs/details/redaction, settings and persisted restart behavior.
 Document commands; tests comment their intent. No manual-only validation.
+
+## Review amendments (binding)
+
+The SDK management router only matches registered static paths. The query-ID
+routes above supersede the originally planned dynamic paths; do not retain dead
+compatibility routes. Register the trailing `/ui/` route as well as `/ui`.
+
+Key model selection: default all; explicit searchable checkbox multi-select
+restricts to selected exact requested IDs. Discover real configured models using
+CPA's authenticated `GET /v0/management/auth-files` (`files[].name`) and
+`GET /v0/management/auth-files/models?name=...` (`models[].id`), including runtime
+credentials. Cache/bound concurrency, preserve unavailable selected IDs, surface
+partial failures. Do not use the public pricing catalog as an availability list.
+Allow a manual exact model ID when discovery is unavailable. Never turn a failed
+discovery into unrestricted access for an existing restricted Key.
+
+Per-Key recovery: retained pending billing retries automatically with original
+quote. For a crash or irrecoverably lost event, persist a Key-scoped blocked
+reason; do not permanently poison a whole database including future new Keys.
+An administrator may explicitly acknowledge unknown/missing usage via RecoverKey
+only after retries have settled and storage works. Expose a clearly warned
+confirmation in UI; reset/rotate must never implicitly acknowledge it. Recovery
+does not change counters, historical costs or limits. Close must release handles
+even on debt, and a failed close must not leave the plugin holding a closed Store.
+
+Bound all event-derived state: completed admissions/correlations expire, dedup
+has a documented replay horizon (7d) with durable monotonic cutoff so expired
+replays cannot be billed again. A too-old unseen event must fail closed for its
+Key, not silently recharge it. Max captured body <=8MiB; queue and storage are
+bounded. Compress request metadata/details as well as bodies. Short ranges fully
+covered by raw retention return useful hourly trends; older whole-day ranges use
+daily buckets. Do not count full daily rollups into an hourly chart.
+
+Pricing rule input_tokens_gt uses full prompt context (uncached+read+write),
+not only uncached billable input. Expose optional provider in price snapshots
+when the same model has provider-specific rates, with no effect on model-wide
+manual overrides.
