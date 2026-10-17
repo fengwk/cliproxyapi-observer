@@ -42,6 +42,8 @@ const RESOURCE_BASE = '/v0/resource/plugins/' + PLUGIN_ID;
 const MANAGEMENT_BASE = '/v0/management/plugins/' + PLUGIN_ID;
 const DEFAULT_MANAGEMENT_KEY = 'observer-browser-secret';
 const MAX_BODY_BYTES = 1024 * 1024;
+// 与引擎/设置 UI 相同的请求体总存储上限（1 GiB）。
+const MAX_BODY_STORAGE_BYTES = 1024 * 1024 * 1024;
 const CATALOG_PATH = '/v1/models';
 const CAPABILITY_TTL_MS = 30 * 1000;
 const MAX_OUTSTANDING_CAPABILITIES = 32;
@@ -49,6 +51,12 @@ const MAX_CATALOG_MODELS = 100;
 const ASSET_DIR = path.resolve(__dirname, '..');
 
 const SECRET_PREFIX = 'observer_sk_';
+
+// 回归夹具：9 位纳秒 RFC3339 到期时间；64 位十六进制 Key ID。
+// 二者都必须能在 UI 截断/格式化后保留完整 API 值。
+const NANO_EXPIRY = '2027-03-04T05:06:07.123456789Z';
+const NANO_KEY_ID = 'key-nano';
+const LONG_KEY_ID = '0123456789abcdef'.repeat(4);
 
 // Server-provided payloads that must never become DOM nodes or execute script.
 const XSS = {
@@ -290,6 +298,34 @@ function createRecords(now) {
       latency_ms: 640,
       ttft_ms: 98,
       cost_micro_usd: 98_000
+    }),
+    // 64 位十六进制 Key ID：UI 只显示 12 位前缀，title/复制值必须是完整 ID。
+    record('req-007', 3, {
+      key_id: LONG_KEY_ID,
+      model: 'log-keyid-fixture',
+      provider: 'mock',
+      auth_index: 'auth-mock-keyid',
+      latency_ms: 500,
+      ttft_ms: 50,
+      tokens: { input: 600, output: 400, cache_read: 0, cache_write: 0, reasoning: 0, total: 1000 },
+      raw_usage: { input_tokens: 600, output_tokens: 400 },
+      cost_micro_usd: 1_000,
+      price_source: 'auto',
+      accounting_quality: 'complete'
+    }),
+    // 未分类核算质量：日志行应给出小型 warning，而不是恒定 TPS 未知文案。
+    record('req-008', 1, {
+      key_id: 'key-alpha',
+      model: 'log-unclassified-fixture',
+      provider: 'mock',
+      auth_index: 'auth-mock-quality',
+      latency_ms: 320,
+      ttft_ms: 40,
+      tokens: { input: 300, output: 200, cache_read: 0, cache_write: 0, reasoning: 0, total: 500 },
+      raw_usage: { input_tokens: 300, output_tokens: 200 },
+      cost_micro_usd: 0,
+      price_source: 'unpriced',
+      accounting_quality: 'unclassified'
     })
   ];
 }
@@ -344,6 +380,12 @@ function createState(options) {
         allowed_models: ['retired-model-v0', 'gpt-5-codex'],
         max_concurrent: 2,
         active: 0
+      }),
+      createKey(NANO_KEY_ID, '纳秒到期 Key', {
+        allowed_models: ['gpt-5-codex'],
+        max_concurrent: 2,
+        active: 0,
+        expires_at: NANO_EXPIRY
       }),
       createKey('key-blocked', '待恢复计费 Key', {
         allowed_models: ['gpt-5-codex'],
@@ -764,6 +806,9 @@ function validateSettings(body) {
   }
   ensureInteger(body.max_body_bytes, 'max_body_bytes', 0);
   ensureInteger(body.max_body_storage_bytes, 'max_body_storage_bytes', 0);
+  if (body.max_body_storage_bytes > MAX_BODY_STORAGE_BYTES) {
+    throw failure(400, 'invalid_json', 'max_body_storage_bytes must be <= ' + MAX_BODY_STORAGE_BYTES);
+  }
   ensureInteger(body.raw_retention_hours, 'raw_retention_hours', 1);
   if (body.raw_retention_hours > 168) throw failure(400, 'invalid_json', 'raw_retention_hours must be <= 168');
   ensureInteger(body.daily_retention_days, 'daily_retention_days', 1);
@@ -1368,6 +1413,10 @@ module.exports = {
   MAX_OUTSTANDING_CAPABILITIES,
   MANAGEMENT_BASE,
   MAX_BODY_BYTES,
+  MAX_BODY_STORAGE_BYTES,
+  LONG_KEY_ID,
+  NANO_EXPIRY,
+  NANO_KEY_ID,
   PLUGIN_ID,
   RESOURCE_BASE,
   SECRET_PREFIX,

@@ -34,8 +34,28 @@
     }
     return "?" + p;
   }
+  // datetime-local is explicitly UTC in this form; normalize only its display
+  // precision, retaining the server's nanosecond string for unchanged edits.
+  function expiryInput(original) {
+    return original ? new Date(original).toISOString().slice(0, -1) : "";
+  }
+  function expiryValue(original, input) {
+    if (!input) return null;
+    const utc = new Date(input + "Z").toISOString();
+    return original && Date.parse(original) === Date.parse(utc)
+      ? original
+      : utc;
+  }
   if (typeof module !== "undefined")
-    module.exports = { micro, usd, base, query };
+    module.exports = {
+      micro,
+      usd,
+      base,
+      query,
+      expiryInput,
+      expiryValue,
+      utcShort,
+    };
   if (typeof document === "undefined") return;
   const $ = (s) => document.querySelector(s);
   let seq = 0;
@@ -419,16 +439,42 @@
           "状态",
         ],
         (r.items || []).map((v) => {
-          const d = el("div", v.time);
+          const d = el("div", utcShort(v.time, true), { title: v.time });
           d.append(
             el("br"),
             button(v.model, () => detail(v.id)),
           );
+          const keyCell = el("div");
+          const id = v.key_id || "—";
+          keyCell.append(
+            el(
+              "span",
+              /^[a-f0-9]{64}$/i.test(id) ? id.slice(0, 12) + "…" : id,
+              { title: id },
+            ),
+          );
+          if (/^[a-f0-9]{64}$/i.test(id))
+            keyCell.append(
+              button("复制完整 Key ID", async () => {
+                try {
+                  await navigator.clipboard.writeText(id);
+                } catch {
+                  message.textContent =
+                    "复制失败，请从 Key ID 提示中复制完整标识。";
+                }
+              }),
+            );
+          const usage = el(
+            "div",
+            v.latency_ms + "ms / " + v.tokens.total + " Token",
+          );
+          if (v.accounting_quality === "unclassified")
+            usage.append(el("small", "Token 口径未分类", { class: "muted" }));
           return [
             d,
-            v.key_id,
+            keyCell,
             v.provider + " / " + v.auth_index,
-            v.latency_ms + "ms / " + v.tokens.total + " Token · TPS 不确定",
+            usage,
             usd(v.cost_micro_usd) +
               "$ · " +
               (v.price_source === "unpriced" ? "未定价（0）" : v.price_source),
@@ -705,12 +751,7 @@
       inputs = {};
     for (const [n, l, t, v] of [
       ["label", "标签", "text", k?.label || ""],
-      [
-        "expires_at",
-        "到期时间",
-        "datetime-local",
-        k?.expires_at?.replace(/Z$/, "") || "",
-      ],
+      ["expires_at", "到期时间", "datetime-local", expiryInput(k?.expires_at)],
       ["max_concurrent", "并发上限", "number", k?.max_concurrent || 0],
     ]) {
       const i = el(
@@ -779,9 +820,7 @@
         const body = {
           label: inputs.label.value,
           enabled: enabled.checked,
-          expires_at: inputs.expires_at.value
-            ? new Date(inputs.expires_at.value + "Z").toISOString()
-            : null,
+          expires_at: expiryValue(k?.expires_at, inputs.expires_at.value),
           max_concurrent: Number(inputs.max_concurrent.value),
           allowed_models: models.read(),
           limits: Object.fromEntries(

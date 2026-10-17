@@ -1550,6 +1550,67 @@ async function clearRequestFilters(cdp) {
   if (!cleared) throw new Error('找不到请求筛选表单');
 }
 
+async function inspectRequestRow(cdp, needle) {
+  return cdp.evaluate(
+    pageFn(
+      VISIBLE_SNIPPET +
+        'const norm=(s)=>(s||"").replace(/\\s+/g," ").trim();' +
+        'const row=[...document.querySelectorAll("#content tbody tr")].filter(visible)' +
+        '.find((candidate)=>norm(candidate.innerText).includes(arguments[0]));' +
+        'if(!row)return {present:false};' +
+        'const titles=[...row.querySelectorAll("[title]")].map(function(el){' +
+        'const leading=el.firstChild&&el.firstChild.nodeType===3?String(el.firstChild.nodeValue||"").trim():"";' +
+        'return {title:el.getAttribute("title")||"",text:(el.textContent||"").trim(),leading:leading};});' +
+        'const buttons=[...row.querySelectorAll("button,[role=button]")].filter(visible).map(function(button){' +
+        'return {text:(button.innerText||"").trim(),aria:(button.getAttribute("aria-label")||"").trim()};});' +
+        'const warnings=[...row.querySelectorAll("small,.warning,.error,[role=status]")].filter(visible).map(function(el){' +
+        'return {tag:el.tagName,text:(el.innerText||"").trim(),cls:String(el.className||"")};});' +
+        'return {present:true,text:row.innerText,titles:titles,buttons:buttons,warnings:warnings};',
+      needle
+    )
+  );
+}
+
+async function prepareClipboard(cdp, server) {
+  await cdp.send('Page.bringToFront').catch(() => {});
+  let granted = false;
+  try {
+    await cdp.send('Browser.grantPermissions', {
+      origin: server.origin,
+      permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite']
+    });
+    granted = true;
+  } catch (err) {
+    /* 无权限时退回 writeText 捕获。 */
+  }
+  await cdp.evaluate(
+    pageFn(
+      'window.__observerCopied=null;' +
+        'if(!window.__observerCopyHook){window.__observerCopyHook=true;' +
+        'document.addEventListener("copy",function(){try{window.__observerCopied=String(window.getSelection()||"");}catch(e){}},true);' +
+        'if(navigator.clipboard&&navigator.clipboard.writeText){' +
+        'var original=navigator.clipboard.writeText.bind(navigator.clipboard);' +
+        'navigator.clipboard.writeText=function(value){window.__observerCopied=String(value);return original(value);};}}'
+    )
+  );
+  if (granted) {
+    await cdp
+      .evaluate(
+        'navigator.clipboard.writeText("__observer_clipboard_sentinel__")' +
+          '.then(function(){return true;}).catch(function(){return false;})'
+      )
+      .catch(() => {});
+  }
+  return granted;
+}
+
+async function readClipboardValue(cdp) {
+  return cdp.evaluate(
+    'navigator.clipboard&&navigator.clipboard.readText' +
+      '?navigator.clipboard.readText().catch(function(){return "";}):""'
+  );
+}
+
 async function clickSettingsTestId(cdp, testId) {
   const result = await cdp.evaluate(
     pageFn(
@@ -2157,6 +2218,107 @@ async function runBrowserSuite(server, cdp) {
       check('详情对话框位于视口内', rectOk, JSON.stringify(dialog.rect));
       await closeDialog(cdp);
       return 'detail=' + afterCalls;
+    });
+
+    await step('请求日志: 短时间/完整 Key ID 复制/未分类质量', async () => {
+      await gotoPage(cdp, 'requests');
+      await waitRequestsLoaded(cdp);
+
+      const keyidRecord = server.state.records.find((record) => record.id === 'req-007');
+      const qualityRecord = server.state.records.find((record) => record.id === 'req-008');
+      check('mock 提供 64 位 Key ID 日志夹具', Boolean(keyidRecord) && keyidRecord.key_id === mock.LONG_KEY_ID, keyidRecord && keyidRecord.key_id);
+      check(
+        'mock 提供 unclassified 质量夹具',
+        Boolean(qualityRecord) && qualityRecord.accounting_quality === 'unclassified',
+        qualityRecord && qualityRecord.accounting_quality
+      );
+
+      const keyRow = await inspectRequestRow(cdp, keyidRecord.model);
+      check('日志行渲染 64 位 Key ID 夹具', keyRow.present, JSON.stringify(keyRow).slice(0, 300));
+
+      // 时间：短 UTC 文本，title 保留完整 RFC3339。
+      const iso = new Date(keyidRecord.time).toISOString();
+      const shortNoYear = iso.slice(5, 10) + ' ' + iso.slice(11, 16) + ' UTC';
+      const shortWithYear = iso.slice(0, 10) + ' ' + iso.slice(11, 16) + ' UTC';
+      const timeTitle = (keyRow.titles || []).find((item) => item.title === keyidRecord.time);
+      check(
+        '日志时间使用 utcShort 且 title 为完整时间',
+        Boolean(timeTitle) &&
+          (timeTitle.leading === shortNoYear || timeTitle.leading === shortWithYear) &&
+          !keyRow.text.includes(keyidRecord.time),
+        JSON.stringify({ time: timeTitle, expected: [shortNoYear, shortWithYear], row: keyRow.text.slice(0, 240) })
+      );
+
+      // Key：UI 只显示 12 位前缀，title 与复制值都是完整 64 位 ID。
+      const prefix = mock.LONG_KEY_ID.slice(0, 12);
+      const keyTitle = (keyRow.titles || []).find((item) => item.title === mock.LONG_KEY_ID);
+      const displayedKey = keyTitle ? (keyTitle.leading || keyTitle.text).trim() : '';
+      check(
+        '日志 Key 显示 12 位前缀且 title 为完整 ID',
+        Boolean(keyTitle) &&
+          (displayedKey === prefix || displayedKey === prefix + '…' || displayedKey === prefix + '...') &&
+          !keyRow.text.includes(mock.LONG_KEY_ID),
+        JSON.stringify({ displayed: displayedKey, prefix: prefix, titles: keyRow.titles })
+      );
+
+      const clipboardGranted = await prepareClipboard(cdp, server);
+      const copyClick = await cdp.evaluate(
+        pageFn(
+          VISIBLE_SNIPPET +
+            'const norm=(s)=>(s||"").replace(/\\s+/g," ").trim();' +
+            'const row=[...document.querySelectorAll("#content tbody tr")].filter(visible)' +
+            '.find((candidate)=>norm(candidate.innerText).includes(arguments[0]));' +
+            'if(!row)return {ok:false,reason:"missing-row"};' +
+            'const button=[...row.querySelectorAll("button,[role=button]")].filter(visible).find(function(node){' +
+            'return /复制/.test((node.innerText||"")+" "+(node.getAttribute("aria-label")||""));});' +
+            'if(!button)return {ok:false,reason:"missing-copy"};button.click();return {ok:true,text:(button.innerText||"").trim()};',
+          keyidRecord.model
+        )
+      );
+      await sleep(200);
+      const captured = await cdp.evaluate('window.__observerCopied');
+      const clipboard = clipboardGranted ? await readClipboardValue(cdp) : '';
+      check(
+        '复制按钮写入完整 64 位 Key ID',
+        copyClick.ok && (captured === mock.LONG_KEY_ID || clipboard === mock.LONG_KEY_ID),
+        JSON.stringify({ click: copyClick, captured: captured, clipboard: clipboard, granted: clipboardGranted })
+      );
+
+      // 截断只影响显示；请求列表 API 仍返回完整真实 ID。
+      const exactKey = await apiRequest(
+        server,
+        'GET',
+        '/requests?key_id=' + encodeURIComponent(mock.LONG_KEY_ID)
+      );
+      check(
+        '日志 Key 截断不改变 API 真实 ID',
+        exactKey.status === 200 &&
+          exactKey.body.items.length === 1 &&
+          exactKey.body.items[0].id === 'req-007' &&
+          exactKey.body.items[0].key_id === mock.LONG_KEY_ID,
+        JSON.stringify(exactKey.body.items && exactKey.body.items.map((record) => ({ id: record.id, key_id: record.key_id })))
+      );
+
+      // unclassified：行内小型 warning；不再恒定显示 TPS 未知。
+      const qualityRow = await inspectRequestRow(cdp, qualityRecord.model);
+      const warning = (qualityRow.warnings || []).find(
+        (item) => /未分类|unclassified|核算质量/i.test(item.text)
+      );
+      check(
+        'unclassified 日志行显示小型 warning',
+        qualityRow.present &&
+          warning &&
+          (warning.tag === 'SMALL' || /warn|error|caution/i.test(warning.cls)),
+        JSON.stringify({ row: qualityRow.present, warnings: qualityRow.warnings })
+      );
+      const contentText = await text(cdp, '#content');
+      check(
+        '日志不再显示恒定 TPS 未知文案',
+        !/TPS\s*(?:不确定|unknown)/i.test(contentText),
+        (contentText.match(/TPS[^\n]{0,24}/) || [])[0] || contentText.slice(0, 240)
+      );
+
+      return 'keyid=' + keyidRecord.key_id.slice(0, 12) + ';quality=' + qualityRecord.accounting_quality;
     });
   }
 
@@ -2768,6 +2930,141 @@ async function runBrowserSuite(server, cdp) {
     keysReady = keysReady || ok;
   });
 
+  await step('Key 到期时间: 纳秒 RFC3339/ISO 渲染/改时/清空', async () => {
+    const nanoIso = new Date(mock.NANO_EXPIRY).toISOString();
+    const editedLabel = '纳秒到期 Key（编辑）';
+    const nextTime = '2028-01-02T03:04:05.678';
+    const nextIso = new Date(nextTime + 'Z').toISOString();
+    const lastSeq = () => server.calls.reduce((max, call) => Math.max(max, call.seq || 0), 0);
+    const waitKeyRow = (label) =>
+      cdp.waitFor(
+        '(() => {' + VISIBLE_SNIPPET +
+          'const norm=(s)=>(s||"").replace(/\\s+/g," ").trim();' +
+          'const c=document.querySelector("#content");if(!c)return false;' +
+          'return [...c.querySelectorAll("tr,[data-key-id],.key-row,.card")].filter(visible)' +
+          '.some((row)=>norm(row.innerText).includes(' + js(label) + '));})()',
+        15000,
+        'Key 行 ' + label
+      );
+    const rowText = (label) =>
+      cdp.evaluate(
+        pageFn(
+          VISIBLE_SNIPPET +
+            'const norm=(s)=>(s||"").replace(/\\s+/g," ").trim();' +
+            'const row=[...document.querySelectorAll("#content tr,[data-key-id],.key-row,.card")].filter(visible)' +
+            '.find((candidate)=>norm(candidate.innerText).includes(arguments[0]));' +
+            'return row?row.innerText:"";',
+          label
+        )
+      );
+    const openEdit = async (label) => {
+      await clickInRow(cdp, label, '编辑');
+      const info = await waitDialog(cdp);
+      check('编辑到期时间对话框打开: ' + label, info.present);
+      await waitModelDirectory(cdp);
+    };
+    const setKeyField = (label, value) => setFieldByLabel(cdp, label, value, DIALOG_ROOT);
+    const save = () =>
+      clickText(cdp, '保存', {
+        selector: 'dialog button, [role="dialog"] button, [aria-modal="true"] button'
+      });
+    const waitPut = async (since, label) => {
+      const call = await waitForCall(
+        server,
+        (item) =>
+          item.seq > since &&
+          item.method === 'PUT' &&
+          suffixOf(item) === '/keys' &&
+          item.query.id === mock.NANO_KEY_ID,
+        20000,
+        label
+      );
+      return call;
+    };
+
+    const expiryFieldValue = () =>
+      cdp.evaluate(
+        pageFn(
+          VISIBLE_SNIPPET +
+            'const dialogs=[...document.querySelectorAll("' + DIALOG_ROOT + '")].filter(visible);' +
+            'const dialog=dialogs[dialogs.length-1];' +
+            'const input=dialog?dialog.querySelector(\'input[type="datetime-local"]\'):null;' +
+            'return input?String(input.value):null;'
+        )
+      );
+
+    await gotoPage(cdp, 'keys');
+    await waitKeyRow('纳秒到期 Key');
+    // 表单以毫秒 UTC 显示；原始 9 位纳秒值只用于未修改时的回传。
+    await openEdit('纳秒到期 Key');
+    const shownExpiry = await expiryFieldValue();
+    check(
+      '到期输入按毫秒 UTC 显示',
+      shownExpiry === nanoIso.slice(0, -1),
+      JSON.stringify({ expected: nanoIso.slice(0, -1), shown: shownExpiry })
+    );
+
+    // 仅改标签：未触碰到期输入，PUT 必须原样回传 9 位纳秒 RFC3339。
+    await setKeyField('标签', editedLabel);
+    let startSeq = lastSeq();
+    await save();
+    const labelOnly = await waitPut(startSeq, 'PUT key-nano 仅标签');
+    check(
+      '仅改标签保留原始纳秒 expiry',
+      labelOnly.status === 200 &&
+        labelOnly.request_body &&
+        labelOnly.request_body.label === editedLabel &&
+        labelOnly.request_body.expires_at === mock.NANO_EXPIRY,
+      JSON.stringify(labelOnly.request_body)
+    );
+    check(
+      'mock 保存后 expiry 仍为原始纳秒值',
+      server.state.keys.find((key) => key.id === mock.NANO_KEY_ID).expires_at === mock.NANO_EXPIRY
+    );
+    await closeDialog(cdp).catch(() => {});
+    await waitKeyRow(editedLabel);
+
+    // 修改时间：发送 new Date(...).toISOString() 的 UTC 毫秒 ISO。
+    await openEdit(editedLabel);
+    await setKeyField('到期时间', nextTime);
+    startSeq = lastSeq();
+    await save();
+    const changed = await waitPut(startSeq, 'PUT key-nano 改时间');
+    check(
+      '修改时间发送 UTC ISO 毫秒',
+      changed.status === 200 &&
+        changed.request_body &&
+        changed.request_body.expires_at === nextIso,
+      JSON.stringify({ expected: nextIso, body: changed.request_body })
+    );
+    check(
+      'mock 保存后 expiry 为新 ISO 值',
+      server.state.keys.find((key) => key.id === mock.NANO_KEY_ID).expires_at === nextIso
+    );
+    await closeDialog(cdp).catch(() => {});
+    await waitKeyRow(editedLabel);
+
+    // 清空：发送 null。
+    await openEdit(editedLabel);
+    await setKeyField('到期时间', '');
+    startSeq = lastSeq();
+    await save();
+    const cleared = await waitPut(startSeq, 'PUT key-nano 清空');
+    check(
+      '清空到期时间发送 null',
+      cleared.status === 200 &&
+        cleared.request_body &&
+        cleared.request_body.expires_at === null,
+      JSON.stringify(cleared.request_body)
+    );
+    check(
+      'mock 保存后 expiry 为 null',
+      server.state.keys.find((key) => key.id === mock.NANO_KEY_ID).expires_at === null
+    );
+    await closeDialog(cdp).catch(() => {});
+    return 'expiry=' + nanoIso;
+  });
+
   await step('设置: 卡片标签/保存/价格刷新/物理压缩', async () => {
     await gotoPage(cdp, 'settings');
     settingsReady = true;
@@ -2940,6 +3237,95 @@ async function runBrowserSuite(server, cdp) {
     return modules.join('/');
   }).then((ok) => {
     settingsReady = settingsReady || ok;
+  });
+
+  await step('设置: 1 GiB 总存储上限与精确边界保存', async () => {
+    await gotoPage(cdp, 'settings');
+    await waitVisible(cdp, '[data-testid="settings-general-save"]', 15000, '设置保存按钮');
+    const exact = mock.MAX_BODY_STORAGE_BYTES;
+    const putCount = () => settingsPutCount(server);
+
+    await setGeneralSettings(cdp, {
+      capture: true,
+      max_body_bytes: 2097152,
+      max_body_storage_bytes: exact + 1,
+      raw_retention_hours: 24,
+      daily_retention_days: 365
+    });
+    const validity = await cdp.evaluate(
+      pageFn(
+        `
+        const input=document.querySelector('input[id$="-max-body-storage-bytes"]');
+        return input?{value:String(input.value),max:input.max,rangeOverflow:input.validity.rangeOverflow,valid:input.validity.valid}:null;
+        `
+      )
+    );
+    const beforeOversize = putCount();
+    await clickSettingsTestId(cdp, 'settings-general-save');
+    await sleep(250);
+    check(
+      '总存储 > 1GiB 被原生约束标记越界',
+      validity &&
+        validity.value === String(exact + 1) &&
+        validity.max === String(exact) &&
+        validity.rangeOverflow === true &&
+        validity.valid === false,
+      JSON.stringify(validity)
+    );
+    check('总存储 > 1GiB 点击保存不发送 PUT', putCount() === beforeOversize, 'PUT 数量未变');
+
+    await cdp.evaluate(
+      pageFn(
+        `
+        const status=document.querySelector('[id$="-general-status"]');
+        if(status)status.textContent='';
+        const save=document.querySelector('[data-testid="settings-general-save"]');
+        if(!save||!save.form)return false;
+        save.form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
+        return true;
+        `
+      )
+    );
+    await cdp.waitFor(
+      '(() => {const el=document.querySelector(\'[id$="-general-status"]\');' +
+        'return !!el&&/1073741824|1 GiB/.test(el.innerText);})()',
+      5000,
+      '1 GiB 上限应用层错误'
+    );
+    check(
+      '总存储 > 1GiB 直接 submit 仍被应用层拒绝且不发送 PUT',
+      putCount() === beforeOversize && server.state.settings.max_body_storage_bytes !== exact + 1,
+      JSON.stringify({ puts: putCount(), stored: server.state.settings.max_body_storage_bytes })
+    );
+
+    await setGeneralSettings(cdp, {
+      capture: true,
+      max_body_bytes: 2097152,
+      max_body_storage_bytes: exact,
+      raw_retention_hours: 24,
+      daily_retention_days: 365
+    });
+    const startSeq = server.calls.reduce((max, call) => Math.max(max, call.seq || 0), 0);
+    await clickSettingsTestId(cdp, 'settings-general-save');
+    const saved = await waitForCall(
+      server,
+      (call) => call.seq > startSeq && call.method === 'PUT' && suffixOf(call) === '/settings',
+      20000,
+      'PUT /settings exact 1 GiB'
+    );
+    check(
+      '精确 1GiB 可保存且 mock 接受',
+      saved.status === 200 &&
+        saved.request_body &&
+        saved.request_body.max_body_storage_bytes === exact &&
+        server.state.settings.max_body_storage_bytes === exact,
+      JSON.stringify({
+        status: saved.status,
+        body: saved.request_body && saved.request_body.max_body_storage_bytes,
+        stored: server.state.settings.max_body_storage_bytes
+      })
+    );
+    return 'storage=' + exact;
   });
 
   await step('设置: pricing editor 手工价/规则/严格校验/保存', async () => {
@@ -3247,6 +3633,91 @@ async function runBrowserSuite(server, cdp) {
       JSON.stringify(finalState)
     );
     return 'pricing-editor';
+  });
+
+  await step('设置: constructor/__proto__ 名称不被误判重复', async () => {
+    await gotoPage(cdp, 'settings');
+    await waitVisible(cdp, '[data-testid="settings-pricing-save"]', 15000, '价格编辑器');
+    const zeroRates = { input: '0', output: '0', cache_read: '0', cache_write: '0', reasoning: '' };
+    const manualStart = await pricingRowCount(cdp, 'manual');
+    const ruleStart = await pricingRowCount(cdp, 'rule');
+
+    await addPricingRow(cdp, 'manual');
+    await setPricingRow(cdp, 'manual', manualStart, { model: 'constructor', rates: zeroRates });
+    await addPricingRow(cdp, 'manual');
+    await setPricingRow(cdp, 'manual', manualStart + 1, { model: '__proto__', rates: zeroRates });
+    await addPricingRow(cdp, 'rule');
+    await setPricingRow(cdp, 'rule', ruleStart, {
+      id: 'constructor',
+      model: 'gpt-5-codex',
+      threshold: '',
+      range: '',
+      rates: zeroRates
+    });
+    await addPricingRow(cdp, 'rule');
+    await setPricingRow(cdp, 'rule', ruleStart + 1, {
+      id: '__proto__',
+      model: 'gpt-5-codex',
+      threshold: '',
+      range: '',
+      rates: zeroRates
+    });
+
+    const idBefore = await settingsFirstManualId(cdp);
+    let startSeq = server.calls.reduce((max, call) => Math.max(max, call.seq || 0), 0);
+    await clickSettingsTestId(cdp, 'settings-pricing-save');
+    const saved = await waitForCall(
+      server,
+      (call) => call.seq > startSeq && call.method === 'PUT' && suffixOf(call) === '/settings',
+      20000,
+      'constructor/__proto__ PUT /settings'
+    );
+    const body = saved.request_body || {};
+    check(
+      'constructor/__proto__ 手工模型不误报重复',
+      saved.status === 200 &&
+        body.pricing &&
+        body.pricing.prices.filter((price) => price.model === 'constructor').length === 1 &&
+        body.pricing.prices.filter((price) => price.model === '__proto__').length === 1,
+      JSON.stringify(body.pricing && body.pricing.prices)
+    );
+    check(
+      'constructor/__proto__ 规则 ID 不误报重复',
+      body.pricing &&
+        body.pricing.rules.filter((rule) => rule.id === 'constructor').length === 1 &&
+        body.pricing.rules.filter((rule) => rule.id === '__proto__').length === 1,
+      JSON.stringify(body.pricing && body.pricing.rules)
+    );
+    await waitSettingsReloaded(cdp, idBefore);
+    const persisted = await pricingEditorState(cdp);
+    check(
+      'constructor/__proto__ 保存后正常回显',
+      persisted.prices.some((price) => price.model.value === 'constructor') &&
+        persisted.prices.some((price) => price.model.value === '__proto__') &&
+        persisted.rules.some((rule) => rule.id.value === 'constructor') &&
+        persisted.rules.some((rule) => rule.id.value === '__proto__'),
+      JSON.stringify({
+        prices: persisted.prices.map((price) => price.model.value),
+        rules: persisted.rules.map((rule) => rule.id.value)
+      })
+    );
+
+    // 真实重复仍必须在提交层拒绝，且不得发送 PUT。
+    await setPricingRow(cdp, 'manual', manualStart + 1, { model: 'constructor' });
+    const putsBeforeModel = settingsPutCount(server);
+    await clickSettingsTestId(cdp, 'settings-pricing-save');
+    await waitPricingStatus(cdp, '/手工价格的模型 ID 重复/', '重复手工模型被拒绝');
+    check('真实重复手工模型不发送 PUT', settingsPutCount(server) === putsBeforeModel, 'PUT 数量未变');
+    await setPricingRow(cdp, 'manual', manualStart + 1, { model: '__proto__' });
+
+    await setPricingRow(cdp, 'rule', ruleStart + 1, { id: 'constructor' });
+    const putsBeforeRule = settingsPutCount(server);
+    await clickSettingsTestId(cdp, 'settings-pricing-save');
+    await waitPricingStatus(cdp, '/规则 ID 重复/', '重复规则 ID 被拒绝');
+    check('真实重复规则 ID 不发送 PUT', settingsPutCount(server) === putsBeforeRule, 'PUT 数量未变');
+    await setPricingRow(cdp, 'rule', ruleStart + 1, { id: '__proto__' });
+
+    return 'constructor/__proto__ ok';
   });
 
   await step('轮询暂停: 模态/编辑脏状态/隐藏标签页', async () => {
