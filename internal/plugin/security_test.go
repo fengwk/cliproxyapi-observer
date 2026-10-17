@@ -110,7 +110,7 @@ func TestAdmissionRotationAndResume(t *testing.T) {
 		t.Fatal("admission replay not idempotent")
 	}
 	// Config changes cannot close storage while an admitted request is live.
-	activeConfig := lifecycleRequest{[]byte("db: " + filepath.Join(t.TempDir(), "other.db")), 6}
+	activeConfig := lifecycleRequest{[]byte("enabled: false\ndb: " + m.cfg.DB), 6}
 	activeRaw, _ := json.Marshal(activeConfig)
 	activeOut, _ := m.HandleCall("plugin.reconfigure", activeRaw)
 	if !strings.Contains(string(activeOut), `"ok":false`) || m.store.Health().ActiveRequests != 1 {
@@ -148,6 +148,11 @@ func TestAdmissionRotationAndResume(t *testing.T) {
 		t.Fatal("rotation did not invalidate old Key")
 	}
 	cfg := m.cfg
+	previousStore, previousCancel := m.store, m.cancel
+	call(t, m, "plugin.register", lifecycleRequest{[]byte("db: " + cfg.DB), 6})
+	if m.store != previousStore || m.cancel == nil || previousCancel == nil {
+		t.Fatal("identical registration restarted storage")
+	}
 	call(t, m, "plugin.quiesce", nil)
 	if authenticate(rotated).Authenticated {
 		t.Fatal("quiesced authentication succeeded")
@@ -156,12 +161,12 @@ func TestAdmissionRotationAndResume(t *testing.T) {
 	if !authenticate(rotated).Authenticated {
 		t.Fatal("unchanged replacement rollback did not reopen")
 	}
-	// A directory cannot be opened as a bbolt file. Failed replacement must
-	// restore the previous database, not merely remember identical YAML.
+	// Even with no active requests, changing a configured DB requires a new
+	// Manager/process; a rejected change must preserve the live store and worker.
 	invalidRaw, _ := json.Marshal(lifecycleRequest{[]byte("db: " + t.TempDir()), 6})
 	failed, _ := m.HandleCall("plugin.reconfigure", invalidRaw)
 	if !strings.Contains(string(failed), `"ok":false`) || !authenticate(rotated).Authenticated {
-		t.Fatal("failed reconfigure did not restore old storage")
+		t.Fatal("immutable DB guard did not preserve old storage")
 	}
 }
 
@@ -231,7 +236,7 @@ func TestUsageOwnershipAndQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 	call(t, m, "frontend_auth.authenticate", pluginapi.FrontendAuthRequest{Query: url.Values{"key": {secret}}})
-	u := pluginapi.UsageRecord{RequestID: "execution-1", TraceID: "trace", Model: "fixed", APIKey: "observer:" + k.ID, AccessProvider: "config-inline", Generate: true, RequestedAt: time.Now(), Detail: pluginapi.UsageDetail{InputTokens: 1, TotalTokens: 1}}
+	u := pluginapi.UsageRecord{RequestID: "execution-1", TraceID: "trace", Provider: "openai", Model: "fixed", APIKey: "observer:" + k.ID, AccessProvider: "config-inline", Generate: true, RequestedAt: time.Now(), Detail: pluginapi.UsageDetail{InputTokens: 1, TotalTokens: 1}}
 	call(t, m, "usage.handle", u)
 	u.AccessProvider = AccessProvider
 	u.Generate = false

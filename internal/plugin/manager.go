@@ -72,6 +72,7 @@ type Manager struct {
 	cancel             context.CancelFunc
 	workers            sync.WaitGroup
 	scopes             sync.Map // host caller_scope -> stable principal; never contains secrets
+	billingFaults      sync.Map // key ID -> accounting callback fault; explicit recovery only
 }
 
 func NewManager(assets AssetFunc) *Manager { return &Manager{assets: assets, now: time.Now} }
@@ -111,6 +112,9 @@ func (m *Manager) HandleCall(method string, raw []byte) (out []byte, err error) 
 		if m.closed {
 			return fail("unavailable", 503)
 		}
+		if m.configured && c.DB != m.cfg.DB {
+			return fail("immutable_database", 409)
+		}
 		if m.configured && c == m.cfg && (m.store != nil || !c.Enabled) {
 			return okEnvelope(registrationResponse())
 		}
@@ -122,6 +126,9 @@ func (m *Manager) HandleCall(method string, raw []byte) (out []byte, err error) 
 		}
 		old, had := m.cfg, m.configured
 		if e = m.closeLocked(); e != nil {
+			if had {
+				_ = m.openLocked(old)
+			}
 			return fail("storage_unavailable", 503)
 		}
 		if e = m.openLocked(c); e != nil {
@@ -143,6 +150,11 @@ func (m *Manager) HandleCall(method string, raw []byte) (out []byte, err error) 
 		defer m.lifeMu.Unlock()
 		m.mu.Lock()
 		defer m.mu.Unlock()
+		callbackFault := false
+		m.billingFaults.Range(func(_, _ any) bool { callbackFault = true; return false })
+		if callbackFault {
+			return fail("accounting_unsettled", 409)
+		}
 		if m.store != nil {
 			h := m.store.Health()
 			if h.ActiveRequests != 0 || h.PendingUsage != 0 {
@@ -176,14 +188,7 @@ func (m *Manager) HandleCall(method string, raw []byte) (out []byte, err error) 
 		}
 		return okEnvelope(struct{}{})
 	case pluginabi.MethodUsageHandle:
-		var r pluginapi.UsageRecord
-		if json.Unmarshal(raw, &r) == nil && r.Generate && r.AccessProvider == AccessProvider && validPrincipal(r.APIKey) {
-			m.mu.RLock()
-			defer m.mu.RUnlock()
-			if m.store != nil {
-				_ = m.store.RecordUsage(r)
-			}
-		}
+		m.handleUsage(raw)
 		return okEnvelope(struct{}{})
 	case pluginabi.MethodManagementRegister:
 		return okEnvelope(managementRegistration())
@@ -235,14 +240,43 @@ func (m *Manager) closeLocked() error {
 		m.workers.Wait()
 		m.cancel = nil
 	}
-	if m.store != nil {
-		if e := m.store.Close(); e != nil {
-			return e
-		}
-		m.store = nil
-	}
+	store := m.store
+	m.store = nil
 	m.prices = nil
+	if store != nil {
+		return store.Close()
+	}
 	return nil
+}
+
+// Accounting errors never fail an already running response. Engine errors own
+// durable pending events. An unexpected callback panic or a late delivery to a
+// detached store is explicitly visible and blocks the affected Key in this
+// instance; the host's lack of a usage-drain barrier remains a replacement risk.
+func (m *Manager) handleUsage(raw []byte) {
+	var r pluginapi.UsageRecord
+	if json.Unmarshal(raw, &r) != nil || !r.Generate || r.AccessProvider != AccessProvider || !validPrincipal(r.APIKey) {
+		return
+	}
+	id := strings.TrimPrefix(r.APIKey, "observer:")
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	defer func() {
+		if recover() != nil {
+			m.billingFaults.Store(id, true)
+		}
+	}()
+	if m.store == nil {
+		m.billingFaults.Store(id, true)
+		return
+	}
+	if err := m.store.RecordUsage(r); err != nil {
+		// RecordUsage retains ordinary failures for bounded retries. Unexpected
+		// closed-store errors must not be masked by a stale manager pointer.
+		if errors.Is(err, engine.ErrClosed) {
+			m.billingFaults.Store(id, true)
+		}
+	}
 }
 func validPrincipal(s string) bool {
 	return strings.HasPrefix(s, "observer:") && len(s) > len("observer:") && !strings.ContainsAny(s, " /\\\t\r\n")
@@ -308,6 +342,9 @@ func (m *Manager) before(raw []byte) ([]byte, error) {
 		generate = false
 	}
 	if e == nil && generate {
+		if _, fault := m.billingFaults.Load(id); fault {
+			return okEnvelope(denied(503))
+		}
 		if r.RequestID == "" {
 			return okEnvelope(denied(400))
 		}

@@ -29,13 +29,18 @@ const (
 
 	routeHealth        = routesPrefix + "/health"
 	routeKeys          = routesPrefix + "/keys"
+	routeKeyRotate     = routeKeys + "/rotate"
+	routeKeyReset      = routeKeys + "/reset"
+	routeKeyRecover    = routeKeys + "/recover"
 	routeRequests      = routesPrefix + "/requests"
+	routeRequestDetail = routeRequests + "/detail"
 	routeSummary       = routesPrefix + "/summary"
 	routeSettings      = routesPrefix + "/settings"
 	routePrices        = routesPrefix + "/prices"
 	routePricesRefresh = routesPrefix + "/prices/refresh"
 	routeCompact       = routesPrefix + "/compact"
 	routeUI            = routesPrefix + "/ui"
+	routeUIAlt         = routeUI + "/"
 	routeUIJS          = routesPrefix + "/ui.js"
 	routeUICSS         = routesPrefix + "/ui.css"
 
@@ -63,20 +68,22 @@ type managementRegistrationResponse struct {
 
 // managementRegistration declares every static route the host can dispatch.
 //
-// Limitation: CPA v8.0.30 normalizes plugin routes to an exact method+path map
-// and rejects any path containing ':' or '*'. Parameterized paths such as
-// /keys/{id}, /keys/{id}/rotate, /keys/{id}/reset and /requests/{id} therefore
-// cannot be registered on that host. handleManagement still implements those
-// exact documented paths (see dispatchKeyRoute and the /requests/ branch), but
-// only static paths are declared here. Revisit when the host supports
-// parameterized plugin routes.
+// CPA v8.0.30 normalizes plugin routes to an exact method+path map and rejects
+// any path containing ':' or '*'. Key and request identifiers therefore travel
+// in the query string; no parameterized path is registered or dispatched.
 func managementRegistration() managementRegistrationResponse {
 	return managementRegistrationResponse{
 		Routes: []pluginapi.ManagementRoute{
 			{Method: http.MethodGet, Path: routeHealth, Description: "Observer health and lifecycle counters."},
 			{Method: http.MethodGet, Path: routeKeys, Description: "List client keys."},
 			{Method: http.MethodPost, Path: routeKeys, Description: "Create a client key; the plaintext secret is returned once."},
+			{Method: http.MethodPut, Path: routeKeys, Description: "Replace a client key selected by the id query parameter."},
+			{Method: http.MethodDelete, Path: routeKeys, Description: "Revoke a client key selected by the id query parameter."},
+			{Method: http.MethodPost, Path: routeKeyRotate, Description: "Rotate a client key selected by the id query parameter."},
+			{Method: http.MethodPost, Path: routeKeyReset, Description: "Reset selected usage windows for a client key."},
+			{Method: http.MethodPost, Path: routeKeyRecover, Description: "Acknowledge unknown accounting for a client key."},
 			{Method: http.MethodGet, Path: routeRequests, Description: "Paginated request records."},
+			{Method: http.MethodGet, Path: routeRequestDetail, Description: "One request record plus captured details selected by the id query parameter."},
 			{Method: http.MethodGet, Path: routeSummary, Description: "Aggregated request and cost summary."},
 			{Method: http.MethodGet, Path: routeSettings, Description: "Effective capture, retention and pricing settings."},
 			{Method: http.MethodPut, Path: routeSettings, Description: "Replace capture, retention and pricing settings atomically."},
@@ -84,11 +91,13 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPost, Path: routePricesRefresh, Description: "Refresh the pricing catalog within a bounded interval."},
 			{Method: http.MethodPost, Path: routeCompact, Description: "Compact storage and return health counters."},
 			{Method: http.MethodGet, Path: routeUI, Description: PluginName + " management UI."},
+			{Method: http.MethodGet, Path: routeUIAlt, Description: PluginName + " management UI with trailing slash."},
 			{Method: http.MethodGet, Path: routeUIJS, Description: PluginName + " management UI script."},
 			{Method: http.MethodGet, Path: routeUICSS, Description: PluginName + " management UI styles."},
 		},
 		Resources: []pluginapi.ResourceRoute{
 			{Path: "/ui", Menu: PluginName, Description: PluginName + " management UI."},
+			{Path: "/ui/", Description: PluginName + " management UI with trailing slash."},
 			{Path: "/ui.js", Description: PluginName + " management UI script."},
 			{Path: "/ui.css", Description: PluginName + " management UI styles."},
 		},
@@ -142,10 +151,7 @@ func parseManagementRequest(raw []byte) (managementRequest, error) {
 }
 
 func (m *Manager) dispatchManagement(req managementRequest) pluginapi.ManagementResponse {
-	acceptBody := req.Method == http.MethodPost && req.Path == managementBasePath+"/keys" ||
-		req.Method == http.MethodPut && (req.Path == managementBasePath+"/settings" || strings.HasPrefix(req.Path, managementBasePath+"/keys/")) ||
-		req.Method == http.MethodPost && strings.HasPrefix(req.Path, managementBasePath+"/keys/") && strings.HasSuffix(req.Path, "/reset")
-	if !acceptBody && len(bytes.TrimSpace(req.Body)) != 0 {
+	if !acceptsManagementBody(req) && len(bytes.TrimSpace(req.Body)) != 0 {
 		return bodyFailureResponse(errJSONInvalid)
 	}
 	// URL.Path is already decoded by the host. Never unescape it a second time.
@@ -157,9 +163,6 @@ func (m *Manager) dispatchManagement(req managementRequest) pluginapi.Management
 			return errorResponse(http.StatusNotFound, "not_found", "not found")
 		}
 	}
-	if req.Path != managementBasePath+"/requests" && req.Path != managementBasePath+"/summary" && len(req.Query) != 0 {
-		return invalidQueryResponse()
-	}
 	switch {
 	case strings.HasPrefix(req.Path, managementBasePath+"/"):
 		return m.dispatchManagementRoute(req, strings.TrimPrefix(req.Path, managementBasePath))
@@ -170,9 +173,28 @@ func (m *Manager) dispatchManagement(req managementRequest) pluginapi.Management
 	}
 }
 
+// acceptsManagementBody lists the exact static routes that take a JSON body.
+// Everything else rejects a nonempty body, including methods that share a path.
+func acceptsManagementBody(req managementRequest) bool {
+	switch req.Method {
+	case http.MethodPost:
+		return req.Path == managementBasePath+"/keys" ||
+			req.Path == managementBasePath+"/keys/reset" ||
+			req.Path == managementBasePath+"/keys/recover"
+	case http.MethodPut:
+		return req.Path == managementBasePath+"/keys" ||
+			req.Path == managementBasePath+"/settings"
+	default:
+		return false
+	}
+}
+
 func (m *Manager) dispatchManagementRoute(req managementRequest, route string) pluginapi.ManagementResponse {
 	switch route {
 	case "/health":
+		if len(req.Query) != 0 {
+			return invalidQueryResponse()
+		}
 		if !requireMethod(req.Method, http.MethodGet) {
 			return methodNotAllowedResponse()
 		}
@@ -181,18 +203,76 @@ func (m *Manager) dispatchManagementRoute(req managementRequest, route string) p
 	case "/keys":
 		switch req.Method {
 		case http.MethodGet:
+			if len(req.Query) != 0 {
+				return invalidQueryResponse()
+			}
 			return m.serveKeys()
 		case http.MethodPost:
+			if len(req.Query) != 0 {
+				return invalidQueryResponse()
+			}
 			return m.serveCreateKey(req.Body)
+		case http.MethodPut:
+			id, ok := parseIDQuery(req.Query)
+			if !ok {
+				return invalidQueryResponse()
+			}
+			return m.serveUpdateKey(id, req.Body)
+		case http.MethodDelete:
+			id, ok := parseIDQuery(req.Query)
+			if !ok {
+				return invalidQueryResponse()
+			}
+			return m.serveRevokeKey(id)
 		default:
 			return methodNotAllowedResponse()
 		}
+
+	case "/keys/rotate":
+		if !requireMethod(req.Method, http.MethodPost) {
+			return methodNotAllowedResponse()
+		}
+		id, ok := parseIDQuery(req.Query)
+		if !ok {
+			return invalidQueryResponse()
+		}
+		return m.serveRotateKey(id)
+
+	case "/keys/reset":
+		if !requireMethod(req.Method, http.MethodPost) {
+			return methodNotAllowedResponse()
+		}
+		id, ok := parseIDQuery(req.Query)
+		if !ok {
+			return invalidQueryResponse()
+		}
+		return m.serveResetKey(id, req.Body)
+
+	case "/keys/recover":
+		if !requireMethod(req.Method, http.MethodPost) {
+			return methodNotAllowedResponse()
+		}
+		id, ok := parseIDQuery(req.Query)
+		if !ok {
+			return invalidQueryResponse()
+		}
+		return m.serveRecoverKey(id, req.Body)
 
 	case "/requests":
 		if !requireMethod(req.Method, http.MethodGet) {
 			return methodNotAllowedResponse()
 		}
 		return m.serveRequests(req.Query)
+
+	case "/requests/detail":
+		if !requireMethod(req.Method, http.MethodGet) {
+			return methodNotAllowedResponse()
+		}
+		id, ok := parseIDQuery(req.Query)
+		if !ok {
+			return invalidQueryResponse()
+		}
+		return m.serveRequestDetail(id)
 
 	case "/summary":
 		if !requireMethod(req.Method, http.MethodGet) {
@@ -201,6 +281,9 @@ func (m *Manager) dispatchManagementRoute(req managementRequest, route string) p
 		return m.serveSummary(req.Query)
 
 	case "/settings":
+		if len(req.Query) != 0 {
+			return invalidQueryResponse()
+		}
 		switch req.Method {
 		case http.MethodGet:
 			return m.serveSettings()
@@ -211,86 +294,50 @@ func (m *Manager) dispatchManagementRoute(req managementRequest, route string) p
 		}
 
 	case "/prices":
+		if len(req.Query) != 0 {
+			return invalidQueryResponse()
+		}
 		if !requireMethod(req.Method, http.MethodGet) {
 			return methodNotAllowedResponse()
 		}
 		return m.servePrices()
 
 	case "/prices/refresh":
+		if len(req.Query) != 0 {
+			return invalidQueryResponse()
+		}
 		if !requireMethod(req.Method, http.MethodPost) {
 			return methodNotAllowedResponse()
 		}
 		return m.servePriceRefresh()
 
 	case "/compact":
+		if len(req.Query) != 0 {
+			return invalidQueryResponse()
+		}
 		if !requireMethod(req.Method, http.MethodPost) {
 			return methodNotAllowedResponse()
 		}
 		return m.serveCompact()
 
 	case "/ui", "/ui/", "/ui.js", "/ui.css":
+		if len(req.Query) != 0 {
+			return invalidQueryResponse()
+		}
 		if !requireMethod(req.Method, http.MethodGet) {
 			return methodNotAllowedResponse()
 		}
 		return m.serveAsset(assetNames[route])
 
 	default:
-		if strings.HasPrefix(route, "/keys/") {
-			return m.dispatchKeyRoute(req, strings.TrimPrefix(route, "/keys/"))
-		}
-		if strings.HasPrefix(route, "/requests/") {
-			if !requireMethod(req.Method, http.MethodGet) {
-				return methodNotAllowedResponse()
-			}
-			id, ok := pathIdentifier(strings.TrimPrefix(route, "/requests/"))
-			if !ok {
-				return errorResponse(http.StatusNotFound, "not_found", "not found")
-			}
-			return m.serveRequestDetail(id)
-		}
 		return errorResponse(http.StatusNotFound, "not_found", "not found")
 	}
 }
 
-func (m *Manager) dispatchKeyRoute(req managementRequest, rest string) pluginapi.ManagementResponse {
-	switch {
-	case strings.HasSuffix(rest, "/rotate"):
-		id, ok := pathIdentifier(strings.TrimSuffix(rest, "/rotate"))
-		if !ok {
-			return errorResponse(http.StatusNotFound, "not_found", "not found")
-		}
-		if !requireMethod(req.Method, http.MethodPost) {
-			return methodNotAllowedResponse()
-		}
-		return m.serveRotateKey(id)
-
-	case strings.HasSuffix(rest, "/reset"):
-		id, ok := pathIdentifier(strings.TrimSuffix(rest, "/reset"))
-		if !ok {
-			return errorResponse(http.StatusNotFound, "not_found", "not found")
-		}
-		if !requireMethod(req.Method, http.MethodPost) {
-			return methodNotAllowedResponse()
-		}
-		return m.serveResetKey(id, req.Body)
-
-	default:
-		id, ok := pathIdentifier(rest)
-		if !ok {
-			return errorResponse(http.StatusNotFound, "not_found", "not found")
-		}
-		switch req.Method {
-		case http.MethodPut:
-			return m.serveUpdateKey(id, req.Body)
-		case http.MethodDelete:
-			return m.serveRevokeKey(id)
-		default:
-			return methodNotAllowedResponse()
-		}
-	}
-}
-
 func (m *Manager) dispatchResourceRoute(req managementRequest, route string) pluginapi.ManagementResponse {
+	if len(req.Query) != 0 {
+		return invalidQueryResponse()
+	}
 	if !requireMethod(req.Method, http.MethodGet) {
 		return methodNotAllowedResponse()
 	}
@@ -308,8 +355,13 @@ func requireMethod(got, want string) bool {
 // serveHealth returns the engine health snapshot plus the released versions.
 func (m *Manager) serveHealth() pluginapi.ManagementResponse {
 	return m.withStore(func(store *engine.Store) pluginapi.ManagementResponse {
+		health := store.Health()
+		m.billingFaults.Range(func(_, _ any) bool {
+			health.LastError = "accounting callback failed; explicit Key recovery required"
+			return false
+		})
 		return jsonResponse(http.StatusOK, healthResponse{
-			Health:        store.Health(),
+			Health:        health,
 			Version:       Version,
 			SchemaVersion: managementSchemaVersion,
 		})
@@ -330,6 +382,11 @@ func (m *Manager) serveKeys() pluginapi.ManagementResponse {
 		}
 		if keys == nil {
 			keys = []engine.Key{}
+		}
+		for i := range keys {
+			if _, fault := m.billingFaults.Load(keys[i].ID); fault {
+				keys[i].BlockedReason = "accounting callback failed; explicit recovery required"
+			}
 		}
 		return jsonResponse(http.StatusOK, keysResponse{Items: keys})
 	})
@@ -426,6 +483,33 @@ func (m *Manager) serveResetKey(id string, body []byte) pluginapi.ManagementResp
 	})
 }
 
+type recoverRequest struct {
+	Acknowledge bool `json:"acknowledge"`
+}
+
+// serveRecoverKey only acknowledges unknown/missing usage after an explicit
+// confirmation; it never changes counters, limits or historical costs.
+func (m *Manager) serveRecoverKey(id string, body []byte) pluginapi.ManagementResponse {
+	var request recoverRequest
+	if err := decodeRequestBody(body, &request); err != nil {
+		return bodyFailureResponse(err)
+	}
+	if !request.Acknowledge {
+		return errorResponse(http.StatusBadRequest, "invalid_request", "acknowledge must be true")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.store == nil {
+		return unavailableResponse()
+	}
+	key, err := m.store.RecoverKey(id, true)
+	if err != nil {
+		return storeFailureResponse(err)
+	}
+	m.billingFaults.Delete(id)
+	return jsonResponse(http.StatusOK, key)
+}
+
 func (m *Manager) serveRequests(values url.Values) pluginapi.ManagementResponse {
 	query, err := m.parseQuery(values)
 	if err != nil {
@@ -501,18 +585,19 @@ func (m *Manager) servePrices() pluginapi.ManagementResponse {
 }
 
 func (m *Manager) servePriceRefresh() pluginapi.ManagementResponse {
+	// Hold the read lock for the whole network refresh so a concurrent
+	// reconfigure cannot replace or close the pricing service mid-operation.
 	m.mu.RLock()
-	prices := m.prices
-	m.mu.RUnlock()
-	if prices == nil {
+	defer m.mu.RUnlock()
+	if m.prices == nil {
 		return unavailableResponse()
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), priceRefreshTimeout)
 	defer cancel()
-	err := prices.Refresh(ctx)
+	err := m.prices.Refresh(ctx)
 
-	var snapshot pricing.Snapshot = prices.Snapshot()
+	var snapshot pricing.Snapshot = m.prices.Snapshot()
 	if err != nil && snapshot.Error == "" {
 		// Never expose the underlying transport error or response body.
 		snapshot.Error = "price refresh failed"
@@ -578,7 +663,8 @@ func (m *Manager) parseQuery(values url.Values) (engine.Query, error) {
 		}
 		to = parsed
 	}
-	if from.After(to) {
+	if !from.Before(to) {
+		// Query ranges are half-open [from,to); an empty range is invalid.
 		return engine.Query{}, errJSONInvalid
 	}
 
@@ -638,10 +724,25 @@ func parsePageNumber(value string, defaultValue, max int) (int, error) {
 	return int(parsed), nil
 }
 
-// pathIdentifier accepts one decoded path segment. Slashes are rejected so a
-// crafted path cannot address a different route after unescaping.
-func pathIdentifier(raw string) (string, bool) {
-	if raw == "" || raw == "." || raw == ".." || strings.ContainsAny(raw, "/\\%\x00\r\n") {
+// parseIDQuery accepts exactly one query parameter, "id", with exactly one
+// nonempty, decoded identifier. Unknown or repeated parameters are rejected.
+func parseIDQuery(values url.Values) (string, bool) {
+	if len(values) != 1 {
+		return "", false
+	}
+	list, ok := values["id"]
+	if !ok || len(list) != 1 {
+		return "", false
+	}
+	return queryIdentifier(list[0])
+}
+
+// queryIdentifier rejects empty, padded, separator-bearing or otherwise
+// unsafe identifiers. The host has already decoded the query value.
+func queryIdentifier(raw string) (string, bool) {
+	if raw == "" || raw != strings.TrimSpace(raw) ||
+		raw == "." || raw == ".." ||
+		strings.ContainsAny(raw, " \t/\\%\x00\r\n") {
 		return "", false
 	}
 	return raw, true
@@ -790,19 +891,15 @@ func decodeRequestBody(raw []byte, target any) error {
 	return decodeJSONObject(trimmed, target, nil)
 }
 
-// decodeJSONObject rejects non-objects, unknown top-level keys, trailing
-// values, unsafe numeric forms and unknown nested fields.
+// decodeJSONObject rejects non-objects, unknown top-level keys, duplicate
+// object keys at any depth, trailing values, unsafe numeric forms and unknown
+// nested fields.
 func decodeJSONObject(raw []byte, target any, allowedTopLevel map[string]bool) error {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return errJSONInvalid
 	}
-	if allowedTopLevel != nil {
-		if err := validateTopLevelKeys(trimmed, allowedTopLevel); err != nil {
-			return err
-		}
-	}
-	if err := validateSafeNumbers(trimmed); err != nil {
+	if err := validateJSONDocument(trimmed, allowedTopLevel); err != nil {
 		return err
 	}
 
@@ -817,69 +914,123 @@ func decodeJSONObject(raw []byte, target any, allowedTopLevel map[string]bool) e
 	return nil
 }
 
-func validateTopLevelKeys(raw []byte, allowed map[string]bool) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	token, err := decoder.Token()
-	if err != nil {
-		return errJSONInvalid
-	}
-	delim, ok := token.(json.Delim)
-	if !ok || delim != '{' {
-		return errJSONInvalid
-	}
-	for decoder.More() {
-		token, err = decoder.Token()
-		if err != nil {
-			return errJSONInvalid
-		}
-		key, ok := token.(string)
-		if !ok || !allowed[key] {
-			return errJSONInvalid
-		}
-		var discard json.RawMessage
-		if err := decoder.Decode(&discard); err != nil {
-			return errJSONInvalid
-		}
-	}
-	token, err = decoder.Token()
-	if err != nil {
-		return errJSONInvalid
-	}
-	delim, ok = token.(json.Delim)
-	if !ok || delim != '}' {
-		return errJSONInvalid
-	}
-	var extra json.RawMessage
-	if err := decoder.Decode(&extra); err != io.EOF {
-		return errJSONInvalid
-	}
-	return nil
+type jsonFrame struct {
+	object    bool
+	keys      map[string]bool
+	expectKey bool
 }
 
-// validateSafeNumbers rejects fractions, exponents, negative values and
-// integers above the billing-safe bound anywhere in the document.
-func validateSafeNumbers(raw []byte) error {
+// validateJSONDocument performs one token pass over the complete document. It
+// tracks object keys and arrays, rejects duplicate keys recursively (including
+// nested keys/rates), optionally restricts top-level keys, and rejects
+// fractions, exponents, negatives and integers above the billing-safe bound.
+func validateJSONDocument(raw []byte, allowedTopLevel map[string]bool) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
+
+	var stack []*jsonFrame
+	rootSeen := false
 	for {
 		token, err := decoder.Token()
 		if errors.Is(err, io.EOF) {
+			if !rootSeen || len(stack) != 0 {
+				return errJSONInvalid
+			}
 			return nil
 		}
 		if err != nil {
 			return errJSONInvalid
 		}
-		number, ok := token.(json.Number)
-		if !ok {
-			continue
+		if rootSeen && len(stack) == 0 {
+			// A second root value is trailing input.
+			return errJSONInvalid
 		}
-		text := number.String()
-		if strings.HasPrefix(text, "-") || strings.ContainsAny(text, ".eE") {
-			return errJSONUnsafeNumber
-		}
-		value, err := strconv.ParseInt(text, 10, 64)
-		if err != nil || value < 0 || value > maxSafeJSONInteger {
-			return errJSONUnsafeNumber
+
+		switch value := token.(type) {
+		case json.Delim:
+			switch value {
+			case '{', '[':
+				if len(stack) != 0 {
+					parent := stack[len(stack)-1]
+					if parent.object && parent.expectKey {
+						return errJSONInvalid
+					}
+					if parent.object {
+						parent.expectKey = true
+					}
+				}
+				frame := &jsonFrame{object: value == '{'}
+				if frame.object {
+					frame.keys = map[string]bool{}
+					frame.expectKey = true
+				}
+				stack = append(stack, frame)
+				rootSeen = true
+			case '}', ']':
+				if len(stack) == 0 {
+					return errJSONInvalid
+				}
+				frame := stack[len(stack)-1]
+				if frame.object != (value == '}') {
+					return errJSONInvalid
+				}
+				stack = stack[:len(stack)-1]
+			default:
+				return errJSONInvalid
+			}
+
+		case string:
+			if len(stack) == 0 {
+				return errJSONInvalid
+			}
+			frame := stack[len(stack)-1]
+			if !frame.object {
+				continue
+			}
+			if !frame.expectKey {
+				frame.expectKey = true
+				continue
+			}
+			if frame.keys[value] {
+				return errJSONInvalid
+			}
+			frame.keys[value] = true
+			if len(stack) == 1 && allowedTopLevel != nil && !allowedTopLevel[value] {
+				return errJSONInvalid
+			}
+			frame.expectKey = false
+
+		case json.Number:
+			if len(stack) == 0 {
+				return errJSONInvalid
+			}
+			frame := stack[len(stack)-1]
+			if frame.object {
+				if frame.expectKey {
+					return errJSONInvalid
+				}
+				frame.expectKey = true
+			}
+			text := value.String()
+			if strings.HasPrefix(text, "-") || strings.ContainsAny(text, ".eE") {
+				return errJSONUnsafeNumber
+			}
+			parsed, err := strconv.ParseInt(text, 10, 64)
+			if err != nil || parsed < 0 || parsed > maxSafeJSONInteger {
+				return errJSONUnsafeNumber
+			}
+
+		default: // bool, nil
+			if len(stack) == 0 {
+				return errJSONInvalid
+			}
+			frame := stack[len(stack)-1]
+			if frame.object {
+				if frame.expectKey {
+					return errJSONInvalid
+				}
+				frame.expectKey = true
+			}
 		}
 	}
 }
