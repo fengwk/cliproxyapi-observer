@@ -99,18 +99,37 @@ func (s *Store) decorate(k Key) Key {
 	return k
 }
 func (s *Store) CreateKey(v KeySpec) (Key, string, error) {
+	return s.CreateKeyWithSecret(v, random())
+}
+
+// Use supplied credentials exactly as entered; never silently trim secrets.
+func validSecret(secret string) bool {
+	if len(secret) < 8 || len(secret) > 256 {
+		return false
+	}
+	for _, c := range []byte(secret) {
+		if c < '!' || c > '~' {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Store) CreateKeyWithSecret(v KeySpec, secret string) (Key, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e := s.check(); e != nil {
 		return Key{}, "", e
 	}
-	if !validSpec(v) {
+	if !validSpec(v) || !validSecret(secret) {
 		return Key{}, "", ErrInvalid
 	}
 	t := s.now().UTC()
-	secret := random()
 	k := storedKey{Key: Key{ID: random(), KeySpec: cleanSpec(v), CreatedAt: t, Starts: starts(t), Resets: Windows{FiveHour: t.Add(5 * time.Hour), Week: t.Add(7 * 24 * time.Hour), Month: month(t)}}, Hash: hash(secret)}
 	e := s.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket([]byte("hashes")).Get([]byte(k.Hash)) != nil {
+			return ErrConflict
+		}
 		if e := put(tx.Bucket([]byte("keys")), k.ID, k); e != nil {
 			return e
 		}
@@ -137,6 +156,9 @@ func (s *Store) mutate(id string, f func(*storedKey) error) (Key, error) {
 		}
 		if old != k.Hash {
 			h := tx.Bucket([]byte("hashes"))
+			if k.Hash != "" && h.Get([]byte(k.Hash)) != nil {
+				return ErrConflict
+			}
 			if e := h.Delete([]byte(old)); e != nil {
 				return e
 			}
@@ -159,10 +181,23 @@ func (s *Store) UpdateKey(id string, v KeySpec) (Key, error) {
 	return s.mutate(id, func(k *storedKey) error { k.KeySpec = cleanSpec(v); return nil })
 }
 func (s *Store) RotateKey(id string) (Key, string, error) {
+	return s.RotateKeyWithSecret(id, random())
+}
+
+func (s *Store) RotateKeyWithSecret(id, secret string) (Key, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	secret := random()
-	k, e := s.mutate(id, func(k *storedKey) error { k.Hash = hash(secret); return nil })
+	if !validSecret(secret) {
+		return Key{}, "", ErrInvalid
+	}
+	k, e := s.mutate(id, func(k *storedKey) error {
+		next := hash(secret)
+		if next == k.Hash {
+			return ErrInvalid
+		}
+		k.Hash = next
+		return nil
+	})
 	if e != nil {
 		return Key{}, "", e
 	}

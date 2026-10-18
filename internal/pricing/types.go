@@ -49,10 +49,21 @@ type Quote struct {
 	Rates        Rates  `json:"rates"`
 }
 type Snapshot struct {
-	Prices     []Price   `json:"prices"`
-	LastSync   time.Time `json:"last_sync"`
-	Error      string    `json:"error,omitempty"`
-	Refreshing bool      `json:"refreshing"`
+	Prices         []Price   `json:"prices"`
+	LastSync       time.Time `json:"last_sync"`
+	Error          string    `json:"error,omitempty"`
+	Refreshing     bool      `json:"refreshing"`
+	CatalogEntries int       `json:"catalog_entries"`
+}
+
+// Preview gives base rates, not a quote for invented token usage.
+type ModelIdentity struct {
+	Model    string `json:"model"`
+	Provider string `json:"provider"`
+}
+type PreviewPrice struct {
+	Price
+	HasRules bool `json:"has_rules"`
 }
 type Pricer interface {
 	Quote(string, string, Tokens, time.Time) (Quote, error)
