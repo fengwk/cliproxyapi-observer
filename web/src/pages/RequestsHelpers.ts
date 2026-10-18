@@ -37,6 +37,18 @@ export function getPastUTCDateString(daysAgo: number): string {
 }
 
 /**
+ * Returns tomorrow's UTC date as YYYY-MM-DD (next UTC midnight).
+ */
+export function getTomorrowUTCDateString(): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + 1);
+  const year = d.getUTCFullYear();
+  const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
  * Default today preset bounds:
  * from = today's start in UTC (YYYY-MM-DD)
  * to = '' (will resolve to current time NOW at query time to avoid querying future bounds).
@@ -50,13 +62,14 @@ export function getTodayPresetRange(): { from: string; to: string } {
 
 /**
  * Last 7 days preset bounds:
- * from = 6 days ago (total 7 full days including today)
- * to = '' (will resolve to current time NOW).
+ * Historical daily data before raw retention requires whole UTC day boundaries.
+ * from = 6 days ago UTC midnight (YYYY-MM-DD, covering 7 full days)
+ * to = tomorrow UTC midnight (YYYY-MM-DD, next UTC midnight boundary).
  */
 export function getLast7DaysPresetRange(): { from: string; to: string } {
   return {
     from: getPastUTCDateString(6),
-    to: '',
+    to: getTomorrowUTCDateString(),
   };
 }
 
@@ -72,8 +85,8 @@ export function snapToWholeDateRange(fromVal: string, toVal: string): { from: st
   }
 
   let cleanTo = toVal ? toVal.slice(0, 10) : '';
-  if (cleanTo && !/^\d{4}-\d{2}-\d{2}$/.test(cleanTo)) {
-    cleanTo = '';
+  if (!cleanTo || !/^\d{4}-\d{2}-\d{2}$/.test(cleanTo)) {
+    cleanTo = getTomorrowUTCDateString();
   }
 
   return {
@@ -83,8 +96,52 @@ export function snapToWholeDateRange(fromVal: string, toVal: string): { from: st
 }
 
 /**
+ * Detects whether a query error is specifically a historical date range error.
+ * Excludes generic network failures, 401 unauthorized, or pricing refresh errors.
+ */
+export function isHistoricalDateQueryError(
+  errorMsg: string | null | undefined,
+  fromVal: string,
+  toVal: string
+): boolean {
+  if (!errorMsg) return false;
+  const lower = errorMsg.toLowerCase();
+
+  // Exclude 401, unauthorized, network, fetch failure
+  if (
+    lower.includes('401') ||
+    lower.includes('unauthorized') ||
+    lower.includes('network') ||
+    lower.includes('failed to fetch')
+  ) {
+    return false;
+  }
+
+  // If backend error explicitly mentions historical or whole date
+  if (lower.includes('historical') || lower.includes('whole date') || lower.includes('整日')) {
+    return true;
+  }
+
+  const isQueryInvalid =
+    lower.includes('invalid') ||
+    lower.includes('date') ||
+    lower.includes('range') ||
+    lower.includes('400');
+
+  if (!isQueryInvalid) return false;
+
+  const today = getTodayUTCDateString();
+  const fromDay = fromVal ? fromVal.slice(0, 10) : today;
+  const isOlder = fromDay < today;
+  const hasHours = fromVal.includes('T') || toVal.includes('T');
+
+  return isOlder || hasHours;
+}
+
+/**
  * Builds the URLSearchParams query string for /requests and /summary.
- * Defaults 'to' to NOW when empty to avoid querying future timestamps.
+ * For today's query, defaults 'to' to NOW when empty to avoid querying future timestamps.
+ * For historical queries (older than today), defaults 'to' to tomorrow UTC midnight to satisfy whole-day boundaries.
  */
 export function buildRequestsQueryParams(
   filters: FilterState,
@@ -98,18 +155,24 @@ export function buildRequestsQueryParams(
 
   // from: if already RFC3339 with 'T', keep it; otherwise append T00:00:00Z
   const rawFrom = filters.from.trim();
+  const today = getTodayUTCDateString();
   if (rawFrom) {
     params.set('from', rawFrom.includes('T') ? rawFrom : `${rawFrom}T00:00:00Z`);
   } else {
-    params.set('from', `${getTodayUTCDateString()}T00:00:00Z`);
+    params.set('from', `${today}T00:00:00Z`);
   }
 
-  // to: if not provided, default to current time NOW in UTC to avoid future dates
+  // to:
   const rawTo = filters.to.trim();
   if (rawTo) {
     params.set('to', rawTo.includes('T') ? rawTo : `${rawTo}T00:00:00Z`);
   } else {
-    params.set('to', nowIso);
+    const fromDay = rawFrom ? rawFrom.slice(0, 10) : today;
+    if (fromDay < today) {
+      params.set('to', `${getTomorrowUTCDateString()}T00:00:00Z`);
+    } else {
+      params.set('to', nowIso);
+    }
   }
 
   if (filters.key_id) params.set('key_id', filters.key_id);
