@@ -75,6 +75,11 @@ func (s *Service) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := Snapshot{Prices: []Price{}, LastSync: s.lastSync, Error: s.lastError, Refreshing: s.flight != nil}
+	for identity := range s.catalog {
+		if identity.Provider != "" {
+			out.CatalogEntries++
+		}
+	}
 	seen := map[string]bool{}
 	for k := range s.observed {
 		q := s.effective(k.Model, k.Provider)
@@ -112,4 +117,32 @@ func (s *Service) Snapshot() Snapshot {
 		return *a.Reasoning < *b.Reasoning
 	})
 	return out
+}
+
+// Preview does not Observe or fetch. Conditional rules are flagged instead of
+// evaluated against a fictional zero-token request, preserving accounting.
+func (s *Service) Preview(models []ModelIdentity) ([]PreviewPrice, error) {
+	if len(models) > 4096 {
+		return nil, errInvalid
+	}
+	for _, model := range models {
+		if !validIdentity(model.Model) || len(model.Provider) > 1024 {
+			return nil, errInvalid
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rules := make(map[string]bool, len(s.config.Rules))
+	for _, rule := range s.config.Rules {
+		rules[rule.Model] = true
+	}
+	out := make([]PreviewPrice, 0, len(models))
+	for _, model := range models {
+		q := s.effective(model.Model, model.Provider)
+		out = append(out, PreviewPrice{
+			Price:    Price{Model: model.Model, Provider: model.Provider, Rates: q.Rates, Source: q.Source},
+			HasRules: rules[model.Model],
+		})
+	}
+	return out, nil
 }
