@@ -11,6 +11,7 @@ import {
   EmptyState,
 } from '../components/ui';
 import type { PageProps } from '../lib/api';
+import { usePoll } from '../lib/usePoll';
 import type {
   Settings,
   PricingConfig,
@@ -78,9 +79,9 @@ const DEFAULT_HEALTH: Health = {
 
 const CAPACITY_OPTIONS = [
   { value: 'B', label: '字节 (B)' },
-  { value: 'KB', label: 'KB (1,024 B)' },
-  { value: 'MB', label: 'MB (1,048,576 B)' },
-  { value: 'GB', label: 'GB (1,073,741,824 B)' },
+  { value: 'KB', label: 'KiB (1,024 字节)' },
+  { value: 'MB', label: 'MiB (1,048,576 字节)' },
+  { value: 'GB', label: 'GiB (1,073,741,824 字节)' },
 ];
 
 export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirtyChange }) => {
@@ -88,13 +89,17 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   // Lifecycle & concurrency guards
   // ---------------------------------------------------------------------------
   const isMountedRef = useRef(true);
+  const lifetimeAbortRef = useRef<AbortController | null>(null);
   const hasLoadedSuccessfullyRef = useRef(false);
+  const isMutatingRef = useRef(false);
   const previewGenRef = useRef(0);
 
   useEffect(() => {
     isMountedRef.current = true;
+    lifetimeAbortRef.current = new AbortController();
     return () => {
       isMountedRef.current = false;
+      lifetimeAbortRef.current?.abort();
     };
   }, []);
 
@@ -107,6 +112,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [previewItems, setPreviewItems] = useState<PricePreviewItem[]>([]);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   // Initial load status
   const [initialLoading, setInitialLoading] = useState(true);
@@ -156,8 +162,8 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   const [compacting, setCompacting] = useState(false);
   const [compactStatus, setCompactStatus] = useState<{ tone: 'success' | 'danger'; message: string } | null>(null);
 
-  // Global mutation busy guard: blocks both saves while any mutation is active
-  const isMutationBusy = generalSaving || pricingSaving || compacting;
+  // Global mutation busy guard: mutual exclusion across save, compact, and price refresh
+  const isMutationBusy = generalSaving || pricingSaving || compacting || pricingRefreshing;
 
   // Ref tracking dirty state to protect drafts from poll overwrite
   const isGeneralDirtyRef = useRef(false);
@@ -273,15 +279,21 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   }, [isGeneralDirty, isPricingDirty, onDirtyChange]);
 
   // ---------------------------------------------------------------------------
-  // Load data & Preview fetching
+  // Preview fetching
   // ---------------------------------------------------------------------------
   const fetchPreview = useCallback(
     async (models: ModelInfo[], signal?: AbortSignal) => {
       if (!models.length) {
-        if (isMountedRef.current) setPreviewItems([]);
+        if (isMountedRef.current && !signal?.aborted) {
+          setPreviewItems([]);
+          setPreviewError(null);
+        }
         return;
       }
-      if (isMountedRef.current) setPreviewLoading(true);
+      if (isMountedRef.current) {
+        setPreviewLoading(true);
+        setPreviewError(null);
+      }
       const currentGen = ++previewGenRef.current;
       try {
         const payload = {
@@ -295,14 +307,16 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
           body: payload,
           signal,
         });
-        if (!isMountedRef.current || currentGen !== previewGenRef.current) return;
+        if (!isMountedRef.current || signal?.aborted || currentGen !== previewGenRef.current) return;
         if (res && Array.isArray(res.items)) {
           setPreviewItems(res.items);
+          setPreviewError(null);
         }
       } catch (err: unknown) {
-        if (signal?.aborted || !isMountedRef.current || currentGen !== previewGenRef.current) return;
+        if (!isMountedRef.current || signal?.aborted || currentGen !== previewGenRef.current) return;
+        setPreviewError(`无法读取可用模型价格预检：${errorMessage(err)}`);
       } finally {
-        if (isMountedRef.current && currentGen === previewGenRef.current && !signal?.aborted) {
+        if (isMountedRef.current && !signal?.aborted && currentGen === previewGenRef.current) {
           setPreviewLoading(false);
         }
       }
@@ -310,43 +324,59 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
     [api]
   );
 
-  const loadAll = useCallback(
-    async (isPoll = false, signal?: AbortSignal) => {
+  // ---------------------------------------------------------------------------
+  // Unified load callback passed to usePoll
+  // ---------------------------------------------------------------------------
+  const load = useCallback(
+    async (signal: AbortSignal) => {
       try {
-        const [settingsRes, pricesRes, healthRes, modelsRes] = await Promise.all([
+        let modelsRes: ModelInfo[] = [];
+        let modelsErr: string | null = null;
+        try {
+          modelsRes = await api.models({ signal });
+        } catch (err: unknown) {
+          if (signal.aborted || !isMountedRef.current) return;
+          modelsErr = errorMessage(err) || '获取可用模型列表失败';
+        }
+
+        const [settingsRes, pricesRes, healthRes] = await Promise.all([
           api.request<Settings>('/settings', { signal }),
           api.request<PriceSnapshot>('/prices', { signal }),
           api.request<Health>('/health', { signal }),
-          api.models({ signal }).catch(() => [] as ModelInfo[]),
         ]);
 
-        if (signal?.aborted || !isMountedRef.current) return;
+        if (signal.aborted || !isMountedRef.current) return;
 
         hasLoadedSuccessfullyRef.current = true;
         setConfirmedSettings(settingsRes);
         setSnapshot(pricesRes);
         setHealth(healthRes);
-        setAvailableModels(modelsRes);
 
-        // Only overwrite drafts from server if not dirty
-        if (!isPoll || !isGeneralDirtyRef.current) {
+        // Always check dirty refs so background updates never overwrite user drafts
+        if (!isGeneralDirtyRef.current) {
           syncGeneralFromConfirmed(settingsRes);
         }
-        if (!isPoll || !isPricingDirtyRef.current) {
+        if (!isPricingDirtyRef.current) {
           syncPricingFromConfirmed(settingsRes.pricing);
         }
 
-        // Fetch prices preview for available CPA models
-        await fetchPreview(modelsRes, signal);
+        if (modelsErr) {
+          setAvailableModels([]);
+          setPreviewItems([]);
+          setPreviewError(`无法读取可用模型：${modelsErr}`);
+        } else {
+          setAvailableModels(modelsRes);
+          await fetchPreview(modelsRes, signal);
+        }
 
         setLoadError(null);
       } catch (err: unknown) {
-        if (signal?.aborted || !isMountedRef.current) return;
-        if (!isPoll) {
+        if (signal.aborted || !isMountedRef.current) return;
+        if (!hasLoadedSuccessfullyRef.current) {
           setLoadError(errorMessage(err) || '加载设置失败');
         }
       } finally {
-        if (!signal?.aborted && !isPoll && isMountedRef.current) {
+        if (!signal.aborted && isMountedRef.current) {
           setInitialLoading(false);
         }
       }
@@ -354,25 +384,21 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
     [api, syncGeneralFromConfirmed, syncPricingFromConfirmed, fetchPreview]
   );
 
-  useEffect(() => {
-    const controller = new AbortController();
-    loadAll(false, controller.signal);
-    return () => {
-      controller.abort();
-    };
-  }, [loadAll]);
+  // Stop polling when dirty, when modal is open, or during mutations / refreshing
+  const isPollPaused =
+    isGeneralDirty ||
+    isPricingDirty ||
+    compactModalOpen ||
+    isMutationBusy;
 
-  // Polling effect
-  useEffect(() => {
-    if (!refreshInterval || refreshInterval <= 0) return;
-    const intervalMs = refreshInterval * 1000;
-    const timer = setInterval(() => {
-      loadAll(true);
-    }, intervalMs);
-    return () => {
-      clearInterval(timer);
-    };
-  }, [refreshInterval, loadAll]);
+  usePoll(load, refreshInterval ?? 0, isPollPaused);
+
+  const handleRetry = () => {
+    setLoadError(null);
+    setInitialLoading(true);
+    const controller = new AbortController();
+    void load(controller.signal);
+  };
 
   // ---------------------------------------------------------------------------
   // Section 1: 请求记录 Handlers
@@ -437,13 +463,15 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
 
   const handleSaveGeneral = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!hasLoadedSuccessfullyRef.current || isMutationBusy) return;
+    if (isMutatingRef.current || !hasLoadedSuccessfullyRef.current || isMutationBusy) return;
+    isMutatingRef.current = true;
     setGeneralStatus(null);
 
     let bodyBytes = generalDraft.max_body_bytes;
     try {
       bodyBytes = parseCapacityToBytes(maxBodyAmount, maxBodyUnit, '单条请求体上限');
     } catch (err) {
+      isMutatingRef.current = false;
       setGeneralStatus({ tone: 'danger', message: errorMessage(err) });
       return;
     }
@@ -452,6 +480,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
     try {
       storageBytes = parseCapacityToBytes(maxStorageAmount, maxStorageUnit, '请求体总存储上限');
     } catch (err) {
+      isMutatingRef.current = false;
       setGeneralStatus({ tone: 'danger', message: errorMessage(err) });
       return;
     }
@@ -464,6 +493,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
 
     const err = validateGeneralSettings(draftToSave);
     if (err) {
+      isMutatingRef.current = false;
       setGeneralStatus({ tone: 'danger', message: err });
       return;
     }
@@ -483,6 +513,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
       const res = await api.request<Settings>('/settings', {
         method: 'PUT',
         body: payload,
+        signal: lifetimeAbortRef.current?.signal,
       });
 
       if (!isMountedRef.current) return;
@@ -494,6 +525,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
       if (!isMountedRef.current) return;
       setGeneralStatus({ tone: 'danger', message: errorMessage(saveErr) || '保存失败' });
     } finally {
+      isMutatingRef.current = false;
       if (isMountedRef.current) {
         setGeneralSaving(false);
       }
@@ -509,12 +541,14 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   // Section 2: 模型价格 Handlers
   // ---------------------------------------------------------------------------
   const handleRefreshCatalog = async () => {
-    if (isMutationBusy) return;
+    if (isMutatingRef.current || isMutationBusy) return;
+    isMutatingRef.current = true;
     setPricingRefreshing(true);
     setPricingStatus(null);
     try {
       const res = await api.request<{ snapshot?: PriceSnapshot }>('/prices/refresh', {
         method: 'POST',
+        signal: lifetimeAbortRef.current?.signal,
       });
       if (!isMountedRef.current) return;
       const nextSnapshot = res?.snapshot || (res as unknown as PriceSnapshot);
@@ -530,7 +564,6 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
           });
         } else {
           setPricingStatus({ tone: 'success', message: '价格目录已刷新' });
-          // Refresh preview after new catalog sync
           fetchPreview(availableModels);
         }
       }
@@ -538,6 +571,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
       if (!isMountedRef.current) return;
       setPricingStatus({ tone: 'danger', message: errorMessage(err) || '刷新价格目录失败' });
     } finally {
+      isMutatingRef.current = false;
       if (isMountedRef.current) {
         setPricingRefreshing(false);
       }
@@ -613,7 +647,8 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   };
 
   const handleSavePricing = async () => {
-    if (!hasLoadedSuccessfullyRef.current || isMutationBusy) return;
+    if (isMutatingRef.current || !hasLoadedSuccessfullyRef.current || isMutationBusy) return;
+    isMutatingRef.current = true;
     setPricingStatus(null);
 
     let parsedPrices: Price[];
@@ -621,12 +656,14 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
     try {
       parsedPrices = parseManualPrices(manualDrafts);
     } catch (err) {
+      isMutatingRef.current = false;
       setPricingStatus({ tone: 'danger', message: errorMessage(err) });
       return;
     }
     try {
       parsedRules = parseRules(ruleDrafts);
     } catch (err) {
+      isMutatingRef.current = false;
       setPricingStatus({ tone: 'danger', message: errorMessage(err) });
       return;
     }
@@ -652,6 +689,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
       const res = await api.request<Settings>('/settings', {
         method: 'PUT',
         body: payload,
+        signal: lifetimeAbortRef.current?.signal,
       });
 
       if (!isMountedRef.current) return;
@@ -666,6 +704,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
       if (!isMountedRef.current) return;
       setPricingStatus({ tone: 'danger', message: errorMessage(saveErr) || '保存失败' });
     } finally {
+      isMutatingRef.current = false;
       if (isMountedRef.current) {
         setPricingSaving(false);
       }
@@ -696,16 +735,19 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   // Section 3: 存储维护 Handlers
   // ---------------------------------------------------------------------------
   const handleCompactConfirm = async () => {
-    if (isMutationBusy) return;
+    if (isMutatingRef.current || isMutationBusy) return;
+    isMutatingRef.current = true;
     setCompacting(true);
     setCompactStatus(null);
     try {
-      const res = await api.request<{ health?: Health }>('/compact', {
+      const res = await api.request<Health | { health?: Health }>('/compact', {
         method: 'POST',
+        signal: lifetimeAbortRef.current?.signal,
       });
       if (!isMountedRef.current) return;
-      if (res && res.health) {
-        setHealth(res.health);
+      const nextHealth = res && 'database_bytes' in res ? (res as Health) : (res as { health?: Health })?.health;
+      if (nextHealth) {
+        setHealth(nextHealth);
       }
       setCompactStatus({ tone: 'success', message: '数据库压缩整理完成' });
       setCompactModalOpen(false);
@@ -714,6 +756,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
       setCompactStatus({ tone: 'danger', message: errorMessage(err) || '压缩数据库失败' });
       setCompactModalOpen(false);
     } finally {
+      isMutatingRef.current = false;
       if (isMountedRef.current) {
         setCompacting(false);
       }
@@ -736,7 +779,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
       <div className="settings-page" data-testid="settings-error">
         <Notice tone="danger">{loadError}</Notice>
         <div style={{ marginTop: 12 }}>
-          <Button variant="secondary" onClick={() => loadAll(false)}>
+          <Button variant="secondary" onClick={handleRetry}>
             重试
           </Button>
         </div>
@@ -745,6 +788,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   }
 
   const hasFault = Boolean(health.last_error || health.dropped_captures > 0 || health.pending_usage > 0);
+  const isLastSyncValid = Boolean(snapshot.last_sync && !snapshot.last_sync.startsWith('0001'));
 
   return (
     <div className="settings-page" data-testid="observer-settings">
@@ -770,8 +814,8 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
               <span className="settings-toggle-title">保存请求内容</span>
               <span className="settings-toggle-hint">
                 {generalDraft.capture_enabled
-                  ? '已开启：将完整记录请求提示词与模型响应，便于调试分析。请勿在请求中发送保密凭据。'
-                  : '已关闭：仅记录请求时间、模型、状态码及费用等元数据，不保存提示词与响应体（推荐）。'}
+                  ? '已开启：保存脱敏请求头和请求体，可能包含敏感提示词；超限内容不保存。'
+                  : '已关闭：仅记录请求时间、模型、状态码及费用等元数据，不保存提示词与请求体（推荐）。'}
               </span>
             </div>
             <Switch
@@ -859,12 +903,12 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
           <details className="settings-details">
             <summary>更多存储限制（单条与总量上限）</summary>
             <p className="settings-note" style={{ marginBottom: 12 }}>
-              存储采用精确 MiB 二进制换算（1 MB = 1,048,576 字节）。超出限制时系统将丢弃过大的请求体，但不阻断推理。
+              超出限制时系统将丢弃过大的请求体，但不阻断推理。
             </p>
             <div className="settings-grid">
               <Field
                 label="单条请求体上限"
-                hint={`当前换算：${generalDraft.max_body_bytes.toLocaleString()} 字节，上限 8 MiB (8,388,608 字节)`}
+                hint="范围 1 字节至最高 8 MiB"
                 htmlFor="settings-max-body-amount"
               >
                 <div className="settings-capacity-control">
@@ -889,7 +933,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
 
               <Field
                 label="请求体总存储上限"
-                hint={`当前换算：${generalDraft.max_body_storage_bytes.toLocaleString()} 字节，上限 1 GiB (1,073,741,824 字节)`}
+                hint="范围 1 字节至最高 1 GiB"
                 htmlFor="settings-max-storage-amount"
               >
                 <div className="settings-capacity-control">
@@ -959,7 +1003,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
           <div className="settings-toggle-info">
             <span className="settings-toggle-title">自动使用 models.dev 公共价格目录</span>
             <span className="settings-toggle-hint">
-              开启后自动同步官方主流模型基准费率。可在下方通过手工价格或规则针对特定模型进行覆盖。
+              开启后自动同步 models.dev 公共参考价格，可能与实际账单不同。可在下方通过手工价格或规则针对特定模型进行覆盖。
             </span>
           </div>
           <Switch
@@ -986,9 +1030,9 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
           <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
             <span>公共目录总收录：{formatInt(snapshot.catalog_entries ?? 0)} 条</span>
             <span style={{ margin: '0 8px' }}>·</span>
-            <span>当前生效条目：{formatInt(snapshot.prices?.length ?? 0)} 条</span>
+            <span>已记录模型与手工价格：{formatInt(snapshot.prices?.length ?? 0)} 条</span>
             <span style={{ margin: '0 8px' }}>·</span>
-            <span>上次同步：{snapshot.last_sync ? new Date(snapshot.last_sync).toLocaleString('zh-CN') : '尚未同步'}</span>
+            <span>上次同步：{isLastSyncValid ? new Date(snapshot.last_sync).toLocaleString('zh-CN') : '尚未同步'}</span>
             {snapshot.error && (
               <span style={{ color: 'var(--error-color, #c65746)', marginLeft: 8 }}>
                 （目录同步警告：{snapshot.error}）
@@ -1021,6 +1065,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
               <Input
                 placeholder="搜索模型名称…"
                 value={previewFilter}
+                disabled={isMutationBusy}
                 onChange={(e) => {
                   setPreviewFilter(e.target.value);
                   setPreviewPage(1);
@@ -1033,7 +1078,9 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
             </div>
           </div>
 
-          {previewLoading ? (
+          {previewError ? (
+            <Notice tone="danger">{previewError}</Notice>
+          ) : previewLoading ? (
             <Notice tone="info">正在获取价格预检…</Notice>
           ) : currentPreviewPageItems.length === 0 ? (
             <EmptyState
