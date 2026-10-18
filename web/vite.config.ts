@@ -1,18 +1,19 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import fs from 'node:fs';
+import path from 'node:path';
 
 export default defineConfig({
   plugins: [
     react(),
     {
-      name: 'rename-html-and-single-bundle',
-      generateBundle(_, bundle) {
-        if (bundle['index.html']) {
-          bundle['ui.html'] = {
-            ...bundle['index.html'],
-            fileName: 'ui.html',
-          };
-          delete bundle['index.html'];
+      name: 'rename-html',
+      closeBundle() {
+        const distDir = path.resolve(__dirname, '../internal/web/dist');
+        const indexPath = path.join(distDir, 'index.html');
+        const uiPath = path.join(distDir, 'ui.html');
+        if (fs.existsSync(indexPath)) {
+          fs.renameSync(indexPath, uiPath);
         }
       },
     },

@@ -129,10 +129,9 @@ export function preserveOriginalExpiry(
 
   if (originalISO) {
     const originalDate = new Date(originalISO);
-    // Compare up to minute precision since datetime-local inputs standard granularity is minute
     if (!isNaN(originalDate.getTime())) {
       const diffMs = Math.abs(inputDate.getTime() - originalDate.getTime());
-      if (diffMs < 60000 && inputDate.getMinutes() === originalDate.getMinutes() && inputDate.getHours() === originalDate.getHours()) {
+      if (diffMs < 60000 && Math.floor(inputDate.getTime() / 60000) === Math.floor(originalDate.getTime() / 60000)) {
         return originalISO;
       }
     }
