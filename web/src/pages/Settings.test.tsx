@@ -6,7 +6,7 @@ import type { Settings, PriceSnapshot, Health, ModelInfo, PricePreview } from '.
 
 describe('SettingsPage', () => {
   let mockApi: ApiClient;
-  let onDirtyChange: ReturnType<typeof vi.fn>;
+  let onDirtyChange: ReturnType<typeof vi.fn<(dirty: boolean) => void>>;
 
   const initialSettings: Settings = {
     capture_enabled: false,

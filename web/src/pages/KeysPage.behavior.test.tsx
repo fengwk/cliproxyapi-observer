@@ -8,7 +8,7 @@ import type { Key } from '../lib/types';
 describe('KeysPage & ModelPicker Behavior Acceptance Tests', () => {
   let mockApi: ApiClient;
   let mockKeys: Key[];
-  let onDirtyChange: ReturnType<typeof vi.fn>;
+  let onDirtyChange: ReturnType<typeof vi.fn<(dirty: boolean) => void>>;
   let capturedPutBody: unknown = null;
   let capturedPostBody: unknown = null;
 
