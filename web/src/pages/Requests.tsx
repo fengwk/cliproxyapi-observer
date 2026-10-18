@@ -10,6 +10,7 @@ import {
   getTodayPresetRange,
   getLast7DaysPresetRange,
   snapToWholeDateRange,
+  isHistoricalDateQueryError,
   buildRequestsQueryParams,
   CAPTURE_STATUS_LABELS,
   formatPriceSource,
@@ -67,10 +68,20 @@ export function RequestsPage({ api, refreshInterval, onDirtyChange }: RequestsPa
   const detailAbortControllerRef = useRef<AbortController | null>(null);
   const activeDetailIdRef = useRef<string | null>(null);
 
-  // Keep ref to activeDetailId for late-response guards
+  // Unmount cleanup: cancel any pending generation or abort controllers
   useEffect(() => {
-    activeDetailIdRef.current = activeDetailId;
-  }, [activeDetailId]);
+    return () => {
+      generationRef.current++;
+      if (activeAbortControllerRef.current) {
+        activeAbortControllerRef.current.abort();
+        activeAbortControllerRef.current = null;
+      }
+      if (detailAbortControllerRef.current) {
+        detailAbortControllerRef.current.abort();
+        detailAbortControllerRef.current = null;
+      }
+    };
+  }, []);
 
   // Keys map for fast lookup
   const keysMap = useMemo(() => {
@@ -150,6 +161,11 @@ export function RequestsPage({ api, refreshInterval, onDirtyChange }: RequestsPa
   // 3. Main Data Fetch Callback (Summary + Requests Page)
   const fetchData = useCallback(
     async (signal?: AbortSignal, currentFilters = appliedFilters, currentPage = page) => {
+      // If external signal is already aborted, return immediately
+      if (signal?.aborted) {
+        return;
+      }
+
       // Abort any previous in-flight request
       if (activeAbortControllerRef.current) {
         activeAbortControllerRef.current.abort();
@@ -158,8 +174,10 @@ export function RequestsPage({ api, refreshInterval, onDirtyChange }: RequestsPa
       activeAbortControllerRef.current = localController;
 
       // Link with external signal if provided
+      let onAbort: (() => void) | undefined;
       if (signal) {
-        signal.addEventListener('abort', () => localController.abort(), { once: true });
+        onAbort = () => localController.abort();
+        signal.addEventListener('abort', onAbort, { once: true });
       }
 
       const generation = ++generationRef.current;
@@ -186,6 +204,9 @@ export function RequestsPage({ api, refreshInterval, onDirtyChange }: RequestsPa
         }
         setQueryError(errorMessage(err) || '加载请求数据失败');
       } finally {
+        if (signal && onAbort) {
+          signal.removeEventListener('abort', onAbort);
+        }
         if (generation === generationRef.current) {
           setLoading(false);
           if (activeAbortControllerRef.current === localController) {
@@ -197,31 +218,22 @@ export function RequestsPage({ api, refreshInterval, onDirtyChange }: RequestsPa
     [api, appliedFilters, page]
   );
 
-  // Trigger load on appliedFilters or page changes
-  useEffect(() => {
-    const controller = new AbortController();
-    fetchData(controller.signal);
-    return () => {
-      controller.abort();
-    };
-  }, [fetchData]);
-
   // Polling via usePoll: automatically pauses when dirty, when modal is open, or refreshInterval <= 0
-  const isPollingPaused = isDirty || activeDetailId !== null || refreshInterval <= 0;
-  usePoll(
-    useCallback(
-      async (signal: AbortSignal) => {
-        await fetchData(signal);
-      },
-      [fetchData]
-    ),
-    refreshInterval,
-    isPollingPaused
+  // usePoll triggers the single initial execution and handles loadData updates
+  const isPollingPaused = isDirty || activeDetailId !== null;
+  const loadData = useCallback(
+    async (signal: AbortSignal) => {
+      await fetchData(signal, appliedFilters, page);
+    },
+    [fetchData, appliedFilters, page]
   );
+  usePoll(loadData, refreshInterval, isPollingPaused);
 
   // 4. Detail Fetch on demand
   const handleOpenDetail = useCallback(
     async (id: string) => {
+      // Synchronously assign ref to prevent fast promise / late writes race
+      activeDetailIdRef.current = id;
       setActiveDetailId(id);
       setDetailData(null);
       setDetailError(null);
@@ -261,7 +273,8 @@ export function RequestsPage({ api, refreshInterval, onDirtyChange }: RequestsPa
   );
 
   const handleCloseDetail = useCallback(() => {
-    // Abort in-flight request immediately
+    // Synchronously clear ref so any late in-flight resolution cannot write or reopen
+    activeDetailIdRef.current = null;
     if (detailAbortControllerRef.current) {
       detailAbortControllerRef.current.abort();
       detailAbortControllerRef.current = null;
@@ -418,14 +431,20 @@ export function RequestsPage({ api, refreshInterval, onDirtyChange }: RequestsPa
         </div>
       )}
 
-      {/* Query Error Notice with Whole-Date Corrective Action */}
+      {/* Query Error Notice with Conditional Whole-Date Corrective Action or Retry */}
       {queryError && (
         <Notice tone="danger">
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
             <span>{queryError}</span>
-            <Button variant="secondary" onClick={handleCorrectiveWholeDate}>
-              修正为整日 UTC 范围
-            </Button>
+            {isHistoricalDateQueryError(queryError, appliedFilters.from, appliedFilters.to) ? (
+              <Button variant="secondary" onClick={handleCorrectiveWholeDate}>
+                修正为整日 UTC 范围
+              </Button>
+            ) : (
+              <Button variant="secondary" onClick={() => fetchData(undefined, appliedFilters, page)}>
+                重试
+              </Button>
+            )}
           </div>
         </Notice>
       )}

@@ -1,111 +1,41 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 
-/**
- * Hook for non-overlapping, visibility-aware polling with cancellation.
- *
- * @param load Asynchronous load callback receiving an AbortSignal.
- * @param seconds Polling interval in seconds; <= 0 disables polling.
- * @param paused When true, pauses polling (e.g. during dirty drafts or open modals).
- */
+/** One initial load per dependency generation; subsequent loads never overlap. */
 export function usePoll(
-  load: (signal: AbortSignal) => Promise<void>,
-  seconds: number,
-  paused?: boolean
+  load: (signal: AbortSignal) => Promise<void>, seconds: number, paused = false,
 ): void {
-  const loadRef = useRef(load);
-  loadRef.current = load;
-
-  const secondsRef = useRef(seconds);
-  secondsRef.current = seconds;
-
-  const pausedRef = useRef(paused);
-  pausedRef.current = paused;
-
   useEffect(() => {
-    let timerId: ReturnType<typeof setTimeout> | null = null;
-    let activeController: AbortController | null = null;
-    let unmounted = false;
-
-    const clearTimer = () => {
-      if (timerId !== null) {
-        clearTimeout(timerId);
-        timerId = null;
-      }
-    };
-
-    const abortCurrent = () => {
-      if (activeController) {
-        activeController.abort();
-        activeController = null;
-      }
-    };
-
-    const scheduleNext = () => {
-      clearTimer();
-      if (unmounted) return;
-      if (pausedRef.current || secondsRef.current <= 0) return;
-      if (typeof document !== 'undefined' && document.hidden) return;
-
-      timerId = setTimeout(() => {
-        execute();
-      }, secondsRef.current * 1000);
-    };
-
-    const execute = async () => {
-      clearTimer();
-      if (unmounted) return;
-      if (pausedRef.current) return;
-      if (typeof document !== 'undefined' && document.hidden) return;
-
-      abortCurrent();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let active: AbortController | undefined;
+    let disposed = false;
+    function cancel() {
+      clearTimeout(timer);
+      active?.abort();
+      active = undefined;
+    }
+    async function execute() {
+      if (disposed || paused || document.hidden || active) return;
       const controller = new AbortController();
-      activeController = controller;
-
-      try {
-        await loadRef.current(controller.signal);
-      } catch (err: unknown) {
-        // Silently tolerate aborts
-        if (controller.signal.aborted) {
-          return;
-        }
-      } finally {
-        if (activeController === controller) {
-          activeController = null;
-        }
-        if (!unmounted && !controller.signal.aborted) {
-          scheduleNext();
+      active = controller;
+      try { await load(controller.signal); }
+      catch { /* pages present non-abort errors beside their data */ }
+      finally {
+        if (active === controller) active = undefined;
+        if (!disposed && !paused && !controller.signal.aborted && seconds > 0 && !document.hidden) {
+          timer = setTimeout(execute, seconds * 1000);
         }
       }
-    };
-
-    // Visibility listener
-    const handleVisibilityChange = () => {
-      if (document.hidden) {
-        clearTimer();
-        abortCurrent();
-      } else {
-        if (!pausedRef.current && secondsRef.current > 0) {
-          execute();
-        }
-      }
-    };
-
-    if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', handleVisibilityChange);
     }
-
-    // Trigger initial execution if not paused
-    if (!paused) {
-      execute();
+    function visibilityChanged() {
+      if (document.hidden) cancel();
+      else if (seconds > 0) void execute();
     }
-
+    document.addEventListener('visibilitychange', visibilityChanged);
+    void execute(); // zero disables polling, not the initial request
     return () => {
-      unmounted = true;
-      clearTimer();
-      abortCurrent();
-      if (typeof document !== 'undefined') {
-        document.removeEventListener('visibilitychange', handleVisibilityChange);
-      }
+      disposed = true;
+      cancel();
+      document.removeEventListener('visibilitychange', visibilityChanged);
     };
-  }, [seconds, paused]);
+  }, [load, seconds, paused]);
 }

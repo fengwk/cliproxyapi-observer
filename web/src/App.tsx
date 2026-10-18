@@ -1,281 +1,153 @@
-import React, { useState, useCallback, useMemo } from 'react';
-import type { ApiClient, PageProps } from './lib/api';
-import { createApiClient } from './lib/api';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createApiClient, SESSION_KEY_STORAGE, type ApiClient } from './lib/api';
+import { errorMessage } from './lib/format';
 import { KeysPage } from './pages/KeysPage';
-import { Button, Input, Field, Notice } from './components/ui';
+import { RequestsPage } from './pages/Requests';
+import { SettingsPage } from './pages/Settings';
+import { Button, Field, Input, Modal, Notice, Select } from './components/ui';
 
-export type TabKey = 'requests' | 'keys' | 'settings';
-
-export interface AppProps {
-  api?: ApiClient;
-  RequestsPage?: React.ComponentType<PageProps>;
-  SettingsPage?: React.ComponentType<PageProps>;
+type Tab = 'requests' | 'keys' | 'settings';
+type Theme = 'auto' | 'light' | 'white' | 'dark';
+const tabs: { id: Tab; label: string }[] = [
+  { id: 'requests', label: '请求日志' }, { id: 'keys', label: 'Key 管理' }, { id: 'settings', label: '设置' },
+];
+function readSession() {
+  try { return sessionStorage.getItem(SESSION_KEY_STORAGE) ?? ''; } catch { return ''; }
 }
 
-const SESSION_KEY_NAME = 'observer.management-key';
-
-export function App({ api: customApi, RequestsPage: CustomRequestsPage, SettingsPage: CustomSettingsPage }: AppProps) {
-  const [managementKey, setManagementKey] = useState<string>(() => {
-    try {
-      if (typeof window !== 'undefined' && window.sessionStorage) {
-        return window.sessionStorage.getItem(SESSION_KEY_NAME) || '';
-      }
-    } catch (_) {
-      // Storage access blocked
-    }
-    return '';
+export function App() {
+  const [key, setKey] = useState(readSession);
+  const [tab, setTab] = useState<Tab>('requests');
+  const [interval, setInterval] = useState(5);
+  const [dirty, setDirty] = useState(false);
+  const [destination, setDestination] = useState<Tab | 'logout' | null>(null);
+  const [loginKey, setLoginKey] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [loginBusy, setLoginBusy] = useState(false);
+  const loginController = useRef<AbortController | null>(null);
+  const apiRef = useRef<ApiClient | null>(null);
+  const [theme, setTheme] = useState<Theme>(() => {
+    try { return (sessionStorage.getItem('observer.theme') as Theme) || 'auto'; } catch { return 'auto'; }
   });
-
-  const [activeTab, setActiveTab] = useState<TabKey>('keys');
-  const [refreshInterval, setRefreshInterval] = useState<number>(5);
-  const [isDirty, setIsDirty] = useState<boolean>(false);
-  const [loginInput, setLoginInput] = useState<string>('');
-  const [loginError, setLoginError] = useState<string>('');
-  const [loginLoading, setLoginLoading] = useState<boolean>(false);
-
-  const handleLogout = useCallback(() => {
-    setManagementKey('');
-    setLoginInput('');
-    setLoginError('');
-    setIsDirty(false);
-    try {
-      if (typeof window !== 'undefined' && window.sessionStorage) {
-        window.sessionStorage.removeItem(SESSION_KEY_NAME);
-      }
-    } catch (_) {
-      // Storage access blocked
-    }
+  const logout = useCallback(() => {
+    apiRef.current?.dispose?.();
+    try { sessionStorage.removeItem(SESSION_KEY_STORAGE); } catch { /* session-only fallback */ }
+    setKey('');
+    setLoginKey('');
+    setDirty(false);
+    setDestination(null);
   }, []);
+  const api = useMemo(() => createApiClient({
+    getKey: () => key || null,
+    onUnauthorized: logout,
+  }), [key, logout]);
+  apiRef.current = api;
+  useEffect(() => () => api.dispose?.(), [api]);
+  useEffect(() => () => loginController.current?.abort(), []);
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirty]);
 
-  const api = useMemo<ApiClient>(() => {
-    if (customApi) {
-      return customApi;
-    }
-    return createApiClient({
-      getKey: () => managementKey || null,
-      onUnauthorized: () => {
-        handleLogout();
-      },
-    });
-  }, [customApi, managementKey, handleLogout]);
-
-  const handleLoginSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const key = loginInput.trim();
-    if (!key) {
-      setLoginError('请输入管理密钥');
-      return;
-    }
-
-    setLoginLoading(true);
-    setLoginError('');
-
-    try {
-      // Verify key by checking health or keys endpoint
-      const tempApi = createApiClient({
-        getKey: () => key,
-      });
-      await tempApi.request('/health');
-
-      // Key valid
-      try {
-        if (typeof window !== 'undefined' && window.sessionStorage) {
-          window.sessionStorage.setItem(SESSION_KEY_NAME, key);
-        }
-      } catch (_) {
-        // Storage access blocked
-      }
-      setManagementKey(key);
-      setLoginInput('');
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setLoginError(msg || '管理密钥验证失败，请重试');
-    } finally {
-      setLoginLoading(false);
-    }
-  };
-
-  const handleDirtyChange = useCallback((dirty: boolean) => {
-    setIsDirty(dirty);
-  }, []);
-
-  // Standalone theme toggle
-  const [themeChoice, setThemeChoice] = useState<'light' | 'white' | 'dark'>(() => {
-    try {
-      if (typeof window !== 'undefined') {
-        const t = document.documentElement.getAttribute('data-theme');
-        if (t === 'dark' || t === 'white' || t === 'light') return t;
-      }
-    } catch (_) {}
-    return 'light';
-  });
-
-  const handleThemeChange = (nextTheme: 'light' | 'white' | 'dark') => {
-    setThemeChoice(nextTheme);
-    try {
-      document.documentElement.setAttribute('data-theme', nextTheme);
-      sessionStorage.setItem('observer.theme', nextTheme);
-    } catch (_) {}
-  };
-
-  // If not authenticated, render Login Screen
-  if (!managementKey) {
-    return (
-      <main className="cpa-app-layout" style={{ justifyContent: 'center', alignItems: 'center' }}>
-        <div className="cpa-card" style={{ width: '100%', maxWidth: '420px', marginTop: '4rem' }}>
-          <div style={{ marginBottom: '1.5rem', textAlign: 'center' }}>
-            <h1 className="cpa-header-title" style={{ fontSize: '1.4rem' }}>Observer 管理登录</h1>
-            <p className="cpa-header-subtitle" style={{ marginTop: '0.4rem' }}>
-              使用同源 CPA 管理密钥；仅保存在本次标签页会话。
-            </p>
-          </div>
-
-          {loginError && <Notice tone="danger">{loginError}</Notice>}
-
-          <form onSubmit={handleLoginSubmit} id="login">
-            <Field label="管理密钥" htmlFor="login-key">
-              <Input
-                id="login-key"
-                type="password"
-                autoComplete="off"
-                required
-                value={loginInput}
-                onChange={(e) => setLoginInput(e.target.value)}
-                placeholder="请输入 CPA 管理密钥"
-              />
-            </Field>
-
-            <div style={{ marginTop: '1.25rem' }}>
-              <Button
-                type="submit"
-                variant="primary"
-                loading={loginLoading}
-                style={{ width: '100%' }}
-              >
-                登录
-              </Button>
-            </div>
-          </form>
-        </div>
-      </main>
-    );
+  function navigate(next: Tab | 'logout') {
+    if (dirty) { setDestination(next); return; }
+    if (next === 'logout') logout(); else setTab(next);
   }
-
-  const effectivePollInterval = isDirty ? 0 : refreshInterval;
-
+  async function login(event: React.FormEvent) {
+    event.preventDefault();
+    if (loginController.current) return;
+    const entered = loginKey.trim();
+    if (!entered) { setLoginError('请输入 CPA 管理密钥'); return; }
+    const controller = new AbortController();
+    loginController.current = controller;
+    const temporary = createApiClient({ getKey: () => entered });
+    setLoginBusy(true);
+    setLoginError('');
+    try {
+      await temporary.request('/health', { signal: controller.signal });
+      if (controller.signal.aborted) return;
+      try { sessionStorage.setItem(SESSION_KEY_STORAGE, entered); } catch { /* keep only in memory */ }
+      setKey(entered);
+      setLoginKey('');
+    } catch (error) {
+      if (!controller.signal.aborted) setLoginError(errorMessage(error));
+    } finally {
+      temporary.dispose?.();
+      loginController.current = null;
+      if (!controller.signal.aborted) setLoginBusy(false);
+    }
+  }
+  const themeControl = (
+    <div className="cpa-theme-control">
+      <Select value={theme} onChange={value => {
+        setTheme(value as Theme);
+        try {
+          if (value === 'auto') sessionStorage.removeItem('observer.theme');
+          else sessionStorage.setItem('observer.theme', value);
+        } catch { /* unavailable storage does not block the session */ }
+        window.dispatchEvent(new CustomEvent('observer:theme-change', { detail: value }));
+      }} aria-label="外观" options={[
+        { value: 'auto', label: '跟随系统' }, { value: 'light', label: '暖灰' },
+        { value: 'white', label: '纯白' }, { value: 'dark', label: '深色' },
+      ]} />
+    </div>
+  );
+  if (!key) return (
+    <main className="cpa-app-layout cpa-login-layout">
+      <section className="cpa-card cpa-login-card">
+        <h1 className="cpa-header-title">登录 Observer</h1>
+        <p className="cpa-header-subtitle">输入 CPA 管理密钥。仅在当前标签页的会话中保存。</p>
+        {loginError && <Notice tone="danger">{loginError}</Notice>}
+        <form onSubmit={login}>
+          <Field label="管理密钥" htmlFor="login-key">
+            <Input id="login-key" type="password" autoComplete="off" value={loginKey}
+              onChange={event => setLoginKey(event.target.value)} required />
+          </Field>
+          <Button type="submit" variant="primary" loading={loginBusy}>登录</Button>
+        </form>
+        {themeControl}
+      </section>
+    </main>
+  );
+  const Page = tab === 'keys' ? KeysPage : tab === 'settings' ? SettingsPage : RequestsPage;
   return (
     <div className="cpa-app-layout">
       <header className="cpa-header">
-        <div className="cpa-header-brand">
-          <h1 className="cpa-header-title">Observer</h1>
-          <span className="cpa-header-subtitle">Key 与用量管理</span>
-        </div>
-
+        <span className="cpa-header-brand cpa-standalone-brand">Observer</span>
         <div className="cpa-header-actions">
-          {/* Duplicate theme controls hidden in embedded mode */}
-          <div className="cpa-theme-control cpa-theme-switcher" style={{ display: 'flex', gap: '0.25rem' }}>
-            <Button
-              variant={themeChoice === 'light' ? 'primary' : 'ghost'}
-              onClick={() => handleThemeChange('light')}
-              title="切换为暖灰浅色"
-            >
-              暖灰
-            </Button>
-            <Button
-              variant={themeChoice === 'white' ? 'primary' : 'ghost'}
-              onClick={() => handleThemeChange('white')}
-              title="切换为纯白"
-            >
-              纯白
-            </Button>
-            <Button
-              variant={themeChoice === 'dark' ? 'primary' : 'ghost'}
-              onClick={() => handleThemeChange('dark')}
-              title="切换为深色"
-            >
-              深色
-            </Button>
-          </div>
-
-          <Button
-            variant="ghost"
-            onClick={() => setRefreshInterval((prev) => (prev > 0 ? 0 : 5))}
-            title={refreshInterval > 0 ? '暂停轮询' : '开启轮询 (5s)'}
-          >
-            {refreshInterval > 0 ? (isDirty ? '轮询暂停(编辑中)' : '轮询 5s') : '轮询已关'}
+          {themeControl}
+          <Button variant="ghost" onClick={() => setInterval(value => value ? 0 : 5)}
+            aria-pressed={interval > 0} title="自动刷新，每 5 秒一次">
+            {interval === 0 ? '自动刷新已关' : dirty ? '编辑中，暂停刷新' : '每 5 秒刷新'}
           </Button>
-
-          <Button variant="secondary" onClick={handleLogout} title="退出当前管理会话">
-            退出
-          </Button>
+          <Button variant="ghost" onClick={() => navigate('logout')}>退出</Button>
         </div>
       </header>
-
-      {/* Navigation Tabs */}
       <nav className="cpa-tabs" aria-label="页面标签">
-        <button
-          type="button"
-          className={`cpa-tab-item ${activeTab === 'requests' ? 'is-active' : ''}`}
-          onClick={() => setActiveTab('requests')}
-        >
-          请求日志
-        </button>
-        <button
-          type="button"
-          className={`cpa-tab-item ${activeTab === 'keys' ? 'is-active' : ''}`}
-          onClick={() => setActiveTab('keys')}
-        >
-          Key 管理
-        </button>
-        <button
-          type="button"
-          className={`cpa-tab-item ${activeTab === 'settings' ? 'is-active' : ''}`}
-          onClick={() => setActiveTab('settings')}
-        >
-          设置
-        </button>
+        {tabs.map(item => (
+          <button key={item.id} type="button" className={`cpa-tab-item ${tab === item.id ? 'is-active' : ''}`}
+            aria-current={tab === item.id ? 'page' : undefined}
+            onClick={() => { if (item.id !== tab) navigate(item.id); }}>{item.label}</button>
+        ))}
       </nav>
-
-      {/* Tab Panels */}
       <main id="content">
-        {activeTab === 'keys' && (
-          <KeysPage
-            api={api}
-            refreshInterval={effectivePollInterval}
-            onDirtyChange={handleDirtyChange}
-          />
-        )}
-
-        {activeTab === 'requests' && (
-          CustomRequestsPage ? (
-            <CustomRequestsPage
-              api={api}
-              refreshInterval={effectivePollInterval}
-              onDirtyChange={handleDirtyChange}
-            />
-          ) : (
-            <div className="cpa-card" style={{ textAlign: 'center', padding: '3rem' }}>
-              <p style={{ color: 'var(--text-secondary)' }}>请求日志切片等待集成</p>
-            </div>
-          )
-        )}
-
-        {activeTab === 'settings' && (
-          CustomSettingsPage ? (
-            <CustomSettingsPage
-              api={api}
-              refreshInterval={effectivePollInterval}
-              onDirtyChange={handleDirtyChange}
-            />
-          ) : (
-            <div className="cpa-card" style={{ textAlign: 'center', padding: '3rem' }}>
-              <p style={{ color: 'var(--text-secondary)' }}>设置切片等待集成</p>
-            </div>
-          )
-        )}
+        <Page key={tab} api={api} refreshInterval={interval} onDirtyChange={setDirty} />
       </main>
+      {destination && (
+        <Modal title="放弃未保存的修改？" onClose={() => setDestination(null)} footer={<>
+          <Button onClick={() => setDestination(null)}>继续编辑</Button>
+          <Button variant="danger" onClick={() => {
+            const next = destination;
+            setDirty(false);
+            setDestination(null);
+            if (next === 'logout') logout(); else setTab(next);
+          }}>放弃修改</Button>
+        </>}>
+          <p>当前页面的修改尚未保存。离开后，这些修改将丢失。</p>
+        </Modal>
+      )}
     </div>
   );
 }
-
-export default App;
