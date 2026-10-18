@@ -484,10 +484,10 @@ describe('RequestsPage and RequestsHelpers', () => {
       '4f68a2d1e09c8b7a6543210fedcba9874f68a2d1e09c8b7a6543210fedcba987'
     );
 
-    // Global helper capture value is updated
-    expect((window as unknown as Record<string, unknown>).__observerCopied).toBe(
-      '4f68a2d1e09c8b7a6543210fedcba9874f68a2d1e09c8b7a6543210fedcba987'
-    );
+    // Clipboard acknowledgement is visible without retaining copied content
+    // on a production window global after its detail dialog is closed.
+    expect(screen.getByText(/已复制完整 Key ID/)).toBeInTheDocument();
+    expect((window as unknown as Record<string, unknown>).__observerCopied).toBeUndefined();
   });
 
   /**

@@ -207,7 +207,7 @@ export function formatPriceSource(source: string, ruleId?: string): { label: str
     return { label: '手动定价', isWarning: false };
   }
   if (source === 'catalog' || source === 'auto') {
-    return { label: '官方价格表', isWarning: false };
+    return { label: '公共参考价格', isWarning: false };
   }
   if (source === 'rule') {
     return { label: ruleId ? `规则 (${ruleId})` : '自定义规则', isWarning: false };
@@ -289,7 +289,7 @@ export function redactBody(body: unknown): unknown {
   }
   if (typeof body === 'object') {
     const sensitiveRegex = /authorization|cookie|api.?key|token|secret|password/i;
-    const output: Record<string, unknown> = {};
+    const output: Record<string, unknown> = Object.create(null);
     for (const [k, v] of Object.entries(body as Record<string, unknown>)) {
       if (sensitiveRegex.test(k)) {
         output[k] = '[redacted]';

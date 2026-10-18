@@ -392,25 +392,20 @@ export function RevokeKeyModal({ keyData, api, onClose, onSuccess }: RevokeKeyMo
     abortControllerRef.current = new AbortController();
 
     try {
-      if (isDisabling) {
-        await api.request(`/keys?id=${encodeURIComponent(keyData.id)}`, {
-          method: 'DELETE',
-          signal: abortControllerRef.current.signal,
-        });
-      } else {
-        await api.request(`/keys?id=${encodeURIComponent(keyData.id)}`, {
-          method: 'PUT',
-          body: {
-            label: keyData.label,
-            enabled: true,
-            expires_at: keyData.expires_at,
-            max_concurrent: keyData.max_concurrent,
-            allowed_models: keyData.allowed_models,
-            limits: keyData.limits,
-          },
-          signal: abortControllerRef.current.signal,
-        });
-      }
+      // Disable via KeySpec, not DELETE: revocation destroys the hash and
+      // cannot honestly be presented as a reversible on/off switch.
+      await api.request(`/keys?id=${encodeURIComponent(keyData.id)}`, {
+        method: 'PUT',
+        body: {
+          label: keyData.label,
+          enabled: !isDisabling,
+          expires_at: keyData.expires_at,
+          max_concurrent: keyData.max_concurrent,
+          allowed_models: keyData.allowed_models,
+          limits: keyData.limits,
+        },
+        signal: abortControllerRef.current.signal,
+      });
       if (mountedRef.current) {
         onSuccess();
       }
@@ -455,10 +450,10 @@ export function RevokeKeyModal({ keyData, api, onClose, onSuccess }: RevokeKeyMo
 
         {isDisabling ? (
           <Notice tone="warning">
-            禁用后，客户端使用该 Key 发起的所有请求将被立即拒绝。该 Key 的历史记录与用量将完整保留，之后可随时重新启用。
+            禁用后将拒绝该 Key 的新请求，已受理的请求不受影响。密钥、历史记录与用量将完整保留，之后可重新启用。
           </Notice>
         ) : (
-          <Notice tone="info">重新启用后，该 Key 将恢复访问能力。</Notice>
+          <Notice tone="info">重新启用后，新请求仍须满足有效期、模型权限和额度等限制。</Notice>
         )}
       </div>
     </Modal>

@@ -110,9 +110,14 @@ export function Select({
 }: SelectProps) {
   const selectedOption = options.find((opt) => opt.value === value);
   const displayLabel = selectedOption ? selectedOption.label : value;
+  // Radix reserves "" for clearing its value; our API uses it for "all".
+  // Choose an internal sentinel that cannot collide with a supplied identity.
+  let emptyValue = '__observer_all__';
+  while (options.some(option => option.value === emptyValue)) emptyValue += '_';
 
   return (
-    <SelectPrimitive.Root value={value} onValueChange={onChange} disabled={disabled}>
+    <SelectPrimitive.Root value={value || emptyValue}
+      onValueChange={next => onChange(next === emptyValue ? '' : next)} disabled={disabled}>
       <SelectPrimitive.Trigger
         id={id}
         className={`cpa-select-trigger ${className}`}
@@ -136,7 +141,7 @@ export function Select({
             {options.map((opt) => (
               <SelectPrimitive.Item
                 key={opt.value}
-                value={opt.value}
+                value={opt.value || emptyValue}
                 disabled={opt.disabled}
                 className="cpa-select-item"
               >

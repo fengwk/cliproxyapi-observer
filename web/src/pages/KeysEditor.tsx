@@ -401,7 +401,7 @@ export function KeyEditor({ keyData, api, onClose, onSuccess }: KeyEditorProps) 
                   <Input
                     type="number"
                     min={1}
-                    max={1000000}
+                    max={9_000_000_000_000_000}
                     value={maxConcurrentInput}
                     onChange={(e) => setMaxConcurrentInput(e.target.value)}
                     placeholder="最大并发连接数"
@@ -450,7 +450,7 @@ export function KeyEditor({ keyData, api, onClose, onSuccess }: KeyEditorProps) 
             {isEdit ? '额度上限 (USD)' : '4. 额度上限 (USD)'}
           </h3>
           <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', margin: '0 0 1rem' }}>
-            周期是首次请求起固定 5 小时 / 7 天 / 月窗口。开启限额必须输入大于 0 的有效金额；未开启项为“不限”。
+            按固定 5 小时、7 天和月周期计算，周期起点可在详情中查看。开启限额时，金额必须大于 0；关闭表示不限。
           </p>
 
           <div className="cpa-form-grid cpa-form-grid-2">

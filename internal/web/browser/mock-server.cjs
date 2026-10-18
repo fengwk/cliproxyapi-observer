@@ -362,7 +362,7 @@ function createSettings() {
 
 function createState(options) {
   const now = Date.now();
-  return {
+  const state = {
     now,
     keys: [
       createKey('key-alpha', '生产 Key（自动化）'),
@@ -695,6 +695,7 @@ function pricingSnapshot(state) {
   return {
     prices: clone(state.settings.pricing.prices).concat(catalog),
     last_sync: state.pricesLastSync,
+    catalog_entries: state.catalogEntries,
     error: state.pricesError || '',
     refreshing: false
   };
@@ -993,6 +994,36 @@ function createServer(options) {
       return;
     }
 
+    // The official application's own router/layout creates the plugin iframe.
+    if (url.pathname === '/management.html' && opts.shellHTML) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(opts.shellHTML);
+      return;
+    }
+    const hostMatch = /^\/v(?:0|8)\/management\/(config|plugins|auth-files|usage|latest-version|credentials|config\/access\/api-keys|observability\/usage\/api-keys)$/.exec(url.pathname);
+    if (hostMatch && opts.shellHTML) {
+      if (req.headers.authorization !== `Bearer ${state.managementKey}`) {
+        sendError(res, 401, 'unauthorized', 'invalid management key');
+        return;
+      }
+      res.setHeader('x-cpa-version', 'v8.0.33');
+      res.setHeader('x-cpa-build-date', '2026-10-18');
+      res.setHeader('x-cpa-support-plugin', 'true');
+      const bodies = {
+        config: { 'api-keys': ['host-browser-probe-only'] },
+        plugins: { plugins_enabled: true, plugins_dir: 'plugins', plugins: [{
+          id: PLUGIN_ID, enabled: true, effective_enabled: true, registered: true, configured: true,
+          metadata: { name: 'Observer', version: '0.7.0' },
+          menus: [{ path: RESOURCE_BASE + '/ui', menu: 'Observer', description: 'Key 与用量管理' }],
+        }] },
+        'auth-files': { files: [] }, usage: { usage: {} }, 'latest-version': { 'latest-version': 'v8.0.33' },
+        credentials: { files: [] }, 'config/access/api-keys': ['host-browser-probe-only'],
+        'observability/usage/api-keys': { api_keys: [] },
+      };
+      sendJson(res, 200, bodies[hostMatch[1]]);
+      return;
+    }
+
     if (url.pathname.startsWith('/__mock/')) {
       if (req.method === 'GET' && url.pathname === '/__mock/calls') {
         sendJson(res, 200, { calls });
@@ -1091,6 +1122,12 @@ function createServer(options) {
           req.headers['x-api-key'] || req.headers['x-goog-api-key'] || req.headers['x-auth-token']
         );
         const bearer = /^Bearer\s+(.+)$/i.exec(auth);
+        // CPA dashboard (not Observer) probes its configured fake client Key.
+        // Scope it to shell fixtures so catalog contract tests remain exclusive.
+        if (opts.shellHTML && bearer?.[1] === 'host-browser-probe-only') {
+          sendJson(res, 200, { data: publicCatalogIDs().map(id => ({ id })) });
+          return;
+        }
         const key = bearer ? tokenKey(bearer[1]) : '';
         const expiresAt = key ? state.capabilities.get(key) : undefined;
         call.authorized = Boolean(expiresAt && expiresAt > Date.now());
@@ -1190,8 +1227,14 @@ function createServer(options) {
         if (req.method === 'POST') {
           rejectAnyQuery(url);
           const body = await readJson(req);
-          call.request_body = clone(body);
-          const spec = normalizeKeySpec(body);
+          const { secret: supplied, ...fields } = body;
+          const custom = Object.prototype.hasOwnProperty.call(body, 'secret');
+          if (custom) validateCustomSecret(supplied);
+          const secret = custom ? supplied : newSecret();
+          const digest = hashSecret(secret);
+          if (findKeyBySecretHash(state, digest)) throw failure(409, 'conflict', 'client key already exists');
+          call.request_body = clone(fields);
+          const spec = normalizeKeySpec(fields);
           const id = 'key-' + String(state.nextKey++).padStart(3, '0');
           const key = createKey(id, spec.label, {
             enabled: spec.enabled,
@@ -1203,9 +1246,8 @@ function createServer(options) {
             active: 0,
             created_at: iso(Date.now())
           });
-          const secret = newSecret();
           state.keys.push(key);
-          state.secrets.set(id, crypto.createHash('sha256').update(secret).digest('hex'));
+          state.secrets.set(id, digest);
           state.counters.keyCreates += 1;
           sendJson(res, 201, { key: publicKey(key), secret });
           return;
@@ -1251,8 +1293,16 @@ function createServer(options) {
         requireMethod(req, 'POST');
         const id = parseQueryID(url, 'POST /keys/rotate');
         const key = findKey(state, id);
-        const secret = newSecret();
-        state.secrets.set(key.id, crypto.createHash('sha256').update(secret).digest('hex'));
+        const body = await readJson(req);
+        rejectUnknown(body, new Set(['secret']), 'rotation');
+        const custom = Object.prototype.hasOwnProperty.call(body, 'secret');
+        if (custom) validateCustomSecret(body.secret);
+        const secret = custom ? body.secret : newSecret();
+        const digest = hashSecret(secret);
+        const owner = findKeyBySecretHash(state, digest);
+        if (owner === id) throw failure(400, 'invalid_key', 'new key must differ');
+        if (owner) throw failure(409, 'conflict', 'client key already exists');
+        state.secrets.set(key.id, digest);
         key.secret_rotated_at = iso(Date.now());
         state.counters.keyRotates += 1;
         sendJson(res, 200, { key: publicKey(key), secret });
@@ -1340,6 +1390,31 @@ function createServer(options) {
       if (suffix === '/prices') {
         requireMethod(req, 'GET');
         sendJson(res, 200, pricingSnapshot(state));
+        return;
+      }
+
+      if (suffix === '/prices/preview') {
+        requireMethod(req, 'POST');
+        rejectAnyQuery(url);
+        const body = await readJson(req);
+        rejectUnknown(body, new Set(['models']), 'preview');
+        if (!Array.isArray(body.models) || body.models.length > 4096) throw failure(400, 'invalid_request', 'invalid models');
+        const items = body.models.map(identity => {
+          rejectUnknown(identity, new Set(['model', 'provider']), 'model identity');
+          if (typeof identity.model !== 'string' || !identity.model || identity.model.length > 1024 ||
+              (identity.provider !== undefined && (typeof identity.provider !== 'string' || identity.provider.length > 1024))) {
+            throw failure(400, 'invalid_request', 'invalid model identity');
+          }
+          const manual = state.settings.pricing.prices.find(price => price.model === identity.model);
+          const auto = state.settings.pricing.auto && ['gpt-5', 'gpt-5-mini'].includes(identity.model);
+          return {
+            model: identity.model, provider: identity.provider || '',
+            rates: clone(manual ? manual.rates : auto ? rate(1_000_000, 8_000_000, 0, 0) : rate(0, 0, 0, 0)),
+            source: manual ? 'manual' : auto ? 'auto' : 'unpriced',
+            has_rules: state.settings.pricing.rules.some(rule => rule.model === identity.model),
+          };
+        });
+        sendJson(res, 200, { items });
         return;
       }
 

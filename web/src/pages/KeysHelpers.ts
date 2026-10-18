@@ -52,16 +52,16 @@ export function validateCustomSecret(secret: string): { valid: boolean; error?: 
 
 /**
  * 校验并发数。
- * 必须为严格整数 1..1000000，拒绝小数（如 '2.5'）、非数字、<=0、>1000000。
+ * 与后端安全整数范围相同；拒绝小数，编辑已有配置不偷偷缩小其范围。
  */
 export function validateConcurrency(input: string): { valid: boolean; value?: number; error?: string } {
   const trimmed = input.trim();
   if (!trimmed || !/^\d+$/.test(trimmed)) {
-    return { valid: false, error: '最大并发数必须为 1 到 1000000 之间的整数' };
+    return { valid: false, error: '最大并发数必须为正整数，且不超过 9000000000000000' };
   }
   const val = Number(trimmed);
-  if (!Number.isSafeInteger(val) || val < 1 || val > 1000000) {
-    return { valid: false, error: '最大并发数必须为 1 到 1000000 之间的整数' };
+  if (!Number.isSafeInteger(val) || val < 1 || val > 9_000_000_000_000_000) {
+    return { valid: false, error: '最大并发数必须为正整数，且不超过 9000000000000000' };
   }
   return { valid: true, value: val };
 }

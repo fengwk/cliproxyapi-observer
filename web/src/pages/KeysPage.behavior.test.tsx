@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { KeysPage } from './KeysPage';
+import { RevokeKeyModal } from './KeysActionModals';
 import { ModelPicker } from './ModelPicker';
 import type { ApiClient } from '../lib/api';
 import type { Key } from '../lib/types';
@@ -92,6 +93,21 @@ describe('KeysPage & ModelPicker Behavior Acceptance Tests', () => {
       }),
       models: vi.fn().mockResolvedValue([{ id: 'gpt-4o' }, { id: 'claude-3-5-sonnet' }]),
     };
+  });
+
+  // A reversible disable must never call DELETE (which destroys the auth hash).
+  // Both directions preserve the exact expiry/model/quota spec and send no secret.
+  it.each([true, false])('toggles enabled=%s using a non-destructive full KeySpec PUT', async enabled => {
+    const key = { ...mockKeys[0], enabled };
+    const success = vi.fn();
+    render(<RevokeKeyModal keyData={key} api={mockApi} onClose={vi.fn()} onSuccess={success} />);
+    fireEvent.click(screen.getByRole('button', { name: enabled ? '确认禁用' : '确认启用' }));
+    await waitFor(() => expect(success).toHaveBeenCalledOnce());
+    expect(capturedPutBody).toEqual({
+      label: key.label, enabled: !enabled, expires_at: key.expires_at,
+      max_concurrent: key.max_concurrent, allowed_models: key.allowed_models, limits: key.limits,
+    });
+    expect(mockApi.request).not.toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ method: 'DELETE' }));
   });
 
   /**
@@ -267,7 +283,7 @@ describe('KeysPage & ModelPicker Behavior Acceptance Tests', () => {
     fireEvent.click(screen.getByRole('button', { name: '确认创建' }));
 
     await waitFor(() => {
-      expect(screen.getByText('最大并发数必须为 1 到 1000000 之间的整数')).toBeInTheDocument();
+      expect(screen.getByText('最大并发数必须为正整数，且不超过 9000000000000000')).toBeInTheDocument();
     });
     expect(capturedPostBody).toBeNull();
   });

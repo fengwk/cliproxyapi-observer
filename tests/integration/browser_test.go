@@ -49,8 +49,8 @@ type browserReport struct {
 }
 
 // TestBrowserAgainstRealHost runs the committed Node/Chrome candidate against
-// a real host. The browser may only read; the sole permitted write is the
-// single-use catalog token POST used to discover models.
+// a real host. Catalog tokens and price previews are the only allowed POSTs;
+// neither changes usage, configuration, keys or historical accounting.
 func TestBrowserAgainstRealHost(t *testing.T) {
 	if os.Getenv("OBSERVER_BROWSER") != "1" {
 		t.Skip("set OBSERVER_BROWSER=1 to run the real-browser smoke")
@@ -293,7 +293,9 @@ func browserRequestAllowed(request browserRequest) bool {
 		return true
 	case "POST":
 		parsed, err := url.Parse(request.URL)
-		return err == nil && strings.HasSuffix(parsed.Path, "/plugins/"+pluginID+"/models/token")
+		return err == nil && parsed.RawQuery == "" &&
+			(parsed.Path == "/v0/management/plugins/"+pluginID+"/models/token" ||
+				parsed.Path == "/v0/management/plugins/"+pluginID+"/prices/preview")
 	default:
 		return false
 	}

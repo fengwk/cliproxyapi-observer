@@ -39,20 +39,20 @@ func TestDeliveryBuildVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Outside a Git checkout the fallback must still identify an unreleased 0.6.0.
+	// Outside a Git checkout the fallback must still identify an unreleased 0.7.0.
 	fallback := exec.Command("bash", script)
 	fallback.Dir = t.TempDir()
 	fallback.Env = append(os.Environ(), "PLUGIN_VERSION=")
 	out, err := fallback.Output()
-	if err != nil || strings.TrimSpace(string(out)) != "0.6.0-dev" {
+	if err != nil || strings.TrimSpace(string(out)) != "0.7.0-dev" {
 		t.Fatalf("fallback version %q, error %v", out, err)
 	}
 	for _, tc := range []struct {
 		input string
 		want  string
 	}{
-		{"v0.6.0", "0.6.0"},
-		{"0.6.0-dev+test", "0.6.0-dev+test"},
+		{"v0.7.0", "0.7.0"},
+		{"0.7.0-dev+test", "0.7.0-dev+test"},
 		{"not-a-version", ""},
 	} {
 		cmd := exec.Command("bash", "scripts/plugin-version.sh")

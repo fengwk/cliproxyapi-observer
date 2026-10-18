@@ -1,231 +1,105 @@
-# Observer 浏览器验收（真实 Chrome CDP，零 npm 依赖）
+# Observer 浏览器验收
 
-本目录只包含本地验收夹具，不参与 `go:embed`，不会被打包进插件二进制。
+验收使用 Node 22、Playwright 和真实 Chrome。它打开**未经修改的官方 CPA 管理中心
+v1.26.5**，由 CPA 自己渲染侧栏、浮动工具栏和插件 iframe，不使用简化父页面。
+本目录只用于开发测试，不参与 `go:embed`。
 
-- `mock-server.cjs`：`127.0.0.1` 上的假 Observer 宿主，实现 `DESIGN.md`
-  管理 API 的完整形状，记录每次调用与状态变更。
-- `mock-server.test.cjs`：`node:test` 合约回归，不启动浏览器。
-- `run.cjs`：Node 22 + 真实 `/usr/bin/google-chrome-stable` 的 CDP 验收，
-  不依赖 Playwright/Puppeteer/npm 包。
+- `run.cjs`：浏览器行为检查、布局矩形检查、截图和错误报告。
+- `shell-helper.cjs`：在独立临时目录下载官方 `management.html` 并验证 SHA-256。
+- `mock-server.cjs`：仅监听回环地址，提供假宿主管理 API 与已编译的插件资源。
+- `mock-server.test.cjs`：无需 Chrome 的 mock API 合约回归。
 
 ## 运行
 
 ```bash
-# 1) 管理 API / mock 合约（无需 Chrome）
+npm ci --prefix web
+make frontend
 node --test internal/web/browser/mock-server.test.cjs
-
-# 2) 真实 Chrome 浏览器验收（mock 数据）
-node internal/web/browser/run.cjs \
-  --report-dir /home/fengwk/proj/cliproxyapi-observer/.workspace/observer-web/browser-report
-
-# 3) 真实 host 只读 smoke
-#    管理密钥只从环境变量读取，不提供 CLI 明文参数。
-OBSERVER_MANAGEMENT_KEY=... node internal/web/browser/run.cjs \
-  --base-url https://cpa.example/v0/management/plugins/cliproxyapi-observer/ui \
-  --report-dir /tmp/observer-realhost-smoke
+CHROME_BIN=/usr/bin/google-chrome-stable \
+  BROWSER_REPORT_DIR=/tmp/observer-browser-report make browser
 ```
 
-可选参数：
+`make build` 使用已提交的 `internal/web/dist`。更改前端源码后必须重新构建，
+CI 会检查生成资源与源码一致。浏览器直接加载这些资源，不使用开发服务器或 CDN。
+
+官方外壳地址：
+`https://github.com/router-for-me/Cli-Proxy-API-Management-Center/releases/download/v1.26.5/management.html`。
+SHA-256 固定为：
+
+```text
+57558cd023475674634a114824b014d3e5ac161f6f3791e3d86b6adab962a700
+```
+
+可设置 `CPA_MANAGEMENT_HTML=/absolute/path/management.html` 复用已下载文件，
+**仍须通过同一 SHA-256 校验**。没有配置本地文件时，自动下载到系统临时目录。
+不会修改、复制到产品资源目录或运行其他版本来绕过校验。
+
+## 真实宿主只读验收
+
+应使用独立测试 CPA 配置、假 Key 和本地 mock upstream，不访问生产环境：
 
 ```bash
-node internal/web/browser/run.cjs \
-  --report-dir /tmp/observer-browser-report \
-  --chrome /usr/bin/google-chrome-stable
+OBSERVER_MANAGEMENT_KEY='<fake-management-key>' \
+  node internal/web/browser/run.cjs \
+  --base-url http://127.0.0.1:8317/v0/resource/plugins/cliproxyapi-observer/ui \
+  --report-dir /tmp/observer-realhost-report
+
+# 推荐：由 Go harness 自动创建测试配置、数据和假 upstream，
+# 运行完整原生集成测试，并比较浏览器运行前后的管理状态。
+OBSERVER_BROWSER=1 CHROME_BIN=/usr/bin/google-chrome-stable \
+  CPA_TEST_ARTIFACTS=/absolute/temp/native-report \
+  CPA_BINARY=/absolute/path/to/cli-proxy-api make integration
 ```
 
-- `--report-dir` 必须指向仓库之外的持久目录；缺省为
-  `<worktree>/../browser-report`。
-- `CHROME_BIN` 环境变量可覆盖 Chrome 路径。
-- `--keep-profile` 保留临时 Chrome profile，仅用于排障。
-- `--base-url` 执行真实 host smoke；管理密钥只从
-  `OBSERVER_MANAGEMENT_KEY` 环境变量读取，CLI 不接受 `--management-key`，
-  避免密钥进入 shell history/进程列表。未提供密钥时只验证公开 UI 外壳。
-- `--base-url` 可传完整 `/ui` URL、插件 management/resource 前缀，或仅 host；
-  但拒绝 userinfo、query、hash，避免把凭据或 token 写入 `report.json`。
-  smoke 会规范化为固定 `/ui` 入口。
-- real smoke 在 CDP `Fetch.requestPaused` 的 Request 阶段检查方法：仅放行
-  `GET/HEAD/OPTIONS` 和**唯一**的精确
-  `POST /v0/management/plugins/cliproxyapi-observer/models/token`
-  （必须同源、空 query、空 body）。其他写请求立即 `Fetch.failRequest`，
-  **请求不会真正发出**，并计入 `blocked_requests`。
+真实宿主模式要求 `OBSERVER_MANAGEMENT_KEY`，不提供明文命令行参数，也不读取宿主
+认证存储。`--base-url` 不得包含 userinfo、query 或 fragment；仅取同源 origin，
+实际导航固定的 `/management.html` 插件路由。管理外壳仍使用固定官方版本，
+不会依赖宿主自动更新下载到哪个前端版本。
 
-## mock API
+请求拦截在请求发送前只允许同源 `GET/HEAD/OPTIONS`，另允许两项只读 POST：
 
-所有管理路由位于
-`/v0/management/plugins/cliproxyapi-observer`（同时接受带反向代理前缀的路径），
-要求 `Authorization: Bearer <管理密钥>`，错误统一为
-`{"error":{"code":"...","message":"..."}}`，响应带 `Cache-Control: no-store`，
-不发送任何 CORS 头。
+1. 精确插件路径 `/models/token`：空 query、空 body，只签发一次性目录能力。
+2. 精确插件路径 `/prices/preview`：空 query、仅包含最多 4096 项的 `models` 数组。
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| GET | `/health` | `Health` + `version` + `schema_version:2` |
-| GET/POST | `/keys` | 列表 / 201 `{key,secret}` |
-| PUT/DELETE | `/keys?id={id}` | 更新 / 撤销（204） |
-| POST | `/keys/rotate?id={id}` | `{key,secret}` |
-| POST | `/keys/reset?id={id}` | `{windows:[...]}` |
-| POST | `/keys/recover?id={id}` | 要求 `{"acknowledge":true}`；不清 `used/starts/resets/limits` |
-| POST | `/models/token` | 管理鉴权、空 body/query，返回 30 秒有效的单次目录 capability |
-| GET | `/requests` | 分页、RFC3339 `from/to` 与六个筛选参数 |
-| GET | `/requests/detail?id={id}` | 详情；只应由日志行点击触发 |
-| GET | `/summary` | 汇总与 `granularity/buckets` |
-| GET/PUT | `/settings` | `DESIGN.md` 全字段 |
-| GET | `/prices` | pricing Snapshot；同一模型可含多个 provider 的独立 auto 费率 |
-| POST | `/prices/refresh` | 更新 `last_sync` 并计数 |
-| POST | `/compact` | Health 并计数 |
-| GET | `/v1/models` | **仅**接受 minted capability（不接受管理密钥），`{data:[{id}]}`，最多 100 条 |
-| GET | 资源/管理前缀下的 `/ui`, `/ui/`, `/ui.html`, `/ui.js`, `/ui.css` | 公开资源，带 CSP；`ui.js` 是 Go `Asset` 同款 bundle |
+其余写请求被中止并记录在 `blocked_requests`，正常流程必须为零。真实模式不会创建、
+保存、轮换、重置、撤销 Key，不刷新价格或压缩数据库。Go harness 在浏览器前后
+对比 Key、设置与汇总，确认没有变更。目录能力仅放请求头，不进入 URL/报告或存储。
 
-模型目录契约：
+## 检查范围与证据
 
-- 打开 Key 对话框才按需调用 `POST /models/token`；请求必须使用管理 Bearer，
-  body/query 为空。
-- 组件立即用返回的 capability 请求精确的 `/v1/models`；token 只放在
-  `Authorization: Bearer`，不进入 URL、storage 或调用日志。
-- capability 单次使用、30 秒过期，mock 最多保留 32 个未消费 capability；
-  使用后（包括目录请求失败）立即失效。
-- `GET /v1/models` 不接受管理密钥、不经过插件前缀，也不回退到
-  auth-files、pricing、config 或凭证目录；`/v0/management/auth-files` 返回 404。
-- 响应有界（100 条），主模型 ID 精确保留 provider/大小写/斜杠命名空间。
-- mock 调用记录只保存 `authorized`、`capability_stage`、空 body 字节数等
-  布尔/阶段信息，不保存 token 或 Authorization 内容。
+Mock 模式覆盖桌面 1280、手机 390 宽度与暖灰/纯白/深色/跟随系统四种主题；
+真实宿主模式覆盖桌面深色、手机纯白。自动检查：
 
-旧动态路由 `/keys/{id}`、`/keys/{id}/rotate|reset|recover`、`/requests/{id}`
-**不再注册**；脚本只在负测试中确认它们返回 404 且没有副作用。
+- **登录前主题**：继承实际父页面设计 token，深色模式没有白色未认证首帧，
+  嵌入模式隐藏重复主题控件；通过宿主 UI 切换主题后跟随更新。
+- **宿主遮挡**：读取官方浮动工具栏、iframe、插件顶栏和弹窗的实际矩形。
+  断言控件位于工具栏下方，滚动后仍保留安全区域，表格不拉宽文档。
+- **日志与注入**：详情按需加载；请求头脱敏、JSON 格式化；恶意模型名、请求头、
+  JSON 内容必须保留为文字，不创建可执行 DOM。
+- **Key**：自定义创建/轮换、严格字符校验、最小美元额度、受限模型必选、
+  不变的 Key ID、原始纳秒有效期、一次性密钥关闭后清除且不进入浏览器存储。
+- **设置**：通用设置和价格草稿分别保存；刷新失败保留缓存并明确告知失败。
+- **轮询/认证**：打开脏编辑器后停止轮询、关闭后恢复；刻意注入一次 401 后返回
+  登录、清空会话并停止轮询。组件/网络单测另覆盖可见性、取消、迟到响应与错误边界。
 
-资源同时通过
-`/v0/resource/plugins/cliproxyapi-observer/...` 与
-`/v0/management/plugins/cliproxyapi-observer/...` 提供。管理数据始终要求鉴权；
-资源外壳公开。与 Go 的 `Asset("ui.js")` 一致，固定 `/ui.js` 响应体是
-`settings.js + "\n" + models.js + "\n" + ui.js`；`settings.js` / `models.js`
-不作为独立资源暴露。mock 只保存假 Key 的 SHA-256，明文 secret 仅在创建/轮换
-响应中出现。
+`report.json` 包含结果、外壳 SHA-256、API 请求、被阻止请求、截图列表与错误；
+`summary.txt` 提供总计，`screenshots/` 保留完整 CPA 外壳和 iframe 弹窗截图。
+真实宿主还生成 `realhost-smoke.png`。`CHROME_BIN` 或 `--chrome` 可指定 Chrome。
+报告目录应位于仓库之外，缺省是工作树的同级 `browser-report`。
 
-mock 控制端点 `/__mock/control` 可注入目录失败/延迟：
+所有非预期 HTTP、console、page 和 CSP 错误均使验收失败。唯一负向诊断分类是
+会话过期测试**刻意注入的单个 `GET /keys` 401**及对应的精确资源 console 消息；
+它们保留在 `expected_diagnostics`。不使用通配规则忽略真实认证失败或 CSP 错误。
+管理/客户端密钥从文本报告中脱敏；截图仅用于假数据测试。
 
-```json
-{"catalog":{"token_delay_ms":1200,"models_delay_ms":0,"fail_token":false,"fail_models":false}}
-```
+## 资源与 mock 合约
 
-`/__mock/state` 只暴露 `catalog_control`、`catalog_ids`、
-`outstanding_capabilities` 与计数器，不暴露 token 或 Authorization。
+资源从 `internal/web/dist/{ui.html,ui.js,ui.css,theme.js}` 读取，与 Go 嵌入资源一致。
+公开固定路由为资源/管理前缀下的 `/ui`、`/ui/`、`/ui.js`、`/ui.css`、`/theme.js`，
+携带相同 CSP、内容类型和 `no-store`。管理数据必须通过 Bearer 管理认证。
+不存在单独的 `settings.js` / `models.js` 或任意文件目录服务。
 
-假数据同时覆盖：
-
-- 成功/失败请求、完整/unknown 核算质量、hour 桶与筛选联动；
-- 合法 `HH:mm-HH:mm` 价格规则（含跨夜边界 `00:00-23:59`）、手工 0 费率与
-  reasoning 可选字段；
-- 同一模型 `gpt-5-codex` 的 `openai` / `azure` 两条 auto 快照费率，以及无
-  provider 的 model-wide 手工价；
-- 恶意模型名、Provider、auth_index、Key 标签、header 与请求体（用于注入回归）；
-- `Authorization: Bearer [redacted]` 和 `sk-live-DO-NOT-LEAK` 对应的脱敏断言；
-- 启用/停用/过期/受限/待恢复 Key、额度与并发字段、周期开始/重置时间；
-- 目录外历史模型 ID（`retired-model-v0`）；
-- 服务端目录响应上限、token 失败/延迟与目录失败/延迟注入。
-
-## 浏览器断言
-
-`run.cjs` 首先自检 mock 合约，再启动真实 Chrome：
-
-1. **登录门禁**：初始只有 `#login`；错误密码得到 401 且停留登录页；正确密码后
-   主界面出现，密钥不出现在 URL，除刻意 401 外所有管理请求都带正确 Bearer。
-2. **顶栏**：`#theme` 必须包含 `white/light/dark/auto`；`#interval` 必须包含
-   `0/5/15/30/60`；`#refresh` 触发新的 `GET /requests`。
-3. **轮询时序**：登录后默认 5 秒必须产生真实 `GET /requests`；切到 `0` 后
-   不得再调度长定时器。打开详情对话框、编辑筛选产生脏状态、隐藏标签页都会
-   清理轮询定时器；关闭对话框/恢复可见后按 5 秒恢复，脏状态恢复可见仍不调度。
-4. **重叠刷新**：用页面内 `fetch` gate 延迟旧请求；断言旧请求被
-   `AbortController` 中止，迟到响应不会覆盖新结果。
-5. **认证刷新 401**：刷新中注入 401 后必须停止轮询、清空
-   `sessionStorage`、隐藏导航/清空内容并回登录页；随后重新登录并清空筛选。
-6. **在途输入**：延迟旧刷新并在其未完成时 focus/修改筛选草稿；断言旧响应
-   不覆盖输入值、焦点和表格。
-7. **同源 iframe**：iframe 直接继承本标签 `sessionStorage`、不出现第二次登录；
-   `auto` 主题跟随父页面 light/dark；只读展示，不读取其它 CPA 存储。
-8. **路由 smoke**：真实 Chrome 打开资源前缀 `/ui/`（尾斜杠），断言固定走
-   `/v0/resource/plugins/cliproxyapi-observer/` 资产且状态均为 200；再打开
-   management `/ui` 入口，最后切回资源 `/ui` 执行 48 张截图矩阵。
-9. **请求日志**：`#filters` 必须提供 `from/to/key_id/model/provider/auth_index/status`；
-   查询按钮把 `model/status` 带到第 1 页；恶意模型名只作为文本，不生成
-   `img/script/iframe/[onerror]/[onload]`，`window.__observerXss` 保持 undefined。
-10. **详情按需**：列表渲染后 `GET /requests/detail` 计数为 0；点击日志表的模型
-    `button` 后恰好新增一次 `GET /requests/detail?id={id}`；详情对话框有可访问
-    名称、位于视口内、显示脱敏数据且不泄漏假密钥。
-11. **Key 管理**：列表、标签文本化、新建表单标签、保存、编辑、启用/停用、轮换、
-    重置、核对后恢复、撤销；分别断言 `POST /keys`、`PUT /keys?id`、
-    `POST /keys/rotate?id`、`POST /keys/reset?id`、`POST /keys/recover?id`、
-    `DELETE /keys?id`。创建/轮换后页面出现一次性 `observer_sk_...` 明文，URL
-    中绝不出现；恢复先显示未知用量警告，勾选核对声明后才发送
-    `{"acknowledge":true}`，并断言 `used/starts/resets/limits` 不变。
-12. **Key 模型选择器**：
-    - 默认 `all` 提交 `allowed_models:[]`；切到 restricted 后可搜索、勾选两个
-      精确模型；搜索词在勾选后保留；编辑回显选择；
-    - 目录外历史 ID 保留并标记“目录未列出”；可手动追加精确 ID；
-    - 打开对话框时先 `POST /models/token`（管理 Bearer、空 body/query），再
-      `GET /v1/models`（仅 capability header、无 query/额外 secret）；
-    - 目录响应有界，五分钟缓存不重复签发；手动刷新强制重新签发；
-    - `fail_models` 显示通用警告、保留缓存/已选且不改变 all 模式；
-    - 慢目录中关闭对话框会 abort，迟到响应不写入 UI 且不泄漏凭据；
-    - logout 调用 `ObserverModels.clearCache()`，重新登录打开对话框必须重新签发；
-    - 模型发现不得访问 auth-files/pricing/config 目录。
-13. **设置**：捕获/保留/价格/压缩模块标签可见；保存发送完整 `PUT /settings`；
-    价格刷新与物理压缩分别发送 `POST /prices/refresh`、`POST /compact`。
-    general save 必须使用实际字段值，并原样保留已确认的 `settings.pricing`。
-    `max_body_bytes` 超过 8 MiB 时必须被原生约束和提交层双重拒绝，且不得发送 PUT。
-14. **价格编辑器**：seed 手工价与规则；同一模型 `gpt-5-codex` 的
-    `openai` / `azure` provider 费率可区分，手工价仍为 model-wide。帮助文本
-    说明完整提示词阈值包含未缓存输入 + 缓存读 + 缓存写；支持缓存读/写费率、
-    reasoning 留空与显式 `0` 的差异。`24:00` 与 7 位小数在前端拒绝且不发 PUT。
-15. **可访问性**：可见 input/select/textarea/button 均有可访问名称；对话框有
-    名称；表格有表头；`<html lang>` 与 `document.title` 存在。
-16. **安全与错误**：无 HTML 注入、无 `console.error`/页面异常；CSP 安全日志
-    （包括内联 style 违规）按错误处理；破坏性操作的原生 `confirm` 被接受并
-    记录在 `native_dialogs`，随后仍断言对应 API 调用。
-17. **布局**：每个视口/主题/页面断言
-    `scrollWidth <= innerWidth + 1`；Key 表单、模型选择器与详情对话框不超出视口。
-18. **截图矩阵**：1280×900 与 390×844；white/light/dark/auto；请求日志、
-    Key 管理、设置、Key 新建表单、Key 模型选择器、请求详情。页面使用整页截图，
-    对话框使用视口截图。`auto` 通过 CDP 模拟 `prefers-color-scheme: dark`。
-    共 **48 张**。
-
-## 真实 host smoke
-
-真实 host 使用 native integration seed 的至少一个假 Key 和请求日志：
-
-- 登录后请求日志必须至少有一行；
-- 点击日志行前 `GET /requests/detail` 必须为 0，点击后恰好新增一次；
-- 打开 Key 新建对话框，断言真实权威目录至少返回一个模型；只读关闭，
-  **不填写、不保存、不轮换、不重置、不撤销、不刷新价格、不压缩**；
-- 生成 1280/390 × light/dark × 请求日志/Key 管理/设置，共 **12 张**
-  `screenshots/realhost-<width>-<theme>-<page>.png`，并额外保存代表截图
-  `screenshots/realhost-smoke.png`（native browser_test 固定要求存在）；登录
-  成功时截图总数为 **13**；
-- 唯一允许的写请求是精确插件路径、空 query、空 body 的
-  `POST /models/token`；其他写请求在 CDP Fetch Request 阶段被阻断，计入
-  `blocked_requests`，正常流程必须为 0；
-- `report.json` 标记 `mode:"realhost-readonly"`、`readonly:true`、
-  `fetch_interception:true`，并列出 `api_requests`、`allowed_token_posts`、
-  `blocked_requests` 与 `readonly_exception`；不记录管理密钥或 capability token。
-- **唯一诊断豁免**：浏览器自动请求同源根路径 `/favicon.ico` 且网络状态为 404
-  时，归入 `expected_diagnostics`（`reason` 明确标记为非应用资源请求），
-  `favicon_404_exempted:true`。仅此精确情形被豁免；其他 404、CSP 违规、
-  应用资源 404（包括 `/ui/favicon.ico`）仍按失败处理。报告 URL 只保留
-  origin+path，不写入 query/hash。
-
-## 对主 UI 的契约假设
-
-测试按产品契约定位元素；主 UI 需要保持：
-
-- `#login` 内的 `input[type=password]` 与文本“登录”按钮；
-- 导航按钮文本“请求日志”“Key 管理”“设置”，以及顶栏“退出”；
-- `#theme`、`#interval`、`#refresh`、`#content`；
-- 日志表中模型为 `button`，按钮文本等于模型标识；
-- `#filters` 内 `from/to/key_id/model/provider/auth_index/status`；
-- Key 新建/编辑使用对话框，字段标签如上，保存按钮文本“保存”，
-  操作按钮文本“编辑/启用/停用/撤销/轮换/重置”，阻塞 Key 另提供“核对后恢复”；
-- 模型选择器挂载 `.models-root`，提供 `all/restricted` 单选、模型复选框、
-  搜索框、手动精确 ID 与通用失败警告；
-- 设置模块提供捕获、保留、价格、压缩相关标签与按钮。
-
-如果这些名称/结构发生变化，测试会明确失败并打印缺失项，而不是静默跳过。
-测试不会修改主 UI、不会对真实 host 做保存操作，也不会读取浏览器用户 profile。
+管理 API 形状以根目录 README、`DESIGN.md` 和 `docs/REFACTOR-v0.7.0.md` 为准。
+所有 Key 与详情操作使用查询 ID，不使用动态 `/keys/{id}`。Mock 调用日志只保留
+认证布尔值和能力阶段，不保留 Authorization 内容；假客户端密钥只保存 SHA-256。
+控制端点只在回环测试服务器存在，用于目录延迟/失败、调用计数与状态检查。

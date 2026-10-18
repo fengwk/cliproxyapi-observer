@@ -6,7 +6,7 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 
 const EXPECTED_MANAGEMENT_HTML_SHA256 = '57558cd023475674634a114824b014d3e5ac161f6f3791e3d86b6adab962a700';
-const LOCAL_FALLBACK_MANAGEMENT_HTML = '/tmp/tmpdir-7500108278580201479/management.html';
+const LOCAL_FALLBACK_MANAGEMENT_HTML = '';
 const OFFICIAL_DOWNLOAD_URL = 'https://github.com/router-for-me/Cli-Proxy-API-Management-Center/releases/download/v1.26.5/management.html';
 
 /**

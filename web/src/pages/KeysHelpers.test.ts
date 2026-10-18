@@ -45,20 +45,21 @@ describe('KeysHelpers Unit Tests', () => {
       expect(validateConcurrency('1')).toEqual({ valid: true, value: 1 });
       expect(validateConcurrency('5')).toEqual({ valid: true, value: 5 });
       expect(validateConcurrency('1000000')).toEqual({ valid: true, value: 1000000 });
+      expect(validateConcurrency('9000000000000000')).toEqual({ valid: true, value: 9000000000000000 });
     });
 
     // 意图：测试小数被拒绝（严禁隐式 parseInt 截断）
     it('rejects decimal inputs such as 2.5', () => {
       const res = validateConcurrency('2.5');
       expect(res.valid).toBe(false);
-      expect(res.error).toBe('最大并发数必须为 1 到 1000000 之间的整数');
+      expect(res.error).toBe('最大并发数必须为正整数，且不超过 9000000000000000');
     });
 
-    // 意图：测试 0、负数、超出 1000000 以及非数字被拒绝
+    // 与后端的安全整数边界一致，避免破坏现有大并发配置的无关编辑。
     it('rejects zero, negative, overflow, and non-numeric strings', () => {
       expect(validateConcurrency('0').valid).toBe(false);
       expect(validateConcurrency('-1').valid).toBe(false);
-      expect(validateConcurrency('1000001').valid).toBe(false);
+      expect(validateConcurrency('9000000000000001').valid).toBe(false);
       expect(validateConcurrency('abc').valid).toBe(false);
       expect(validateConcurrency('').valid).toBe(false);
     });

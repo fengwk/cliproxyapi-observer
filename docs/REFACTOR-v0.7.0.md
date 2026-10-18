@@ -192,7 +192,9 @@ rotation, quotas, models, settings drafts, refresh failure, retention/privacy,
 safe XSS/detail, auth401, polling, initial themebeforelogin/whiteflash, overlay
 rectangles, theme changes. Desktop1280/mobile390, warm/white/dark/auto. Screenshots
 include actual full CPA host and iframe dialog contents; parent opens images.
-Record console/page/CSP failures strictly (only exactfavicon404 may be expected).
+Record console/page/CSP failures strictly. Only the single deliberately injected
+GET /keys 401 and its exact browser resource message in the session-expiry test
+are classified separately; unexpected 401/404/CSP/page/console errors fail.
 Retired literal-source assertions replaced with behavioral tests, not skipped.
 All Go/race/vet+frontend typecheck/unit/builddeterminism+browser+native+automation
 scripts; final exact-candidate review by parent. CI3nativeplatforms, publictag

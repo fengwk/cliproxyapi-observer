@@ -5,7 +5,7 @@ GOOS ?= $(shell bash -c 'go env GOOS')
 GOARCH ?= $(shell bash -c 'go env GOARCH')
 VERSION ?= $(shell bash scripts/plugin-version.sh)
 
-# Browser acceptance uses the dependency-free CDP runner documented in
+# Browser acceptance uses Playwright with the installed Chrome documented in
 # internal/web/browser/README.md. Every variable keeps an environment override.
 OBSERVER_BROWSER ?= internal/web/browser/run.cjs
 BROWSER_REPORT_DIR ?= $(CURDIR)/../browser-report
@@ -24,13 +24,14 @@ LIB := $(DIST_DIR)/$(PLUGIN_ID).$(LIB_EXT)
 VERSION_VAR := github.com/fengwk/cliproxyapi-observer/internal/plugin.Version
 LDFLAGS := -s -w -X $(VERSION_VAR)=$(VERSION)
 
-.PHONY: help build test vet race browser integration package clean
+.PHONY: help build frontend test vet race browser integration package clean
 
 help:
 	@echo "cliproxyapi-observer"
 	@echo ""
 	@echo "  make build        build the native plugin into $(DIST_DIR)/"
-	@echo "  make test         canonical Go + Node suite (vet, unit, dependency-free UI)"
+	@echo "  make frontend     rebuild embedded UI (npm ci --prefix web first)"
+	@echo "  make test         canonical Go + frontend + mock API suite"
 	@echo "  make race         go test -race across all packages"
 	@echo "  make browser      real Chrome acceptance via $(OBSERVER_BROWSER)"
 	@echo "  make integration  real-host tests (requires CPA_BINARY=/abs/path/cli-proxy-api)"
@@ -51,9 +52,14 @@ build:
 vet:
 	go vet ./...
 
+frontend:
+	npm --prefix web run build
+
 test: vet
 	go test ./...
-	node --test internal/web/ui.test.cjs internal/web/models.test.cjs internal/web/browser/mock-server.test.cjs
+	npm --prefix web run typecheck
+	npm --prefix web test
+	node --test internal/web/browser/mock-server.test.cjs
 
 race:
 	go test -race ./...

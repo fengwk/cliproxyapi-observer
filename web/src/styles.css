@@ -644,6 +644,7 @@ input[type="number"] {
   font-weight: 500;
   border-radius: 9999px;
   line-height: 1.2;
+  white-space: nowrap;
 }
 
 .cpa-badge-neutral {
@@ -746,6 +747,22 @@ input[type="number"] {
   text-align: left;
   font-size: 0.88rem;
 }
+
+.cpa-table[aria-label="Key 列表"] { min-width: 1120px; table-layout: fixed; }
+.cpa-table[aria-label="Key 列表"] th:nth-child(1) { width: 210px; }
+.cpa-table[aria-label="Key 列表"] th:nth-child(2) { width: 135px; }
+.cpa-table[aria-label="Key 列表"] th:nth-child(3) { width: 180px; }
+.cpa-table[aria-label="Key 列表"] th:nth-child(4) { width: 90px; }
+.cpa-table[aria-label="Key 列表"] th:nth-child(5) { width: 110px; }
+.cpa-table[aria-label="Key 列表"] th:nth-child(6) { width: 180px; }
+.cpa-table[aria-label="Key 列表"] th:last-child { width: 190px; }
+.cpa-table[aria-label="Key 列表"] strong {
+  max-width: 145px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cpa-table[aria-label="Key 列表"] td:last-child > div {
+  flex-wrap: wrap; justify-content: flex-end;
+}
+.cpa-table[aria-label="Key 列表"] td { padding: 12px; }
 
 .cpa-table th {
   background-color: var(--bg-secondary);

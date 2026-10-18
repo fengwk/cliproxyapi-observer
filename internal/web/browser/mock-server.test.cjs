@@ -47,7 +47,7 @@ function errorShape(body) {
 test('assets: public, CSP-protected, no-store, and available from both prefixes', async () => {
   await withServer(async (server) => {
     for (const prefix of [mock.RESOURCE_BASE, BASE]) {
-      for (const suffix of ['/ui', '/ui/', '/ui.html', '/ui.js', '/ui.css']) {
+      for (const suffix of ['/ui', '/ui/', '/ui.html', '/ui.js', '/ui.css', '/theme.js']) {
         const res = await fetch(server.origin + prefix + suffix);
         assert.equal(res.status, 200, prefix + suffix);
         assert.equal(res.headers.get('content-security-policy'), mock.ASSET_CSP);
@@ -58,23 +58,11 @@ test('assets: public, CSP-protected, no-store, and available from both prefixes'
     const html = await (await fetch(server.origin + mock.RESOURCE_BASE + '/ui')).text();
     assert.match(html, /<html/i);
 
-    // Go Asset("ui.js") 固定为 settings.js + "\n" + models.js + "\n" + ui.js；
-    // mock 必须一致，且源文件不能作为独立公开资源泄漏。
-    const bundle = await (await fetch(server.origin + mock.RESOURCE_BASE + '/ui.js')).text();
-    const settingsSource = fs.readFileSync(path.resolve(__dirname, '../settings.js'), 'utf8');
-    const modelsSource = fs.readFileSync(path.resolve(__dirname, '../models.js'), 'utf8');
-    const uiSource = fs.readFileSync(path.resolve(__dirname, '../ui.js'), 'utf8');
-    assert.equal(bundle, settingsSource + '\n' + modelsSource + '\n' + uiSource);
-    // 以“定义”而非最后引用位置判断拼接顺序；ui.js 会在后面调用
-    // window.ObserverModels，lastIndexOf 不能代表 models.js 的定义位置。
-    const settingsDef = /function\s+ObserverSettings\s*\(/.exec(bundle);
-    const modelsDef = /window\.ObserverModels\s*=\s*ObserverModels\b/.exec(bundle);
-    const uiDef = /window\.ObserverUI\s*=\s*\{/.exec(bundle);
-    assert.ok(settingsDef, 'settings.js definition present');
-    assert.ok(modelsDef, 'models.js definition present');
-    assert.ok(uiDef, 'ui.js definition present');
-    assert.ok(settingsDef.index < modelsDef.index, 'settings definition precedes models definition');
-    assert.ok(modelsDef.index < uiDef.index, 'models definition precedes UI definition');
+    // Compare the exact compiled bytes embedded in Go, not minified internals.
+    for (const name of ['ui.js', 'ui.css', 'theme.js']) {
+      const body = await (await fetch(server.origin + mock.RESOURCE_BASE + '/' + name)).text();
+      assert.equal(body, fs.readFileSync(path.resolve(__dirname, '../dist', name), 'utf8'));
+    }
     for (const hiddenName of ['settings.js', 'models.js']) {
       const hidden = await fetch(server.origin + mock.RESOURCE_BASE + '/' + hiddenName);
       assert.equal(hidden.status, 404, hiddenName);

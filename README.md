@@ -1,14 +1,16 @@
-# Observer v0.6.0
+# Observer v0.7.0
 
 CLIProxyAPI（CPA）独立原生插件，稳定 ID `cliproxyapi-observer`。提供**专属客户端 Key
 认证、美元额度、固定成本记账与请求日志**，不修改 CPA 核心、请求正文/头、上游选择、
 模型路由、重试或会话。最低 CPA **v8.0.30 / 插件 schema 6**，SDK 锁定 v8.0.30；
 更高 v8 稳定版由 CI 验证，不承诺未验证版本或 v9 兼容。
 
-**这是不兼容的全新实现**：必须使用新数据库与新 Key，不迁移旧数据、不保留旧接口。
-默认库 `data/cliproxyapi-observer-v2.db`；非空且无新 schema 标记的数据库将被拒绝，
-而不是就地改写。旧库请保留备份，本项目不会删除旧数据库或部署生产环境。
-参见 [发布说明](docs/release-notes-v0.6.0.md) 与完整 [设计契约](DESIGN.md)。
+**v0.7.0 保留 v0.6.0 的数据库、Key 和历史费用，无需迁移或重新发放 Key。**
+默认库仍为 `data/cliproxyapi-observer-v2.db`。从 v0.6.0 之前的旧实现升级时，
+仍须使用新数据库与新 Key；非空且无 schema2 标记的旧库会被拒绝，不会就地改写。
+升级前请备份，安排停流维护；发布不会自动修改生产配置或删除旧数据库。
+参见 [本版发布说明](docs/release-notes-v0.7.0.md)、
+[基础设计契约](DESIGN.md) 与 [v0.7.0 增补契约](docs/REFACTOR-v0.7.0.md)。
 
 ## 安装与首次启动
 
@@ -31,6 +33,9 @@ Release 并校验归档；正式平台为 **Linux amd64、Linux arm64、macOS ar
 Linux 产物不适用于 musl/Alpine。手动构建需 Go 1.26+、C 编译器和 Make：
 `make build`，动态库位于 `dist/<goos>/<goarch>/`，复制至
 `<plugins.dir>/<goos>/<goarch>/`。它是 c-shared 原生库，不是 Go plugin。
+React/TypeScript 界面已经编译并嵌入动态库，安装与运行不需要 Node、npm 或 CDN。
+仅修改前端源码时，需 Node 22.12+，先 `npm ci --prefix web`，再 `make frontend`；
+提交 `internal/web/dist` 的生成资源后再构建动态库。
 
 启动后打开 CPA 管理面板的 Observer，或同源资源地址
 `/v0/resource/plugins/cliproxyapi-observer/ui`。用 **CPA 管理密钥**登录一次；
@@ -38,11 +43,15 @@ Linux 产物不适用于 musl/Alpine。手动构建需 Go 1.26+、C 编译器和
 页面只有三个：
 
 - **请求日志**：筛选、趋势、分页及按需展开的请求详情。默认查询 UTC 当日零点至现在。
-- **Key 管理**：创建/编辑、启停、到期、并发、额度、模型限制、轮换、撤销与周期重置。
-- **设置**：采集、保留期、定价、刷新公共价格缓存、健康与物理压缩。
+- **Key 管理**：随机/自定义密钥、可逆启停、到期、并发、额度、模型限制、轮换与周期重置。
+- **设置**：请求内容采集、保留期、可用模型价格匹配、手动定价、健康与物理压缩。
 
-先创建新 Key，复制仅在创建/轮换时显示一次的明文，交给推理客户端使用。
-数据库只存 SHA-256 哈希；撤销使旧密钥失效但保留历史。Observer 能力保持注册期间
+创建 Key 时可以随机生成，也可以输入自己的密钥；自定义密钥必须为 **8–256 个
+可见 ASCII 字符**，不能含空格或换行，不会自动去除首尾字符。建议至少 32 字符。
+重复密钥返回 HTTP 409，失败的轮换不影响旧密钥。明文仅在成功创建/轮换后显示一次，
+关闭即从界面清除；客户端密钥不进入浏览器存储，数据库只存 SHA-256 哈希。
+UI 的“禁用”保留密钥，可重新启用；管理 API 的 `DELETE /keys` 是撤销，销毁认证哈希，
+保留身份与历史，之后必须轮换才能重新使用。Observer 能力保持注册期间
 **独占前端认证**：原有 CPA `api-keys` 不能复用为 Observer Key，存储故障或插件内部
 暂停也不回退内置认证。**不要在宿主中停用或卸载插件后，仍期待 Observer 保护请求**：
 宿主移除认证能力后可恢复自身认证，未加载的插件无法拦截。管理密钥也不用于推理。
@@ -72,6 +81,9 @@ count-tokens 不占额度或并发槽，但仍检查启用、有效期与模型�
 默认自动从 HTTPS **models.dev** 公共目录读取基础价格，使用有界本地缓存；
 网络失败保留最后有效缓存，推理请求不联网查价。匹配保留提供商及完整模型身份，
 歧义不猜测，**缺价成本为 0** 且标明来源，不阻断推理。它不是供应商最终账单保证。
+设置页在第一次推理前即可预览 CPA 可用模型的基础价格；不会把 `owned_by` 猜成
+计价 Provider，也不会虚构 token 数量、写入用量或把预览模型变成历史观测。
+公共目录条目数与已使用模型数量分开显示；条件规则是否生效仍取决于实际请求。
 
 设置页支持精确模型手动覆盖与有序条件规则，优先级：
 **首条匹配规则 > 手动价 > 自动价 > 缺价零成本**。
@@ -82,8 +94,9 @@ reasoning 属于输出子集，不重复计费。未知用量语义保留原始 
 
 ## 数据、隐私与故障边界
 
-正文采集默认关闭，设置页显式启用后才采集。请求详情/正文 gzip 压缩，有界队列，
-递归脱敏敏感 JSON 字段及请求头/查询凭据，不保存失败响应正文。默认原始明细 **24h**、
+正文采集默认关闭，设置页显式启用后才保存**请求头和请求体，不保存响应内容**。
+请求详情/正文 gzip 压缩，有界队列，递归脱敏敏感 JSON 字段及请求头/查询凭据。
+默认原始明细 **24h**、
 每日汇总 **365 天**；读取立即执行过期检查。单条正文默认 1MiB、最多 **8MiB**，
 正文存储默认 256MiB、最多 **1GiB**。配额不等于整个数据库硬容量上限。
 采集丢弃计数可见；诊断采集可以丢弃，不能以此策略静默丢弃金额。
@@ -112,7 +125,7 @@ CPA 宿主用量队列**不持久化且没有可靠的热替换前排空保证**
 | 方法 | 路径 |
 | --- | --- |
 | GET | `/health`、`/keys`、`/requests`、`/summary`、`/settings`、`/prices` |
-| POST | `/models/token`、`/keys`、`/prices/refresh`、`/compact` |
+| POST | `/models/token`、`/keys`、`/prices/preview`、`/prices/refresh`、`/compact` |
 | PUT / DELETE | `/keys?id=<id>`（编辑 / 撤销） |
 | POST | `/keys/rotate?id=<id>`、`/keys/reset?id=<id>`、`/keys/recover?id=<id>` |
 | GET | `/requests/detail?id=<id>` |
@@ -125,11 +138,18 @@ CPA 宿主用量队列**不持久化且没有可靠的热替换前排空保证**
 `page_size`（默认25，最多100），返回 `items/page/page_size/has_more`。
 未知/畸形参数、未知字段、尾随 JSON 和不支持的方法拒绝；输入 JSON 上限1MiB。
 完整 KeySpec、Settings 与响应结构以 [DESIGN.md](DESIGN.md) 为准。
+创建 Key 的平铺 KeySpec 可选附加 `secret`；轮换允许空 body（随机生成）或
+`{"secret":"..."}`，显式空字符串/`null` 被拒绝，编辑接口不接受密钥。
+价格预览接受 `{"models":[{"model":"exact-id","provider":""}]}`（最多 4096 项），
+只返回基础费率、来源和 `has_rules`，不是对实际请求的预测账单。
 
 ## 开发验证与交付
 
 ```bash
-make test                       # 全量 Go vet/unit + Node UI/models/mock-server
+npm ci --prefix web             # 开发/测试工具；安装插件时无需执行
+npm audit --prefix web          # 包括前端构建工具
+make frontend                   # 从源码更新嵌入资源
+make test                       # Go vet/unit + 前端类型/行为测试 + mock API
 make race                       # 全量 Go race
 CHROME_BIN=/usr/bin/google-chrome-stable make browser
 # 可指定 BROWSER_REPORT_DIR 保存 report.json / summary.txt / screenshots
@@ -152,11 +172,12 @@ python3 scripts/test_publish_release.py
 浏览器入口见 [现有说明](internal/web/browser/README.md)，使用本地假数据和实际 Chrome，
 CI 上传报告及截图。`make build` 验证本机 c-shared；发布矩阵仍构建三个平台。
 版本通过 `internal/plugin.Version` ldflags 注入，正式版本来自 tag，开发构建为
-`0.6.0-dev+<commit>`，不取 SDK 版本。
+`0.7.0-dev+<commit>`，不取 SDK 版本。
 
 现有依赖维护策略保留：仅白名单 Go/官方 Actions 纯版本升级可经完整 CI 后自动合并，
 普通功能合并不会触发自动发版；不可变发布器校验源码、三个平台归档与校验和，
 不覆盖公开 Release。发布前必须完成最终合并审查与全量验收并获得发布授权；
 正式 GitHub Release 包含本版不兼容变更说明。
 
-MIT；SDK 与 bbolt 归属见 [NOTICE](NOTICE)。独立实现，非 cpa-plugin-tokens-statistic 的 fork。
+MIT；SDK、bbolt 与内嵌前端依赖的版权和许可证见 [NOTICE](NOTICE)。
+独立实现，非 cpa-plugin-tokens-statistic 的 fork。

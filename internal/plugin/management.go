@@ -60,7 +60,9 @@ const (
 
 	// cspPolicy keeps the management shell same-origin frameable while allowing
 	// only its own script, style and fetch sources.
-	cspPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'"
+	// Radix injects bounded scroll-lock CSS for accessible dialogs/menus. Permit
+	// inline styles only; scripts, connections and frame ancestors stay same-origin.
+	cspPolicy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'"
 )
 
 // managementRegistrationResponse is the host RPC registration shape.

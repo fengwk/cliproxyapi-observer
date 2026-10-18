@@ -1,9 +1,18 @@
 import { useState } from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { Button, Input, Field, Switch, Badge, Notice, EmptyState } from './ui';
+import { Button, Input, Field, Switch, Badge, Notice, EmptyState, Select } from './ui';
 
 describe('UI components', () => {
+  // Our "all" filters use "", whereas Radix forbids an empty Item value.
+  // Open the real component (not a page mock) to cover that runtime contract.
+  it('opens a real Select with an empty all-option and preserves its label', () => {
+    render(<Select value="" onChange={vi.fn()} aria-label="筛选"
+      options={[{ value: '', label: '全部' }, { value: 'specific', label: '指定' }]} />);
+    const trigger = screen.getByRole('combobox', { name: '筛选' });
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    expect(screen.getByRole('option', { name: '全部' })).toBeInTheDocument();
+  });
   describe('Button', () => {
     it('renders text, handles clicks, and displays loading spinner', () => {
       const handleClick = vi.fn();

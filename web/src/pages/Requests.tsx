@@ -326,12 +326,8 @@ export function RequestsPage({ api, refreshInterval, onDirtyChange }: RequestsPa
   // Copy Key ID with inline notification (no alert/confirm)
   const handleCopyKey = useCallback(async (fullId: string) => {
     try {
-      if (typeof window !== 'undefined') {
-        (window as unknown as Record<string, unknown>).__observerCopied = fullId;
-      }
-      if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(fullId);
-      }
+      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
+      await navigator.clipboard.writeText(fullId);
       setActionNotice({ tone: 'success', text: `已复制完整 Key ID: ${fullId.slice(0, 16)}…` });
     } catch {
       setActionNotice({ tone: 'danger', text: '复制失败，请从 Key ID 提示中复制完整标识。' });
@@ -341,12 +337,8 @@ export function RequestsPage({ api, refreshInterval, onDirtyChange }: RequestsPa
   // Copy JSON body with inline notification
   const handleCopyJson = useCallback(async (text: string) => {
     try {
-      if (typeof window !== 'undefined') {
-        (window as unknown as Record<string, unknown>).__observerCopied = text;
-      }
-      if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(text);
-      }
+      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
+      await navigator.clipboard.writeText(text);
       setActionNotice({ tone: 'success', text: '已复制请求 JSON 到剪贴板' });
     } catch {
       setActionNotice({ tone: 'danger', text: '复制 JSON 失败，请手动选取复制。' });
@@ -423,7 +415,7 @@ export function RequestsPage({ api, refreshInterval, onDirtyChange }: RequestsPa
   }, [summary]);
 
   return (
-    <div className="requests-page" id="content">
+    <div className="requests-page">
       {/* Action Notification */}
       {actionNotice && (
         <div className="requests-action-notice">
@@ -573,7 +565,7 @@ export function RequestsPage({ api, refreshInterval, onDirtyChange }: RequestsPa
               />
             </Field>
 
-            <Field label="结束日期 (UTC，不含)" htmlFor="to" hint="留空默认截止当前时间 (NOW)">
+            <Field label="结束日期 (UTC，不含)" htmlFor="to" hint="留空：今天截止当前；历史范围截止明日 UTC 零点">
               <Input
                 id="to"
                 name="to"

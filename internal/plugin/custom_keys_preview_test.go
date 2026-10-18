@@ -2,8 +2,10 @@ package plugin
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -71,7 +73,19 @@ func TestCustomKeyManagementContract(t *testing.T) {
 // A preview is authenticated management data, never a public resource. Exact
 // static routing and the same static-asset protections apply to the theme bridge.
 func TestPricePreviewAndThemeManagementBoundary(t *testing.T) {
-	m := liveManager(t)
+	// No background refresh worker: comparing whole snapshots on a live manager
+	// races its startup catalog sync rather than measuring the preview's effects.
+	// A transport tripwire also proves this read-only route never fetches prices.
+	m := NewManager(nil)
+	service, err := pricing.NewService(pricing.DefaultConfig(), filepath.Join(t.TempDir(), "catalog.json"),
+		&http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) {
+			t.Error("preview performed network I/O")
+			return nil, errors.New("unexpected preview fetch")
+		})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.prices = service
 	before := m.prices.Snapshot()
 	for _, body := range []string{`{}`, `{"models":null}`, `{"models":[{"model":""}]}`,
 		`{"models":[{"model":"m","unknown":true}]}`, `{"models":[],"unknown":true}`, `{"models":[],"models":[]}`} {

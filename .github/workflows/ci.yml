@@ -29,6 +29,23 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install frontend tools
+        run: npm ci --prefix web
+
+      - name: Audit frontend tools
+        run: npm audit --prefix web
+
+      - name: Frontend typecheck
+        run: npm --prefix web run typecheck
+
+      - name: Frontend tests
+        run: npm --prefix web test
+
+      - name: Verify committed frontend build
+        run: |
+          npm --prefix web run build
+          git diff --exit-code -- internal/web/dist
+
       - name: Vet
         run: go vet ./...
 
@@ -39,7 +56,7 @@ jobs:
         run: go test -race ./...
 
       - name: Node tests
-        run: node --test internal/web/ui.test.cjs internal/web/models.test.cjs internal/web/browser/mock-server.test.cjs
+        run: node --test internal/web/browser/mock-server.test.cjs
 
       - name: Automation script tests
         env:
@@ -62,7 +79,7 @@ jobs:
     timeout-minutes: 20
     env:
       # The ubuntu-latest image ships Google Chrome; the runner verifies it
-      # before the real CDP acceptance runs.
+      # before the Playwright acceptance inside the official CPA shell runs.
       CHROME_BIN: /usr/bin/google-chrome-stable
     steps:
       - uses: actions/checkout@v4
@@ -70,6 +87,9 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
+
+      - name: Install frontend tools
+        run: npm ci --prefix web
 
       - name: Verify installed Chrome
         run: |
@@ -137,7 +157,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # v0.6.0 requires schema >= 6 and is validated against the SDK baseline
+        # v0.7.0 requires schema >= 6 and is validated against the SDK baseline
         # host plus the newest stable release instead of the retired v8.0.15.
         cpa-tag: ["v8.0.30", "latest"]
     uses: ./.github/workflows/real-host.yml

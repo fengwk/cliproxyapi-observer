@@ -9,8 +9,8 @@ import (
 
 // ci runs the canonical Go and Node commands over every package. The three
 // Go gates must stay explicit so a CI edit cannot silently downgrade unit,
-// race or vet coverage, and the Node suite must include the extracted model
-// catalog tests alongside the UI and mock-server contracts.
+// race or vet coverage. The rebuilt frontend uses behavioral Vitest tests and
+// a reproducible embedded build instead of literal-source legacy JS tests.
 func TestCIWorkflowRunsFullGoAndNodeSuites(t *testing.T) {
 	doc, raw := loadWorkflow(t, ".github/workflows/ci.yml")
 
@@ -19,9 +19,13 @@ func TestCIWorkflowRunsFullGoAndNodeSuites(t *testing.T) {
 		t.Fatal("ci must define the test job")
 	}
 	for name, command := range map[string]string{
-		"Vet":           "go vet ./...",
-		"Go tests":      "go test ./...",
-		"Go race tests": "go test -race ./...",
+		"Vet":                    "go vet ./...",
+		"Go tests":               "go test ./...",
+		"Go race tests":          "go test -race ./...",
+		"Install frontend tools": "npm ci --prefix web",
+		"Audit frontend tools":   "npm audit --prefix web",
+		"Frontend typecheck":     "npm --prefix web run typecheck",
+		"Frontend tests":         "npm --prefix web test",
 	} {
 		step, ok := stepByName(testJob.Steps, name)
 		if !ok || strings.TrimSpace(step.Run) != command {
@@ -30,23 +34,26 @@ func TestCIWorkflowRunsFullGoAndNodeSuites(t *testing.T) {
 	}
 	node, ok := stepByName(testJob.Steps, "Node tests")
 	if !ok || !strings.Contains(node.Run, "node --test") {
-		t.Fatal("ci must run the dependency-free Node tests")
+		t.Fatal("ci must run the Node mock API contract tests")
 	}
 	for _, file := range []string{
-		"internal/web/ui.test.cjs",
-		"internal/web/models.test.cjs",
 		"internal/web/browser/mock-server.test.cjs",
 	} {
 		if !strings.Contains(node.Run, file) {
 			t.Fatalf("Node tests must include %s, got %q", file, node.Run)
 		}
 	}
+	build, ok := stepByName(testJob.Steps, "Verify committed frontend build")
+	if !ok || !strings.Contains(build.Run, "npm --prefix web run build") ||
+		!strings.Contains(build.Run, "git diff --exit-code -- internal/web/dist") {
+		t.Fatal("ci must verify source matches committed embedded assets")
+	}
 	if strings.Contains(raw, "go test -short") || strings.Contains(raw, "-run ") {
 		t.Fatal("ci must not narrow the Go package or test selection")
 	}
 }
 
-// Browser acceptance uses the existing zero-dependency CDP runner against the
+// Browser acceptance uses Playwright and the official CPA shell against the
 // Chrome image installed on the Ubuntu runner. It must verify the binary,
 // execute the documented make target and always retain the report and
 // screenshots for diagnosis.
@@ -66,6 +73,10 @@ func TestCIBrowserRunsRealChromeAndUploadsEvidence(t *testing.T) {
 	}
 	if !contains(needsList(job.Needs), "test") {
 		t.Fatalf("browser acceptance must depend on the canonical test job, got %v", job.Needs)
+	}
+	install, ok := stepByName(job.Steps, "Install frontend tools")
+	if !ok || strings.TrimSpace(install.Run) != "npm ci --prefix web" {
+		t.Fatal("browser job must install the locked Playwright build tools")
 	}
 
 	verify, ok := stepByName(job.Steps, "Verify installed Chrome")
@@ -157,6 +168,10 @@ func TestRealHostBrowserIsRequiredAndArchived(t *testing.T) {
 	if !node22 || job.Env["CHROME_BIN"] != "/usr/bin/google-chrome-stable" {
 		t.Fatal("real-host browser requires Node 22 and installed Chrome")
 	}
+	install, ok := stepByName(job.Steps, "Install frontend tools")
+	if !ok || strings.TrimSpace(install.Run) != "npm ci --prefix web" {
+		t.Fatal("real-host browser must install the locked Playwright build tools")
+	}
 	verify, ok := stepByName(job.Steps, "Verify installed Chrome")
 	if !ok || !strings.Contains(verify.Run, "test -x \"$CHROME_BIN\"") {
 		t.Fatal("real-host must verify Chrome before testing")
@@ -174,8 +189,8 @@ func TestRealHostBrowserIsRequiredAndArchived(t *testing.T) {
 	}
 }
 
-// The Makefile is the canonical local interface: Node tests include the model
-// catalog suite, browser acceptance invokes the documented Chrome runner, and
+// The Makefile is the canonical local interface: frontend behavior and the mock
+// API are required, browser acceptance invokes the documented Chrome runner, and
 // integration requires a real host binary with a 300s Go test timeout.
 func TestMakefileCanonicalTargets(t *testing.T) {
 	data, err := os.ReadFile("Makefile")
@@ -188,8 +203,9 @@ func TestMakefileCanonicalTargets(t *testing.T) {
 		"go vet ./...",
 		"go test ./...",
 		"go test -race ./...",
-		"internal/web/ui.test.cjs",
-		"internal/web/models.test.cjs",
+		"npm --prefix web run typecheck",
+		"npm --prefix web test",
+		"npm --prefix web run build",
 		"internal/web/browser/mock-server.test.cjs",
 		"OBSERVER_BROWSER ?= internal/web/browser/run.cjs",
 		"BROWSER_REPORT_DIR ?=",

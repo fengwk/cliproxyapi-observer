@@ -33,6 +33,9 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install frontend tools
+        run: npm ci --prefix web
+
       - name: Verify installed Chrome
         run: |
           set -euo pipefail
