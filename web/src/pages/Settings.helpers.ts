@@ -45,6 +45,76 @@ export interface RuleDraft {
   reasoning: string;
 }
 
+export type CapacityUnit = 'B' | 'KB' | 'MB' | 'GB';
+
+export const UNIT_BYTES: Record<CapacityUnit, number> = {
+  B: 1,
+  KB: 1024,
+  MB: 1048576,
+  GB: 1073741824,
+};
+
+/**
+ * Split exact integer bytes into an amount string and the best fitting unit without loss.
+ */
+export function splitBytesToCapacity(bytes: number): { amount: string; unit: CapacityUnit } {
+  const n = Number(bytes);
+  if (!Number.isSafeInteger(n) || n < 0) {
+    return { amount: '1', unit: 'B' };
+  }
+  if (n === 0) {
+    return { amount: '0', unit: 'B' };
+  }
+  if (n % 1073741824 === 0) {
+    return { amount: String(n / 1073741824), unit: 'GB' };
+  }
+  if (n % 1048576 === 0) {
+    return { amount: String(n / 1048576), unit: 'MB' };
+  }
+  if (n % 1024 === 0) {
+    return { amount: String(n / 1024), unit: 'KB' };
+  }
+  return { amount: String(n), unit: 'B' };
+}
+
+/**
+ * Parses user input amount string and unit into exact whole integer bytes.
+ * Throws if the input cannot be represented as an exact whole integer number of bytes.
+ */
+export function parseCapacityToBytes(amountStr: string, unit: CapacityUnit, label: string): number {
+  const trimmed = amountStr.trim();
+  if (!trimmed) {
+    throw new Error(`${label}不能为空`);
+  }
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) {
+    throw new Error(`${label}必须是非负数字`);
+  }
+
+  const parts = trimmed.split('.');
+  const intPart = BigInt(parts[0] || '0');
+  const unitMultiplier = BigInt(UNIT_BYTES[unit]);
+
+  let totalBytesBig: bigint;
+  if (parts.length > 1 && parts[1]) {
+    const fracStr = parts[1];
+    const divisor = 10n ** BigInt(fracStr.length);
+    const numerator = BigInt(fracStr) * unitMultiplier;
+    if (numerator % divisor !== 0n) {
+      throw new Error(`${label}无法精确换算为整数字节数，请输入整数字节或有效的小数`);
+    }
+    const fracBytes = numerator / divisor;
+    totalBytesBig = intPart * unitMultiplier + fracBytes;
+  } else {
+    totalBytesBig = intPart * unitMultiplier;
+  }
+
+  const bytes = Number(totalBytesBig);
+  if (!Number.isSafeInteger(bytes) || bytes < 1) {
+    throw new Error(`${label}超出允许范围`);
+  }
+  return bytes;
+}
+
 /**
  * Format bytes into human-readable string (B, KB, MB, GB).
  */

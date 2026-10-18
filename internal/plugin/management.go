@@ -39,11 +39,13 @@ const (
 	routeSettings      = routesPrefix + "/settings"
 	routePrices        = routesPrefix + "/prices"
 	routePricesRefresh = routesPrefix + "/prices/refresh"
+	routePricesPreview = routesPrefix + "/prices/preview"
 	routeCompact       = routesPrefix + "/compact"
 	routeUI            = routesPrefix + "/ui"
 	routeUIAlt         = routeUI + "/"
 	routeUIJS          = routesPrefix + "/ui.js"
 	routeUICSS         = routesPrefix + "/ui.css"
+	routeThemeJS       = routesPrefix + "/theme.js"
 
 	// maxJSONBodyBytes bounds every JSON request body accepted by this file.
 	maxJSONBodyBytes = 1 << 20
@@ -91,17 +93,20 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPut, Path: routeSettings, Description: "Replace capture, retention and pricing settings atomically."},
 			{Method: http.MethodGet, Path: routePrices, Description: "Current pricing snapshot."},
 			{Method: http.MethodPost, Path: routePricesRefresh, Description: "Refresh the pricing catalog within a bounded interval."},
+			{Method: http.MethodPost, Path: routePricesPreview, Description: "Preview available-model base prices without recording usage."},
 			{Method: http.MethodPost, Path: routeCompact, Description: "Compact storage and return health counters."},
 			{Method: http.MethodGet, Path: routeUI, Description: PluginName + " management UI."},
 			{Method: http.MethodGet, Path: routeUIAlt, Description: PluginName + " management UI with trailing slash."},
 			{Method: http.MethodGet, Path: routeUIJS, Description: PluginName + " management UI script."},
 			{Method: http.MethodGet, Path: routeUICSS, Description: PluginName + " management UI styles."},
+			{Method: http.MethodGet, Path: routeThemeJS, Description: PluginName + " pre-render theme bridge."},
 		},
 		Resources: []pluginapi.ResourceRoute{
 			{Path: "/ui", Menu: PluginName, Description: PluginName + " management UI."},
 			{Path: "/ui/", Description: PluginName + " management UI with trailing slash."},
 			{Path: "/ui.js", Description: PluginName + " management UI script."},
 			{Path: "/ui.css", Description: PluginName + " management UI styles."},
+			{Path: "/theme.js", Description: PluginName + " pre-render theme bridge."},
 		},
 	}
 }
@@ -181,6 +186,8 @@ func acceptsManagementBody(req managementRequest) bool {
 	switch req.Method {
 	case http.MethodPost:
 		return req.Path == managementBasePath+"/keys" ||
+			req.Path == managementBasePath+"/keys/rotate" ||
+			req.Path == managementBasePath+"/prices/preview" ||
 			req.Path == managementBasePath+"/keys/reset" ||
 			req.Path == managementBasePath+"/keys/recover"
 	case http.MethodPut:
@@ -249,7 +256,7 @@ func (m *Manager) dispatchManagementRoute(req managementRequest, route string) p
 		if !ok {
 			return invalidQueryResponse()
 		}
-		return m.serveRotateKey(id)
+		return m.serveRotateKey(id, req.Body)
 
 	case "/keys/reset":
 		if !requireMethod(req.Method, http.MethodPost) {
@@ -315,6 +322,15 @@ func (m *Manager) dispatchManagementRoute(req managementRequest, route string) p
 		}
 		return m.servePrices()
 
+	case "/prices/preview":
+		if len(req.Query) != 0 {
+			return invalidQueryResponse()
+		}
+		if req.Method != http.MethodPost {
+			return methodNotAllowedResponse()
+		}
+		return m.servePricePreview(req.Body)
+
 	case "/prices/refresh":
 		if len(req.Query) != 0 {
 			return invalidQueryResponse()
@@ -333,7 +349,7 @@ func (m *Manager) dispatchManagementRoute(req managementRequest, route string) p
 		}
 		return m.serveCompact()
 
-	case "/ui", "/ui/", "/ui.js", "/ui.css":
+	case "/ui", "/ui/", "/ui.js", "/ui.css", "/theme.js":
 		if len(req.Query) != 0 {
 			return invalidQueryResponse()
 		}
@@ -410,12 +426,28 @@ type keysResponse struct {
 }
 
 func (m *Manager) serveCreateKey(body []byte) pluginapi.ManagementResponse {
-	var spec engine.KeySpec
-	if err := decodeRequestBody(body, &spec); err != nil {
+	var input struct {
+		engine.KeySpec
+		Secret json.RawMessage `json:"secret"`
+	}
+	if err := decodeRequestBody(body, &input); err != nil {
 		return bodyFailureResponse(err)
 	}
+	var supplied string
+	if len(input.Secret) != 0 {
+		if err := json.Unmarshal(input.Secret, &supplied); err != nil || !bytes.HasPrefix(input.Secret, []byte(`"`)) {
+			return bodyFailureResponse(errJSONInvalid)
+		}
+	}
 	return m.withStore(func(store *engine.Store) pluginapi.ManagementResponse {
-		key, secret, err := store.CreateKey(spec)
+		var key engine.Key
+		var secret string
+		var err error
+		if len(input.Secret) == 0 {
+			key, secret, err = store.CreateKey(input.KeySpec)
+		} else {
+			key, secret, err = store.CreateKeyWithSecret(input.KeySpec, supplied)
+		}
 		if err != nil {
 			return storeFailureResponse(err)
 		}
@@ -451,9 +483,30 @@ func (m *Manager) serveRevokeKey(id string) pluginapi.ManagementResponse {
 	})
 }
 
-func (m *Manager) serveRotateKey(id string) pluginapi.ManagementResponse {
+func (m *Manager) serveRotateKey(id string, body []byte) pluginapi.ManagementResponse {
+	var input struct {
+		Secret json.RawMessage `json:"secret"`
+	}
+	if len(body) > 0 {
+		if err := decodeRequestBody(body, &input); err != nil {
+			return bodyFailureResponse(err)
+		}
+	}
+	var supplied string
+	if len(input.Secret) != 0 {
+		if err := json.Unmarshal(input.Secret, &supplied); err != nil || !bytes.HasPrefix(input.Secret, []byte(`"`)) {
+			return bodyFailureResponse(errJSONInvalid)
+		}
+	}
 	return m.withStore(func(store *engine.Store) pluginapi.ManagementResponse {
-		key, secret, err := store.RotateKey(id)
+		var key engine.Key
+		var secret string
+		var err error
+		if len(input.Secret) == 0 {
+			key, secret, err = store.RotateKey(id)
+		} else {
+			key, secret, err = store.RotateKeyWithSecret(id, supplied)
+		}
 		if err != nil {
 			return storeFailureResponse(err)
 		}
@@ -595,6 +648,30 @@ func (m *Manager) servePrices() pluginapi.ManagementResponse {
 		return unavailableResponse()
 	}
 	return jsonResponse(http.StatusOK, prices.Snapshot())
+}
+
+func (m *Manager) servePricePreview(body []byte) pluginapi.ManagementResponse {
+	var input struct {
+		Models []pricing.ModelIdentity `json:"models"`
+	}
+	if err := decodeRequestBody(body, &input); err != nil {
+		return bodyFailureResponse(err)
+	}
+	if input.Models == nil {
+		return bodyFailureResponse(errJSONInvalid)
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.prices == nil {
+		return unavailableResponse()
+	}
+	items, err := m.prices.Preview(input.Models)
+	if err != nil {
+		return bodyFailureResponse(errJSONInvalid)
+	}
+	return jsonResponse(http.StatusOK, struct {
+		Items []pricing.PreviewPrice `json:"items"`
+	}{Items: items})
 }
 
 func (m *Manager) servePriceRefresh() pluginapi.ManagementResponse {
@@ -762,16 +839,18 @@ func queryIdentifier(raw string) (string, bool) {
 }
 
 var assetNames = map[string]string{
-	"/ui":     "ui.html",
-	"/ui/":    "ui.html",
-	"/ui.js":  "ui.js",
-	"/ui.css": "ui.css",
+	"/ui":       "ui.html",
+	"/ui/":      "ui.html",
+	"/ui.js":    "ui.js",
+	"/ui.css":   "ui.css",
+	"/theme.js": "theme.js",
 }
 
 var assetContentTypes = map[string]string{
-	"ui.html": "text/html; charset=utf-8",
-	"ui.js":   "text/javascript; charset=utf-8",
-	"ui.css":  "text/css; charset=utf-8",
+	"ui.html":  "text/html; charset=utf-8",
+	"ui.js":    "text/javascript; charset=utf-8",
+	"ui.css":   "text/css; charset=utf-8",
+	"theme.js": "text/javascript; charset=utf-8",
 }
 
 func (m *Manager) serveAsset(name string) pluginapi.ManagementResponse {
@@ -811,6 +890,7 @@ var managementFailureStatuses = map[error]managementFailure{
 	engine.ErrQuota:        {status: http.StatusTooManyRequests, code: "quota_exceeded", message: "quota exceeded"},
 	engine.ErrConcurrency:  {status: http.StatusTooManyRequests, code: "concurrency_exceeded", message: "concurrency limit exceeded"},
 	engine.ErrBusy:         {status: http.StatusConflict, code: "busy", message: "resource busy"},
+	engine.ErrConflict:     {status: http.StatusConflict, code: "conflict", message: "client key already exists"},
 	engine.ErrAccounting:   {status: http.StatusServiceUnavailable, code: "accounting_unavailable", message: "accounting unavailable"},
 	engine.ErrClosed:       {status: http.StatusServiceUnavailable, code: "unavailable", message: "observer unavailable"},
 }

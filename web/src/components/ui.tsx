@@ -222,7 +222,6 @@ export function Modal({ title, onClose, children, footer, size = 'md' }: ModalPr
             <DialogPrimitive.Close
               className="cpa-modal-close"
               aria-label="关闭"
-              onClick={onClose}
             >
               ✕
             </DialogPrimitive.Close>

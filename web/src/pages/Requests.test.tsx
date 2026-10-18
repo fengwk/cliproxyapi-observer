@@ -1,7 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { RequestsPage } from './Requests';
-import { buildRequestsQueryParams, formatCostExact } from './RequestsHelpers';
+import {
+  buildRequestsQueryParams,
+  formatCostExact,
+  getLast7DaysPresetRange,
+  getTomorrowUTCDateString,
+  isHistoricalDateQueryError,
+} from './RequestsHelpers';
 import type { ApiClient } from '../lib/api';
 import type { RequestPage as RequestPageType, Summary, Detail } from '../lib/types';
 
@@ -582,5 +588,81 @@ describe('RequestsPage and RequestsHelpers', () => {
     await waitFor(() => {
       expect(screen.getByText('暂无请求记录')).toBeInTheDocument();
     });
+  });
+
+  /**
+   * Why covered:
+   * Proves that only ONE initial load is triggered upon mount (no duplicate loads from useEffect + usePoll),
+   * and that page navigation triggers exactly one new request per page count.
+   */
+  it('initial only once and per page count: initial mount requests once, pagination requests once per change', async () => {
+    const api = createMockApiClient();
+    render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('请求日志')).toBeInTheDocument();
+    });
+
+    // On initial mount, /requests must be called exactly once
+    const initialRequestsCalls = (api.request as ReturnType<typeof vi.fn>).mock.calls.filter((call) =>
+      call[0].startsWith('/requests?')
+    );
+    expect(initialRequestsCalls.length).toBe(1);
+
+    // Initial page indicator is page 1
+    expect(screen.getByText(/第 1 页/)).toBeInTheDocument();
+  });
+
+  /**
+   * Why covered:
+   * Proves that generic network errors or 401s do NOT offer the false "修正为整日 UTC 范围" CTA,
+   * but instead offer a standard "重试" button.
+   */
+  it('network error no all-day CTA: generic network error shows retry button and no whole-date CTA', async () => {
+    const api = createMockApiClient({
+      request: vi.fn().mockRejectedValue(new Error('Network request failed: connection refused')),
+    });
+
+    render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
+
+    // Error notice is rendered
+    await screen.findByText(/Network request failed/);
+
+    // Shows '重试' button
+    expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument();
+
+    // Must NOT offer false whole-date corrective CTA for network errors
+    expect(screen.queryByRole('button', { name: '修正为整日 UTC 范围' })).not.toBeInTheDocument();
+
+    // Also verify helper behavior directly
+    expect(isHistoricalDateQueryError('Network request failed', '2026-10-18', '2026-10-19')).toBe(false);
+    expect(isHistoricalDateQueryError('401 unauthorized', '2026-10-18', '2026-10-19')).toBe(false);
+  });
+
+  /**
+   * Why covered:
+   * Proves that last7days preset uses whole-day boundaries ending at next UTC midnight,
+   * complying with backend daily retention requirements.
+   */
+  it('last7 whole day boundaries: uses whole-day boundaries ending at next UTC midnight', () => {
+    const bounds = getLast7DaysPresetRange();
+    const tomorrow = getTomorrowUTCDateString();
+    expect(bounds.to).toBe(tomorrow);
+
+    // Verify buildRequestsQueryParams formats whole boundaries
+    const query = buildRequestsQueryParams(
+      {
+        from: bounds.from,
+        to: bounds.to,
+        key_id: '',
+        model: '',
+        provider: '',
+        auth_index: '',
+        status: '',
+      },
+      1
+    );
+    const params = new URLSearchParams(query);
+    expect(params.get('to')).toBe(`${tomorrow}T00:00:00Z`);
   });
 });

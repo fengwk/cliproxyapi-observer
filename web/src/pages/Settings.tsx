@@ -38,6 +38,9 @@ import {
   GeneralSettingsDraft,
   ManualPriceDraft,
   RuleDraft,
+  CapacityUnit,
+  splitBytesToCapacity,
+  parseCapacityToBytes,
   DEFAULT_MAX_BODY_BYTES,
   DEFAULT_MAX_BODY_STORAGE_BYTES,
   MAX_CONFIG_ENTRIES,
@@ -73,7 +76,28 @@ const DEFAULT_HEALTH: Health = {
   active_requests: 0,
 };
 
+const CAPACITY_OPTIONS = [
+  { value: 'B', label: '字节 (B)' },
+  { value: 'KB', label: 'KB (1,024 B)' },
+  { value: 'MB', label: 'MB (1,048,576 B)' },
+  { value: 'GB', label: 'GB (1,073,741,824 B)' },
+];
+
 export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirtyChange }) => {
+  // ---------------------------------------------------------------------------
+  // Lifecycle & concurrency guards
+  // ---------------------------------------------------------------------------
+  const isMountedRef = useRef(true);
+  const hasLoadedSuccessfullyRef = useRef(false);
+  const previewGenRef = useRef(0);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   // ---------------------------------------------------------------------------
   // Server-confirmed state
   // ---------------------------------------------------------------------------
@@ -100,8 +124,13 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   });
   const [rawPreset, setRawPreset] = useState<string>('24');
   const [dailyPreset, setDailyPreset] = useState<string>('365');
-  const [maxBodyMB, setMaxBodyMB] = useState<string>('1');
-  const [maxStorageMB, setMaxStorageMB] = useState<string>('256');
+
+  // Exact number + unit inputs for capacity
+  const [maxBodyAmount, setMaxBodyAmount] = useState<string>('1');
+  const [maxBodyUnit, setMaxBodyUnit] = useState<CapacityUnit>('MB');
+  const [maxStorageAmount, setMaxStorageAmount] = useState<string>('256');
+  const [maxStorageUnit, setMaxStorageUnit] = useState<CapacityUnit>('MB');
+
   const [generalSaving, setGeneralSaving] = useState(false);
   const [generalStatus, setGeneralStatus] = useState<{ tone: 'success' | 'danger'; message: string } | null>(null);
 
@@ -127,6 +156,9 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   const [compacting, setCompacting] = useState(false);
   const [compactStatus, setCompactStatus] = useState<{ tone: 'success' | 'danger'; message: string } | null>(null);
 
+  // Global mutation busy guard: blocks both saves while any mutation is active
+  const isMutationBusy = generalSaving || pricingSaving || compacting;
+
   // Ref tracking dirty state to protect drafts from poll overwrite
   const isGeneralDirtyRef = useRef(false);
   const isPricingDirtyRef = useRef(false);
@@ -135,10 +167,13 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   // Helper: sync drafts from confirmed Settings
   // ---------------------------------------------------------------------------
   const syncGeneralFromConfirmed = useCallback((settings: Settings) => {
+    const bBytes = settings.max_body_bytes ?? DEFAULT_MAX_BODY_BYTES;
+    const sBytes = settings.max_body_storage_bytes ?? DEFAULT_MAX_BODY_STORAGE_BYTES;
+
     setGeneralDraft({
       capture_enabled: settings.capture_enabled === true,
-      max_body_bytes: settings.max_body_bytes ?? DEFAULT_MAX_BODY_BYTES,
-      max_body_storage_bytes: settings.max_body_storage_bytes ?? DEFAULT_MAX_BODY_STORAGE_BYTES,
+      max_body_bytes: bBytes,
+      max_body_storage_bytes: sBytes,
       raw_retention_hours: settings.raw_retention_hours ?? 24,
       daily_retention_days: settings.daily_retention_days ?? 365,
     });
@@ -148,8 +183,13 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
     const dd = settings.daily_retention_days ?? 365;
     setDailyPreset(['90', '180', '365'].includes(String(dd)) ? String(dd) : 'custom');
 
-    setMaxBodyMB(String(Math.round((settings.max_body_bytes ?? DEFAULT_MAX_BODY_BYTES) / (1024 * 1024))));
-    setMaxStorageMB(String(Math.round((settings.max_body_storage_bytes ?? DEFAULT_MAX_BODY_STORAGE_BYTES) / (1024 * 1024))));
+    const bodyCap = splitBytesToCapacity(bBytes);
+    setMaxBodyAmount(bodyCap.amount);
+    setMaxBodyUnit(bodyCap.unit);
+
+    const storageCap = splitBytesToCapacity(sBytes);
+    setMaxStorageAmount(storageCap.amount);
+    setMaxStorageUnit(storageCap.unit);
   }, []);
 
   const syncPricingFromConfirmed = useCallback((pricing: PricingConfig) => {
@@ -192,6 +232,25 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   // Dirty state calculation
   // ---------------------------------------------------------------------------
   const isGeneralDirty = useMemo(() => {
+    let bodyBytes = generalDraft.max_body_bytes;
+    try {
+      bodyBytes = parseCapacityToBytes(maxBodyAmount, maxBodyUnit, '');
+    } catch {
+      return true;
+    }
+    let storageBytes = generalDraft.max_body_storage_bytes;
+    try {
+      storageBytes = parseCapacityToBytes(maxStorageAmount, maxStorageUnit, '');
+    } catch {
+      return true;
+    }
+
+    const currentDraft: GeneralSettingsDraft = {
+      ...generalDraft,
+      max_body_bytes: bodyBytes,
+      max_body_storage_bytes: storageBytes,
+    };
+
     const confirmedGen: GeneralSettingsDraft = {
       capture_enabled: confirmedSettings.capture_enabled === true,
       max_body_bytes: confirmedSettings.max_body_bytes ?? DEFAULT_MAX_BODY_BYTES,
@@ -199,8 +258,8 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
       raw_retention_hours: confirmedSettings.raw_retention_hours ?? 24,
       daily_retention_days: confirmedSettings.daily_retention_days ?? 365,
     };
-    return !areGeneralSettingsEqual(generalDraft, confirmedGen);
-  }, [generalDraft, confirmedSettings]);
+    return !areGeneralSettingsEqual(currentDraft, confirmedGen);
+  }, [generalDraft, maxBodyAmount, maxBodyUnit, maxStorageAmount, maxStorageUnit, confirmedSettings]);
 
   const isPricingDirty = useMemo(() => {
     return !isPricingDraftEqual(pricingAuto, manualDrafts, ruleDrafts, confirmedSettings.pricing);
@@ -219,15 +278,16 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   const fetchPreview = useCallback(
     async (models: ModelInfo[], signal?: AbortSignal) => {
       if (!models.length) {
-        setPreviewItems([]);
+        if (isMountedRef.current) setPreviewItems([]);
         return;
       }
-      setPreviewLoading(true);
+      if (isMountedRef.current) setPreviewLoading(true);
+      const currentGen = ++previewGenRef.current;
       try {
         const payload = {
           models: models.slice(0, 4096).map((m) => ({
             model: m.id,
-            provider: m.owned_by || '',
+            provider: '', // Never guess provider from owned_by or labels; CPA directory available models send empty string
           })),
         };
         const res = await api.request<PricePreview>('/prices/preview', {
@@ -235,13 +295,14 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
           body: payload,
           signal,
         });
+        if (!isMountedRef.current || currentGen !== previewGenRef.current) return;
         if (res && Array.isArray(res.items)) {
           setPreviewItems(res.items);
         }
       } catch (err: unknown) {
-        if (signal?.aborted) return;
+        if (signal?.aborted || !isMountedRef.current || currentGen !== previewGenRef.current) return;
       } finally {
-        if (!signal?.aborted) {
+        if (isMountedRef.current && currentGen === previewGenRef.current && !signal?.aborted) {
           setPreviewLoading(false);
         }
       }
@@ -259,8 +320,9 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
           api.models({ signal }).catch(() => [] as ModelInfo[]),
         ]);
 
-        if (signal?.aborted) return;
+        if (signal?.aborted || !isMountedRef.current) return;
 
+        hasLoadedSuccessfullyRef.current = true;
         setConfirmedSettings(settingsRes);
         setSnapshot(pricesRes);
         setHealth(healthRes);
@@ -279,12 +341,12 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
 
         setLoadError(null);
       } catch (err: unknown) {
-        if (signal?.aborted) return;
+        if (signal?.aborted || !isMountedRef.current) return;
         if (!isPoll) {
           setLoadError(errorMessage(err) || '加载设置失败');
         }
       } finally {
-        if (!signal?.aborted && !isPoll) {
+        if (!signal?.aborted && !isPoll && isMountedRef.current) {
           setInitialLoading(false);
         }
       }
@@ -331,27 +393,76 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
     }
   };
 
-  const handleMaxBodyMBChange = (mbStr: string) => {
-    setMaxBodyMB(mbStr);
-    const mb = Number(mbStr);
-    if (Number.isFinite(mb) && mb >= 1) {
-      setGeneralDraft((prev) => ({ ...prev, max_body_bytes: Math.round(mb * 1024 * 1024) }));
+  const handleMaxBodyAmountChange = (val: string) => {
+    setMaxBodyAmount(val);
+    try {
+      const bytes = parseCapacityToBytes(val, maxBodyUnit, '单条请求体上限');
+      setGeneralDraft((prev) => ({ ...prev, max_body_bytes: bytes }));
+    } catch {
+      // Keep string, validation in handleSaveGeneral will catch and report error if submitted
     }
   };
 
-  const handleMaxStorageMBChange = (mbStr: string) => {
-    setMaxStorageMB(mbStr);
-    const mb = Number(mbStr);
-    if (Number.isFinite(mb) && mb >= 1) {
-      setGeneralDraft((prev) => ({ ...prev, max_body_storage_bytes: Math.round(mb * 1024 * 1024) }));
+  const handleMaxBodyUnitChange = (val: string) => {
+    const unit = val as CapacityUnit;
+    setMaxBodyUnit(unit);
+    try {
+      const bytes = parseCapacityToBytes(maxBodyAmount, unit, '单条请求体上限');
+      setGeneralDraft((prev) => ({ ...prev, max_body_bytes: bytes }));
+    } catch {
+      // Keep unit
+    }
+  };
+
+  const handleMaxStorageAmountChange = (val: string) => {
+    setMaxStorageAmount(val);
+    try {
+      const bytes = parseCapacityToBytes(val, maxStorageUnit, '请求体总存储上限');
+      setGeneralDraft((prev) => ({ ...prev, max_body_storage_bytes: bytes }));
+    } catch {
+      // Keep string
+    }
+  };
+
+  const handleMaxStorageUnitChange = (val: string) => {
+    const unit = val as CapacityUnit;
+    setMaxStorageUnit(unit);
+    try {
+      const bytes = parseCapacityToBytes(maxStorageAmount, unit, '请求体总存储上限');
+      setGeneralDraft((prev) => ({ ...prev, max_body_storage_bytes: bytes }));
+    } catch {
+      // Keep unit
     }
   };
 
   const handleSaveGeneral = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    if (!hasLoadedSuccessfullyRef.current || isMutationBusy) return;
     setGeneralStatus(null);
 
-    const err = validateGeneralSettings(generalDraft);
+    let bodyBytes = generalDraft.max_body_bytes;
+    try {
+      bodyBytes = parseCapacityToBytes(maxBodyAmount, maxBodyUnit, '单条请求体上限');
+    } catch (err) {
+      setGeneralStatus({ tone: 'danger', message: errorMessage(err) });
+      return;
+    }
+
+    let storageBytes = generalDraft.max_body_storage_bytes;
+    try {
+      storageBytes = parseCapacityToBytes(maxStorageAmount, maxStorageUnit, '请求体总存储上限');
+    } catch (err) {
+      setGeneralStatus({ tone: 'danger', message: errorMessage(err) });
+      return;
+    }
+
+    const draftToSave: GeneralSettingsDraft = {
+      ...generalDraft,
+      max_body_bytes: bodyBytes,
+      max_body_storage_bytes: storageBytes,
+    };
+
+    const err = validateGeneralSettings(draftToSave);
     if (err) {
       setGeneralStatus({ tone: 'danger', message: err });
       return;
@@ -360,11 +471,11 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
     setGeneralSaving(true);
     try {
       const payload: Settings = {
-        capture_enabled: generalDraft.capture_enabled,
-        max_body_bytes: generalDraft.max_body_bytes,
-        max_body_storage_bytes: generalDraft.max_body_storage_bytes,
-        raw_retention_hours: generalDraft.raw_retention_hours,
-        daily_retention_days: generalDraft.daily_retention_days,
+        capture_enabled: draftToSave.capture_enabled,
+        max_body_bytes: draftToSave.max_body_bytes,
+        max_body_storage_bytes: draftToSave.max_body_storage_bytes,
+        raw_retention_hours: draftToSave.raw_retention_hours,
+        daily_retention_days: draftToSave.daily_retention_days,
         // CRITICAL: Preserve the confirmed server pricing snapshot, not unsaved pricing drafts!
         pricing: confirmedSettings.pricing,
       };
@@ -374,14 +485,18 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
         body: payload,
       });
 
+      if (!isMountedRef.current) return;
       const updated = res || payload;
       setConfirmedSettings(updated);
       syncGeneralFromConfirmed(updated);
       setGeneralStatus({ tone: 'success', message: '请求记录与存储限制设置已保存' });
     } catch (saveErr) {
+      if (!isMountedRef.current) return;
       setGeneralStatus({ tone: 'danger', message: errorMessage(saveErr) || '保存失败' });
     } finally {
-      setGeneralSaving(false);
+      if (isMountedRef.current) {
+        setGeneralSaving(false);
+      }
     }
   };
 
@@ -394,12 +509,14 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   // Section 2: 模型价格 Handlers
   // ---------------------------------------------------------------------------
   const handleRefreshCatalog = async () => {
+    if (isMutationBusy) return;
     setPricingRefreshing(true);
     setPricingStatus(null);
     try {
       const res = await api.request<{ snapshot?: PriceSnapshot }>('/prices/refresh', {
         method: 'POST',
       });
+      if (!isMountedRef.current) return;
       const nextSnapshot = res?.snapshot || (res as unknown as PriceSnapshot);
 
       if (nextSnapshot) {
@@ -418,9 +535,12 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
         }
       }
     } catch (err) {
+      if (!isMountedRef.current) return;
       setPricingStatus({ tone: 'danger', message: errorMessage(err) || '刷新价格目录失败' });
     } finally {
-      setPricingRefreshing(false);
+      if (isMountedRef.current) {
+        setPricingRefreshing(false);
+      }
     }
   };
 
@@ -493,6 +613,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   };
 
   const handleSavePricing = async () => {
+    if (!hasLoadedSuccessfullyRef.current || isMutationBusy) return;
     setPricingStatus(null);
 
     let parsedPrices: Price[];
@@ -533,6 +654,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
         body: payload,
       });
 
+      if (!isMountedRef.current) return;
       const updated = res || payload;
       setConfirmedSettings(updated);
       syncPricingFromConfirmed(updated.pricing);
@@ -541,9 +663,12 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
       // Update preview to reflect newly saved manual overrides and rules
       fetchPreview(availableModels);
     } catch (saveErr) {
+      if (!isMountedRef.current) return;
       setPricingStatus({ tone: 'danger', message: errorMessage(saveErr) || '保存失败' });
     } finally {
-      setPricingSaving(false);
+      if (isMountedRef.current) {
+        setPricingSaving(false);
+      }
     }
   };
 
@@ -571,22 +696,27 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   // Section 3: 存储维护 Handlers
   // ---------------------------------------------------------------------------
   const handleCompactConfirm = async () => {
+    if (isMutationBusy) return;
     setCompacting(true);
     setCompactStatus(null);
     try {
       const res = await api.request<{ health?: Health }>('/compact', {
         method: 'POST',
       });
+      if (!isMountedRef.current) return;
       if (res && res.health) {
         setHealth(res.health);
       }
       setCompactStatus({ tone: 'success', message: '数据库压缩整理完成' });
       setCompactModalOpen(false);
     } catch (err) {
+      if (!isMountedRef.current) return;
       setCompactStatus({ tone: 'danger', message: errorMessage(err) || '压缩数据库失败' });
       setCompactModalOpen(false);
     } finally {
-      setCompacting(false);
+      if (isMountedRef.current) {
+        setCompacting(false);
+      }
     }
   };
 
@@ -648,6 +778,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
               id="settings-capture-enabled"
               aria-label="保存请求内容"
               checked={generalDraft.capture_enabled}
+              disabled={isMutationBusy}
               onChange={(checked) => setGeneralDraft((prev) => ({ ...prev, capture_enabled: checked }))}
             />
           </div>
@@ -658,6 +789,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                 id="settings-raw-retention-select"
                 aria-label="原始日志保留时长"
                 value={rawPreset}
+                disabled={isMutationBusy}
                 onChange={handleRawPresetChange}
                 options={[
                   { value: '24', label: '1 天 (24 小时)' },
@@ -675,6 +807,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                     id="settings-raw-retention-input"
                     aria-label="自定义原始日志保留小时数"
                     value={String(generalDraft.raw_retention_hours)}
+                    disabled={isMutationBusy}
                     onChange={(e) => {
                       const val = Number(e.target.value);
                       setGeneralDraft((prev) => ({ ...prev, raw_retention_hours: val }));
@@ -691,6 +824,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                 id="settings-daily-retention-select"
                 aria-label="统计汇总保留天数"
                 value={dailyPreset}
+                disabled={isMutationBusy}
                 onChange={handleDailyPresetChange}
                 options={[
                   { value: '90', label: '90 天' },
@@ -708,6 +842,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                     id="settings-daily-retention-input"
                     aria-label="自定义统计汇总保留天数"
                     value={String(generalDraft.daily_retention_days)}
+                    disabled={isMutationBusy}
                     onChange={(e) => {
                       const val = Number(e.target.value);
                       setGeneralDraft((prev) => ({ ...prev, daily_retention_days: val }));
@@ -729,36 +864,52 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
             <div className="settings-grid">
               <Field
                 label="单条请求体上限"
-                hint={`当前 ${generalDraft.max_body_bytes.toLocaleString()} 字节，最大 8 MB`}
-                htmlFor="settings-max-body-input"
+                hint={`当前换算：${generalDraft.max_body_bytes.toLocaleString()} 字节，上限 8 MiB (8,388,608 字节)`}
+                htmlFor="settings-max-body-amount"
               >
-                <Input
-                  type="number"
-                  min="1"
-                  max="8"
-                  id="settings-max-body-input"
-                  aria-label="单条请求体上限（MB）"
-                  value={maxBodyMB}
-                  onChange={(e) => handleMaxBodyMBChange(e.target.value)}
-                  placeholder="1..8 MB"
-                />
+                <div className="settings-capacity-control">
+                  <Input
+                    id="settings-max-body-amount"
+                    aria-label="单条请求体上限数值"
+                    value={maxBodyAmount}
+                    disabled={isMutationBusy}
+                    onChange={(e) => handleMaxBodyAmountChange(e.target.value)}
+                    placeholder="例如 1 或 1048576"
+                  />
+                  <Select
+                    id="settings-max-body-unit"
+                    aria-label="单条请求体上限单位"
+                    value={maxBodyUnit}
+                    disabled={isMutationBusy}
+                    onChange={handleMaxBodyUnitChange}
+                    options={CAPACITY_OPTIONS}
+                  />
+                </div>
               </Field>
 
               <Field
                 label="请求体总存储上限"
-                hint={`当前 ${generalDraft.max_body_storage_bytes.toLocaleString()} 字节，最大 1 GB (1024 MB)`}
-                htmlFor="settings-max-storage-input"
+                hint={`当前换算：${generalDraft.max_body_storage_bytes.toLocaleString()} 字节，上限 1 GiB (1,073,741,824 字节)`}
+                htmlFor="settings-max-storage-amount"
               >
-                <Input
-                  type="number"
-                  min="1"
-                  max="1024"
-                  id="settings-max-storage-input"
-                  aria-label="请求体总存储上限（MB）"
-                  value={maxStorageMB}
-                  onChange={(e) => handleMaxStorageMBChange(e.target.value)}
-                  placeholder="1..1024 MB"
-                />
+                <div className="settings-capacity-control">
+                  <Input
+                    id="settings-max-storage-amount"
+                    aria-label="请求体总存储上限数值"
+                    value={maxStorageAmount}
+                    disabled={isMutationBusy}
+                    onChange={(e) => handleMaxStorageAmountChange(e.target.value)}
+                    placeholder="例如 256 或 1"
+                  />
+                  <Select
+                    id="settings-max-storage-unit"
+                    aria-label="请求体总存储上限单位"
+                    value={maxStorageUnit}
+                    disabled={isMutationBusy}
+                    onChange={handleMaxStorageUnitChange}
+                    options={CAPACITY_OPTIONS}
+                  />
+                </div>
               </Field>
             </div>
           </details>
@@ -768,6 +919,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
               type="submit"
               variant="primary"
               loading={generalSaving}
+              disabled={!hasLoadedSuccessfullyRef.current || isMutationBusy}
               data-testid="settings-general-save"
             >
               保存记录设置
@@ -776,6 +928,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
               <Button
                 type="button"
                 variant="secondary"
+                disabled={isMutationBusy}
                 onClick={handleCancelGeneral}
                 data-testid="settings-general-reload"
               >
@@ -813,6 +966,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
             id="settings-pricing-auto"
             aria-label="自动使用 models.dev 公共价格目录"
             checked={pricingAuto}
+            disabled={isMutationBusy}
             onChange={(checked) => setPricingAuto(checked)}
           />
         </div>
@@ -845,6 +999,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
             type="button"
             variant="secondary"
             loading={pricingRefreshing}
+            disabled={isMutationBusy}
             onClick={handleRefreshCatalog}
             data-testid="prices-refresh"
           >
@@ -933,6 +1088,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                         <td>
                           <Button
                             variant="ghost"
+                            disabled={isMutationBusy}
                             onClick={() => handleAddManualPrice(item.model)}
                             aria-label={`为 ${item.model} 添加手工价格覆盖`}
                           >
@@ -955,7 +1111,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
               <div className="settings-pagination-buttons">
                 <Button
                   variant="secondary"
-                  disabled={previewPage <= 1}
+                  disabled={previewPage <= 1 || isMutationBusy}
                   onClick={() => setPreviewPage((p) => Math.max(1, p - 1))}
                   aria-label="上一页"
                 >
@@ -963,7 +1119,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                 </Button>
                 <Button
                   variant="secondary"
-                  disabled={previewPage >= totalPreviewPages}
+                  disabled={previewPage >= totalPreviewPages || isMutationBusy}
                   onClick={() => setPreviewPage((p) => Math.min(totalPreviewPages, p + 1))}
                   aria-label="下一页"
                 >
@@ -981,6 +1137,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
             <Button
               type="button"
               variant="secondary"
+              disabled={isMutationBusy}
               onClick={() => handleAddManualPrice('')}
               data-testid="manual-price-add"
             >
@@ -1003,6 +1160,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                         <Input
                           placeholder="例如 openai/gpt-4o 或 custom-model"
                           value={draft.model}
+                          disabled={isMutationBusy}
                           onChange={(e) => handleUpdateManualDraft(index, { model: e.target.value })}
                           aria-label={`第 ${index + 1} 条手工价格模型 ID`}
                         />
@@ -1012,6 +1170,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                       <Button
                         type="button"
                         variant="danger"
+                        disabled={isMutationBusy}
                         onClick={() => handleRemoveManualPrice(index)}
                         aria-label={`删除第 ${index + 1} 条手工价格（${draft.model || '未命名'}）`}
                         data-testid="manual-price-remove"
@@ -1028,6 +1187,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                         step="0.000001"
                         min="0"
                         value={draft.input}
+                        disabled={isMutationBusy}
                         onChange={(e) => handleUpdateManualDraft(index, { input: e.target.value })}
                         aria-label={`第 ${index + 1} 条输入价格`}
                       />
@@ -1038,6 +1198,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                         step="0.000001"
                         min="0"
                         value={draft.output}
+                        disabled={isMutationBusy}
                         onChange={(e) => handleUpdateManualDraft(index, { output: e.target.value })}
                         aria-label={`第 ${index + 1} 条输出价格`}
                       />
@@ -1048,6 +1209,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                         step="0.000001"
                         min="0"
                         value={draft.cache_read}
+                        disabled={isMutationBusy}
                         onChange={(e) => handleUpdateManualDraft(index, { cache_read: e.target.value })}
                         aria-label={`第 ${index + 1} 条缓存读价格`}
                       />
@@ -1058,6 +1220,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                         step="0.000001"
                         min="0"
                         value={draft.cache_write}
+                        disabled={isMutationBusy}
                         onChange={(e) => handleUpdateManualDraft(index, { cache_write: e.target.value })}
                         aria-label={`第 ${index + 1} 条缓存写价格`}
                       />
@@ -1069,6 +1232,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                         min="0"
                         placeholder="留空 = 无"
                         value={draft.reasoning}
+                        disabled={isMutationBusy}
                         onChange={(e) => handleUpdateManualDraft(index, { reasoning: e.target.value })}
                         aria-label={`第 ${index + 1} 条推理价格`}
                       />
@@ -1088,7 +1252,13 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
               <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
                 规则自上而下匹配，首条条件全部满足（AND）的规则生效。完整提示词 Token 严格大于生效；留空项表示不设限。
               </span>
-              <Button type="button" variant="secondary" onClick={handleAddRule} data-testid="rule-add">
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={isMutationBusy}
+                onClick={handleAddRule}
+                data-testid="rule-add"
+              >
                 + 添加规则
               </Button>
             </div>
@@ -1104,6 +1274,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                         <Field label="规则 ID（唯一）">
                           <Input
                             value={rule.id}
+                            disabled={isMutationBusy}
                             onChange={(e) => handleUpdateRuleDraft(index, { id: e.target.value })}
                             aria-label={`第 ${index + 1} 条规则 ID`}
                           />
@@ -1112,6 +1283,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                           <Input
                             placeholder="例如 claude-3-5-sonnet"
                             value={rule.model}
+                            disabled={isMutationBusy}
                             onChange={(e) => handleUpdateRuleDraft(index, { model: e.target.value })}
                             aria-label={`第 ${index + 1} 条规则模型 ID`}
                           />
@@ -1122,6 +1294,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                             min="0"
                             placeholder="留空 = 不限制"
                             value={rule.input_tokens_gt}
+                            disabled={isMutationBusy}
                             onChange={(e) => handleUpdateRuleDraft(index, { input_tokens_gt: e.target.value })}
                             aria-label={`第 ${index + 1} 条规则 Token 阈值`}
                           />
@@ -1130,6 +1303,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                           <Input
                             placeholder="例如 00:00-08:00"
                             value={rule.time_range}
+                            disabled={isMutationBusy}
                             onChange={(e) => handleUpdateRuleDraft(index, { time_range: e.target.value })}
                             aria-label={`第 ${index + 1} 条规则 UTC 时间区间`}
                           />
@@ -1140,7 +1314,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                         <Button
                           type="button"
                           variant="secondary"
-                          disabled={index === 0}
+                          disabled={index === 0 || isMutationBusy}
                           onClick={() => handleMoveRule(index, 'up')}
                           aria-label={`上移第 ${index + 1} 条规则`}
                           data-testid="rule-up"
@@ -1150,7 +1324,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                         <Button
                           type="button"
                           variant="secondary"
-                          disabled={index === ruleDrafts.length - 1}
+                          disabled={index === ruleDrafts.length - 1 || isMutationBusy}
                           onClick={() => handleMoveRule(index, 'down')}
                           aria-label={`下移第 ${index + 1} 条规则`}
                           data-testid="rule-down"
@@ -1160,6 +1334,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                         <Button
                           type="button"
                           variant="danger"
+                          disabled={isMutationBusy}
                           onClick={() => handleRemoveRule(index)}
                           aria-label={`删除第 ${index + 1} 条规则`}
                           data-testid="rule-remove"
@@ -1176,6 +1351,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                           step="0.000001"
                           min="0"
                           value={rule.input}
+                          disabled={isMutationBusy}
                           onChange={(e) => handleUpdateRuleDraft(index, { input: e.target.value })}
                           aria-label={`第 ${index + 1} 条规则输入价格`}
                         />
@@ -1186,6 +1362,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                           step="0.000001"
                           min="0"
                           value={rule.output}
+                          disabled={isMutationBusy}
                           onChange={(e) => handleUpdateRuleDraft(index, { output: e.target.value })}
                           aria-label={`第 ${index + 1} 条规则输出价格`}
                         />
@@ -1196,6 +1373,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                           step="0.000001"
                           min="0"
                           value={rule.cache_read}
+                          disabled={isMutationBusy}
                           onChange={(e) => handleUpdateRuleDraft(index, { cache_read: e.target.value })}
                           aria-label={`第 ${index + 1} 条规则缓存读价格`}
                         />
@@ -1206,6 +1384,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                           step="0.000001"
                           min="0"
                           value={rule.cache_write}
+                          disabled={isMutationBusy}
                           onChange={(e) => handleUpdateRuleDraft(index, { cache_write: e.target.value })}
                           aria-label={`第 ${index + 1} 条规则缓存写价格`}
                         />
@@ -1217,6 +1396,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                           min="0"
                           placeholder="留空 = 无"
                           value={rule.reasoning}
+                          disabled={isMutationBusy}
                           onChange={(e) => handleUpdateRuleDraft(index, { reasoning: e.target.value })}
                           aria-label={`第 ${index + 1} 条规则推理价格`}
                         />
@@ -1234,6 +1414,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
             type="button"
             variant="primary"
             loading={pricingSaving}
+            disabled={!hasLoadedSuccessfullyRef.current || isMutationBusy}
             onClick={handleSavePricing}
             data-testid="settings-pricing-save"
           >
@@ -1243,6 +1424,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
             <Button
               type="button"
               variant="secondary"
+              disabled={isMutationBusy}
               onClick={handleCancelPricing}
               data-testid="settings-pricing-reload"
             >
@@ -1297,6 +1479,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
           <Button
             type="button"
             variant="secondary"
+            disabled={isMutationBusy}
             onClick={() => setCompactModalOpen(true)}
             data-testid="health-compact"
           >

@@ -47,11 +47,13 @@ func TestManagementRegistrationHasOnlyStaticExactRoutes(t *testing.T) {
 		"PUT " + routeSettings:       true,
 		"GET " + routePrices:         true,
 		"POST " + routePricesRefresh: true,
+		"POST " + routePricesPreview: true,
 		"POST " + routeCompact:       true,
 		"GET " + routeUI:             true,
 		"GET " + routeUIAlt:          true,
 		"GET " + routeUIJS:           true,
 		"GET " + routeUICSS:          true,
+		"GET " + routeThemeJS:        true,
 	}
 
 	seen := map[string]bool{}

@@ -134,4 +134,5 @@ var (
 	ErrClosed       = errors.New("closed")
 	ErrInvalid      = errors.New("invalid")
 	ErrBusy         = errors.New("busy")
+	ErrConflict     = errors.New("conflict")
 )

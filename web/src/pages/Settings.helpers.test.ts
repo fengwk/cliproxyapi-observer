@@ -11,6 +11,8 @@ import {
   moveItem,
   areRatesEqual,
   isPricingDraftEqual,
+  splitBytesToCapacity,
+  parseCapacityToBytes,
   MAX_BODY_BYTES,
   MAX_BODY_STORAGE_BYTES,
   MIN_RAW_RETENTION_HOURS,
@@ -401,6 +403,55 @@ describe('Settings.helpers', () => {
       ];
       expect(isPricingDraftEqual(true, modifiedDraft, [], confirmed)).toBe(false);
       expect(isPricingDraftEqual(false, cleanDraft, [], confirmed)).toBe(false);
+    });
+  });
+
+  // Test capacity splitting and parsing with exact byte precision
+  describe('splitBytesToCapacity and parseCapacityToBytes', () => {
+    it('splits standard multiples of binary units without rounding', () => {
+      expect(splitBytesToCapacity(1073741824)).toEqual({ amount: '1', unit: 'GB' });
+      expect(splitBytesToCapacity(268435456)).toEqual({ amount: '256', unit: 'MB' });
+      expect(splitBytesToCapacity(1048576)).toEqual({ amount: '1', unit: 'MB' });
+      expect(splitBytesToCapacity(2097152)).toEqual({ amount: '2', unit: 'MB' });
+      expect(splitBytesToCapacity(8388608)).toEqual({ amount: '8', unit: 'MB' });
+      expect(splitBytesToCapacity(1024)).toEqual({ amount: '1', unit: 'KB' });
+      expect(splitBytesToCapacity(2048)).toEqual({ amount: '2', unit: 'KB' });
+    });
+
+    it('falls back to exact bytes for odd or non-multiple values', () => {
+      expect(splitBytesToCapacity(1)).toEqual({ amount: '1', unit: 'B' });
+      expect(splitBytesToCapacity(500)).toEqual({ amount: '500', unit: 'B' });
+      expect(splitBytesToCapacity(1048577)).toEqual({ amount: '1048577', unit: 'B' });
+      expect(splitBytesToCapacity(0)).toEqual({ amount: '0', unit: 'B' });
+    });
+
+    it('parses valid integer capacity amounts to exact byte counts', () => {
+      expect(parseCapacityToBytes('1', 'B', '单条上限')).toBe(1);
+      expect(parseCapacityToBytes('1048577', 'B', '单条上限')).toBe(1048577);
+      expect(parseCapacityToBytes('1', 'KB', '单条上限')).toBe(1024);
+      expect(parseCapacityToBytes('1', 'MB', '单条上限')).toBe(1048576);
+      expect(parseCapacityToBytes('8', 'MB', '单条上限')).toBe(8388608);
+      expect(parseCapacityToBytes('1', 'GB', '存储上限')).toBe(1073741824);
+    });
+
+    it('parses fractional amounts that resolve to exact integer bytes', () => {
+      expect(parseCapacityToBytes('0.5', 'KB', '单条上限')).toBe(512);
+      expect(parseCapacityToBytes('1.5', 'KB', '单条上限')).toBe(1536);
+      expect(parseCapacityToBytes('0.25', 'MB', '单条上限')).toBe(262144);
+    });
+
+    it('rejects fractional amounts that produce non-integer byte remainders', () => {
+      expect(() => parseCapacityToBytes('0.1', 'B', '单条上限')).toThrow(/整数字节/);
+      expect(() => parseCapacityToBytes('0.3', 'KB', '单条上限')).toThrow(/整数字节/);
+      expect(() => parseCapacityToBytes('1.0000001', 'MB', '单条上限')).toThrow(/整数字节/);
+    });
+
+    it('rejects invalid inputs, negative numbers, and zeroes', () => {
+      expect(() => parseCapacityToBytes('', 'MB', '测试')).toThrow(/不能为空/);
+      expect(() => parseCapacityToBytes('   ', 'MB', '测试')).toThrow(/不能为空/);
+      expect(() => parseCapacityToBytes('abc', 'MB', '测试')).toThrow(/非负数字/);
+      expect(() => parseCapacityToBytes('0', 'MB', '测试')).toThrow(/超出允许范围/);
+      expect(() => parseCapacityToBytes('-5', 'MB', '测试')).toThrow(/非负数字/);
     });
   });
 });
