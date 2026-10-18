@@ -36,6 +36,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const shellHelper = require('./shell-helper.cjs');
 
 const PLUGIN_ID = 'cliproxyapi-observer';
 const RESOURCE_BASE = '/v0/resource/plugins/' + PLUGIN_ID;
@@ -48,7 +49,7 @@ const CATALOG_PATH = '/v1/models';
 const CAPABILITY_TTL_MS = 30 * 1000;
 const MAX_OUTSTANDING_CAPABILITIES = 32;
 const MAX_CATALOG_MODELS = 100;
-const ASSET_DIR = path.resolve(__dirname, '..');
+const ASSET_DIR = path.resolve(__dirname, '../dist');
 
 const SECRET_PREFIX = 'observer_sk_';
 
@@ -399,6 +400,7 @@ function createState(options) {
     capabilities: new Map(),
     catalogControl: defaultCatalogControl(),
     pricesLastSync: iso(now - 15 * 60 * 1000),
+    catalogEntries: 150,
     secrets: new Map(),
     nextKey: 1,
     counters: {
@@ -415,6 +417,35 @@ function createState(options) {
     },
     managementKey: (options && options.managementKey) || DEFAULT_MANAGEMENT_KEY
   };
+  for (const k of state.keys) {
+    const rawSecret = SECRET_PREFIX + k.id;
+    state.secrets.set(k.id, crypto.createHash('sha256').update(rawSecret).digest('hex'));
+  }
+  return state;
+}
+
+function validateCustomSecret(secret) {
+  if (typeof secret !== 'string') {
+    throw failure(400, 'invalid_key', 'secret must be a string');
+  }
+  if (secret.length < 8 || secret.length > 256) {
+    throw failure(400, 'invalid_key', 'secret must be between 8 and 256 characters');
+  }
+  // 严格要求 U+0021..U+007E 可见 ASCII 字符，拒绝空白字符、控制字符与非 ASCII
+  if (!/^[\x21-\x7E]+$/.test(secret)) {
+    throw failure(400, 'invalid_key', 'secret must only contain visible ASCII characters (U+0021..U+007E)');
+  }
+}
+
+function hashSecret(secret) {
+  return crypto.createHash('sha256').update(secret).digest('hex');
+}
+
+function findKeyBySecretHash(state, hash) {
+  for (const [keyId, secretHash] of state.secrets) {
+    if (secretHash === hash) return keyId;
+  }
+  return null;
 }
 
 function failure(status, code, message) {
@@ -443,12 +474,14 @@ const ASSET_FILES = {
   '/ui/': 'ui.html',
   '/ui.html': 'ui.html',
   '/ui.js': 'ui.js',
-  '/ui.css': 'ui.css'
+  '/ui.css': 'ui.css',
+  '/theme.js': 'theme.js'
 };
 const ASSET_TYPES = {
   'ui.html': 'text/html; charset=utf-8',
   'ui.js': 'text/javascript; charset=utf-8',
-  'ui.css': 'text/css; charset=utf-8'
+  'ui.css': 'text/css; charset=utf-8',
+  'theme.js': 'text/javascript; charset=utf-8'
 };
 
 function sendJson(res, status, body) {
@@ -469,19 +502,7 @@ function sendError(res, status, code, message) {
 function sendAsset(res, file, headOnly) {
   let body;
   try {
-    if (file === 'ui.js') {
-      // Go 的 Asset("ui.js") 是 settings.js + "\n" + models.js + "\n" + ui.js；
-      // 固定端点只暴露 bundle，不单独暴露源文件。
-      body = Buffer.concat([
-        fs.readFileSync(path.join(ASSET_DIR, 'settings.js')),
-        Buffer.from('\n'),
-        fs.readFileSync(path.join(ASSET_DIR, 'models.js')),
-        Buffer.from('\n'),
-        fs.readFileSync(path.join(ASSET_DIR, 'ui.js'))
-      ]);
-    } else {
-      body = fs.readFileSync(path.join(ASSET_DIR, file));
-    }
+    body = fs.readFileSync(path.join(ASSET_DIR, file));
   } catch (err) {
     sendError(res, 404, 'not_found', 'embedded asset not found');
     return;
