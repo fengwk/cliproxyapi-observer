@@ -16,7 +16,10 @@
     '--primary-color', '--primary-hover', '--primary-active', '--primary-contrast',
     '--success-color', '--warning-color', '--error-color', '--danger-color',
     '--radius-md', '--radius-lg', '--shadow', '--shadow-lg',
-    '--header-height'
+    '--header-height', '--warning-bg', '--warning-border', '--warning-text',
+    '--success-badge-bg', '--success-badge-text', '--success-badge-border',
+    '--failure-badge-bg', '--failure-badge-text', '--failure-badge-border',
+    '--viz-success', '--viz-failure'
   ];
 
   function readParentTheme(parentWindow) {
@@ -113,21 +116,34 @@
     }
 
     var currentObserver = null;
+    var standaloneChoice = null;
 
     function sync() {
       var observed = readParentTheme(hostWindow);
       var applied = resolveAppliedTheme(observed, prefersDarkScheme());
+      if (observed === null && standaloneChoice !== null) {
+        applied = standaloneChoice === 'auto' ? (prefersDarkScheme() ? 'dark' : 'white') : standaloneChoice;
+      }
       applyThemeToRoot(root, applied, observed === null ? null : hostWindow);
     }
 
     sync();
+    function chooseTheme(event) {
+      if (hostWindow) return;
+      var choice = event.detail;
+      if (choice === 'auto' || choice === 'light' || choice === 'white' || choice === 'dark') {
+        standaloneChoice = choice;
+        sync();
+      }
+    }
+    window.addEventListener('observer:theme-change', chooseTheme);
 
     if (hostWindow && typeof MutationObserver === 'function') {
       try {
         currentObserver = new MutationObserver(sync);
         currentObserver.observe(hostWindow.document.documentElement, {
           attributes: true,
-          attributeFilter: ['data-theme']
+          attributeFilter: ['data-theme', 'style']
         });
       } catch (_) {
         // Cross-origin: resolved fallback stays in effect
@@ -146,6 +162,7 @@
     }
 
     window.__OBSERVER_THEME_CLEANUP__ = function () {
+      window.removeEventListener('observer:theme-change', chooseTheme);
       if (currentObserver) {
         currentObserver.disconnect();
         currentObserver = null;

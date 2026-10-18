@@ -64,13 +64,16 @@ export function KeysPage({ api, refreshInterval, onDirtyChange }: KeysPageProps)
       const ac = new AbortController();
       loadAbortRef.current = ac;
       const curGen = ++loadGenRef.current;
+      const abort = () => ac.abort();
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) ac.abort();
 
       setLoading(true);
       try {
         const response = await api.request<{ items: Key[] }>('/keys', {
-          signal: signal || ac.signal,
+          signal: ac.signal,
         });
-        if (!mountedRef.current || curGen !== loadGenRef.current) {
+        if (ac.signal.aborted || !mountedRef.current || curGen !== loadGenRef.current) {
           return;
         }
         if (response && Array.isArray(response.items)) {
@@ -87,6 +90,7 @@ export function KeysPage({ api, refreshInterval, onDirtyChange }: KeysPageProps)
         const msg = errorMessage(err);
         setPageError(msg || '加载 Key 列表失败');
       } finally {
+        signal?.removeEventListener('abort', abort);
         if (mountedRef.current && curGen === loadGenRef.current) {
           setLoading(false);
         }
@@ -97,7 +101,6 @@ export function KeysPage({ api, refreshInterval, onDirtyChange }: KeysPageProps)
 
   useEffect(() => {
     mountedRef.current = true;
-    loadKeys();
 
     return () => {
       mountedRef.current = false;
@@ -123,6 +126,7 @@ export function KeysPage({ api, refreshInterval, onDirtyChange }: KeysPageProps)
     setCopyError(null);
 
     const ok = await copyToClipboard(text);
+    if (!mountedRef.current) return;
     if (ok) {
       setCopiedId(id);
       copyTimerRef.current = setTimeout(() => {
