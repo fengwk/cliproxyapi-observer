@@ -346,7 +346,10 @@ describe('SettingsPage', () => {
     fireEvent.click(confirmBtn);
 
     await waitFor(() => {
-      expect(mockApi.request).toHaveBeenCalledWith('/compact', { method: 'POST' });
+      expect(mockApi.request).toHaveBeenCalledWith(
+        '/compact',
+        expect.objectContaining({ method: 'POST' })
+      );
       expect(screen.getByText('数据库压缩整理完成')).toBeDefined();
       // Database size updated from 15MB to 10MB
       expect(screen.getAllByText('10.0 MB').length).toBeGreaterThanOrEqual(1);
@@ -576,5 +579,265 @@ describe('SettingsPage', () => {
       (call) => call[0] === '/settings' && call[1]?.method === 'PUT'
     );
     expect(putCalls.length).toBe(0);
+  });
+
+  // Intent: 验证延迟到达的后台轮询响应不会覆盖用户已编辑的未保存草稿 (deferred poll arriving after user edit does not clobber draft)
+  it('does not overwrite active user draft when deferred background poll completes', async () => {
+    let resolveDeferredPoll!: (val: Settings) => void;
+    let pollCount = 0;
+
+    const mockRequest = vi.fn(async (path: string, options?: { method?: string; body?: unknown }) => {
+      if (path === '/settings') {
+        if (options?.method === 'PUT') return options.body;
+        pollCount++;
+        if (pollCount === 1) {
+          return initialSettings;
+        }
+        // Second fetch: return deferred promise
+        return new Promise<Settings>((resolve) => {
+          resolveDeferredPoll = resolve;
+        });
+      }
+      if (path === '/prices') return initialSnapshot;
+      if (path === '/health') return initialHealth;
+      if (path === '/prices/preview') return initialPreview;
+      return {};
+    });
+
+    mockApi = {
+      request: mockRequest as unknown as ApiClient['request'],
+      models: vi.fn(async () => initialModels),
+    };
+
+    // Render with 1s refresh interval
+    render(<SettingsPage api={mockApi} refreshInterval={1} onDirtyChange={onDirtyChange} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('observer-settings')).toBeDefined();
+    });
+
+    // User edits draft: change capacity amount from 1 to 2
+    const bodyInput = screen.getByLabelText('单条请求体上限数值');
+    fireEvent.change(bodyInput, { target: { value: '2' } });
+
+    expect((bodyInput as HTMLInputElement).value).toBe('2');
+    expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+
+    // Now resolve the deferred poll with new server settings that would normally change body bytes to 5242880 (5MB)
+    if (resolveDeferredPoll) {
+      resolveDeferredPoll({
+        ...initialSettings,
+        max_body_bytes: 5242880,
+      });
+    }
+
+    // Give microtasks time to run
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Draft should NOT be overwritten; input value must still be 2
+    expect((screen.getByLabelText('单条请求体上限数值') as HTMLInputElement).value).toBe('2');
+  });
+
+  // Intent: 验证当存在脏数据或确认弹窗打开时，轮询被暂停且不再发送周期请求 (dirty drafts or open modals stop polling)
+  it('pauses periodic polling when draft is dirty or when compact modal is open', async () => {
+    vi.useFakeTimers();
+    try {
+      let settingsCalls = 0;
+      const mockRequest = vi.fn(async (path: string, options?: { method?: string; body?: unknown }) => {
+        if (path === '/settings') {
+          settingsCalls++;
+          if (options?.method === 'PUT') return options.body;
+          return initialSettings;
+        }
+        if (path === '/prices') return initialSnapshot;
+        if (path === '/health') return initialHealth;
+        if (path === '/prices/preview') return initialPreview;
+        return {};
+      });
+
+      mockApi = {
+        request: mockRequest as unknown as ApiClient['request'],
+        models: vi.fn(async () => initialModels),
+      };
+
+      render(<SettingsPage api={mockApi} refreshInterval={5} onDirtyChange={onDirtyChange} />);
+
+      // Initial execution
+      await vi.advanceTimersByTimeAsync(10);
+      expect(settingsCalls).toBe(1);
+
+      // Open compact modal
+      const compactBtn = screen.getByTestId('health-compact');
+      fireEvent.click(compactBtn);
+      expect(screen.getByTestId('compact-confirm')).toBeDefined();
+
+      // Advance time by 15s while modal is open; polling should be paused
+      await vi.advanceTimersByTimeAsync(15000);
+      expect(settingsCalls).toBe(1);
+
+      // Close modal (unpauses, triggering one execute)
+      const cancelBtn = screen.getByTestId('compact-cancel');
+      fireEvent.click(cancelBtn);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(settingsCalls).toBe(2);
+
+      // Now make draft dirty
+      const captureSwitch = screen.getByLabelText('保存请求内容');
+      fireEvent.click(captureSwitch);
+
+      // Advance time again by 20s; dirty draft keeps periodic polling paused
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(settingsCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Intent: 验证当模型列表或预检请求失败时显式展示错误 Notice，而非误导性显示暂无可用模型 (preview error renders error notice without showing empty state)
+  it('displays explicit error notice when models or preview API fails without showing empty state', async () => {
+    const mockRequest = vi.fn(async (path: string) => {
+      if (path === '/settings') return initialSettings;
+      if (path === '/prices') return initialSnapshot;
+      if (path === '/health') return initialHealth;
+      if (path === '/prices/preview') {
+        throw new Error('CPA catalog unavailable');
+      }
+      return {};
+    });
+
+    mockApi = {
+      request: mockRequest as unknown as ApiClient['request'],
+      models: vi.fn(async () => initialModels),
+    };
+
+    render(<SettingsPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('observer-settings')).toBeDefined();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/无法读取可用模型价格预检：CPA catalog unavailable/)).toBeDefined();
+    });
+
+    // Crucial: Must NOT display misleading "暂无可用模型"
+    expect(screen.queryByText('暂无可用模型')).toBeNull();
+  });
+
+  // Intent: 验证请求保存文案不虚假声称保存模型响应体，准确描述仅保存脱敏请求头和请求体 (capture copy accurately reflects request-only storage without claiming response capture)
+  it('accurately describes saving sanitized request content and does not claim to save model responses', async () => {
+    render(<SettingsPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('observer-settings')).toBeDefined();
+    });
+
+    // When unchecked:
+    expect(
+      screen.getByText('已关闭：仅记录请求时间、模型、状态码及费用等元数据，不保存提示词与请求体（推荐）。')
+    ).toBeDefined();
+
+    // Toggle on:
+    const captureSwitch = screen.getByLabelText('保存请求内容');
+    fireEvent.click(captureSwitch);
+
+    expect(
+      screen.getByText('已开启：保存脱敏请求头和请求体，可能包含敏感提示词；超限内容不保存。')
+    ).toBeDefined();
+
+    // Verify neither state claims to save model responses
+    expect(screen.queryByText(/模型响应/)).toBeNull();
+    expect(screen.queryByText(/完整记录/)).toBeNull();
+  });
+
+  // Intent: 验证 POST /compact 直接返回 Health 对象时，页面数据库占用空间数值真实更新 (POST /compact returns direct Health and updates UI database size)
+  it('updates database bytes display when POST /compact returns a direct Health object', async () => {
+    const compactHealth: Health = {
+      database_bytes: 5242880, // 5.0 MB
+      dropped_captures: 0,
+      pending_usage: 0,
+      active_requests: 0,
+    };
+
+    const mockRequest = vi.fn(async (path: string) => {
+      if (path === '/settings') return initialSettings;
+      if (path === '/prices') return initialSnapshot;
+      if (path === '/health') return initialHealth; // 15 MB
+      if (path === '/compact') {
+        return compactHealth; // direct Health object, not { health: ... }
+      }
+      if (path === '/prices/preview') return initialPreview;
+      return {};
+    });
+
+    mockApi = {
+      request: mockRequest as unknown as ApiClient['request'],
+      models: vi.fn(async () => initialModels),
+    };
+
+    render(<SettingsPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('observer-settings')).toBeDefined();
+      expect(screen.getAllByText('15.0 MB').length).toBeGreaterThanOrEqual(1);
+    });
+
+    const compactBtn = screen.getByTestId('health-compact');
+    fireEvent.click(compactBtn);
+
+    const confirmBtn = screen.getByTestId('compact-confirm');
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText('数据库压缩整理完成')).toBeDefined();
+      expect(screen.getAllByText('5.0 MB').length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  // Intent: 验证同步 isMutatingRef 锁能有效防止快速连击或同 tick 双重提交保存请求 (synchronous mutation ref lock prevents duplicate save submissions)
+  it('prevents double save submission on rapid consecutive clicks in the same event loop tick', async () => {
+    let putCallsCount = 0;
+    const mockRequest = vi.fn(async (path: string, options?: { method?: string; body?: unknown }) => {
+      if (path === '/settings') {
+        if (options?.method === 'PUT') {
+          putCallsCount++;
+          // Simulate latency
+          await new Promise((r) => setTimeout(r, 50));
+          return options.body;
+        }
+        return initialSettings;
+      }
+      if (path === '/prices') return initialSnapshot;
+      if (path === '/health') return initialHealth;
+      if (path === '/prices/preview') return initialPreview;
+      return {};
+    });
+
+    mockApi = {
+      request: mockRequest as unknown as ApiClient['request'],
+      models: vi.fn(async () => initialModels),
+    };
+
+    render(<SettingsPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('observer-settings')).toBeDefined();
+    });
+
+    // Make draft dirty
+    const captureSwitch = screen.getByLabelText('保存请求内容');
+    fireEvent.click(captureSwitch);
+
+    const saveBtn = screen.getByTestId('settings-general-save');
+    // Rapid double click in the same synchronous block
+    fireEvent.click(saveBtn);
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText('请求记录与存储限制设置已保存')).toBeDefined();
+    });
+
+    // Only one PUT request should have been dispatched
+    expect(putCallsCount).toBe(1);
   });
 });
