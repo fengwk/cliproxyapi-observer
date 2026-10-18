@@ -1,0 +1,307 @@
+/* Scoped Settings page styles aligned with CPA design tokens */
+
+.settings-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 8px 0 32px;
+  color: var(--text-primary);
+  font-family: inherit;
+}
+
+/* Section cards */
+.settings-section {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md, 8px);
+  padding: 18px 20px;
+  box-shadow: var(--shadow, 0 1px 2px rgba(0, 0, 0, 0.05));
+}
+
+.settings-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.settings-section-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-section-desc {
+  margin: 0 0 14px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+/* Layout grids */
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.settings-toggle-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+}
+
+.settings-toggle-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-toggle-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.settings-toggle-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+/* Collapsible sections */
+.settings-details {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm, 4px);
+  padding: 10px 14px;
+  margin: 12px 0;
+  background: var(--bg-secondary);
+}
+
+.settings-details summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  user-select: none;
+  outline: none;
+}
+
+.settings-details summary:hover {
+  color: var(--text-link, #2563eb);
+}
+
+.settings-details[open] summary {
+  margin-bottom: 12px;
+}
+
+/* Rate inputs grid */
+.settings-rates-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+  width: 100%;
+}
+
+/* Action toolbars */
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.settings-actions-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Table styles */
+.settings-table-container {
+  overflow-x: auto;
+  margin: 10px 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-primary);
+}
+
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  text-align: left;
+}
+
+.settings-table th,
+.settings-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.settings-table th {
+  background: var(--bg-secondary);
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.settings-table tr:last-child td {
+  border-bottom: none;
+}
+
+.settings-table tr:hover td {
+  background: var(--bg-tertiary);
+}
+
+/* Pagination bar */
+.settings-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.settings-pagination-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Rule card */
+.settings-rule-card {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm, 4px);
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  background: var(--bg-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-rule-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.settings-rule-conditions-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.settings-rule-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Diagnostic badges / cards */
+.settings-diagnostic-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.settings-diagnostic-item {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm, 4px);
+  padding: 8px 12px;
+  background: var(--bg-primary);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-diagnostic-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.settings-diagnostic-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Search filter input wrapper */
+.settings-table-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 10px 0;
+  flex-wrap: wrap;
+}
+
+.settings-table-filter-bar .settings-search-input {
+  max-width: 280px;
+  width: 100%;
+}
+
+/* Help note */
+.settings-note {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  margin: 6px 0 0;
+}
+
+/* Unpriced warning highlight */
+.settings-unpriced-warning-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-warning, #c65746);
+  font-weight: 500;
+}
+
+/* Responsive adjustments */
+@media (max-width: 640px) {
+  .settings-section {
+    padding: 14px;
+  }
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
+  .settings-rule-conditions-grid {
+    grid-template-columns: 1fr;
+  }
+  .settings-rates-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .settings-table-filter-bar .settings-search-input {
+    max-width: 100%;
+  }
+}
