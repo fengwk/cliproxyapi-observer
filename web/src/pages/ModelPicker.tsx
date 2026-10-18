@@ -1,6 +1,8 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import type { FormEvent } from 'react';
 import type { ApiClient } from '../lib/api';
 import { Button, Input, Notice } from '../components/ui';
+import { errorMessage } from '../lib/format';
 
 export interface ModelPickerProps {
   api: ApiClient;
@@ -9,42 +11,87 @@ export interface ModelPickerProps {
   error?: string;
 }
 
+const MAX_DISPLAY = 200;
+
 export function ModelPicker({ api, selectedModels, onChange, error }: ModelPickerProps) {
-  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  // Authoritative catalog replaced on reload (never accumulates removed models)
+  const [catalogModels, setCatalogModels] = useState<string[]>([]);
+  // User manually entered custom models
+  const [customModels, setCustomModels] = useState<string[]>([]);
+
   const [loading, setLoading] = useState<boolean>(false);
   const [fetchError, setFetchError] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [manualInput, setManualInput] = useState<string>('');
   const [manualError, setManualError] = useState<string>('');
 
-  const loadModels = useCallback(async (force = false) => {
-    setLoading(true);
-    setFetchError('');
-    try {
-      const list = await api.models({ force });
-      const ids = list.map((m) => m.id.trim()).filter(Boolean);
-      setAvailableModels((prev) => {
-        const combined = Array.from(new Set([...prev, ...ids]));
-        return combined.sort();
-      });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setFetchError(msg || '获取模型目录失败，您仍可手动添加精确模型 ID');
-    } finally {
-      setLoading(false);
-    }
-  }, [api]);
+  const generationRef = useRef<number>(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef<boolean>(true);
 
   useEffect(() => {
-    // Automatically load model catalog on mount
-    loadModels();
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
+
+  const loadModels = useCallback(
+    async (force = false) => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      const ac = new AbortController();
+      abortControllerRef.current = ac;
+      const curGen = ++generationRef.current;
+
+      setLoading(true);
+      setFetchError('');
+
+      try {
+        const list = await api.models({ force, signal: ac.signal });
+        if (!mountedRef.current || curGen !== generationRef.current) {
+          return;
+        }
+
+        // Do NOT trim authoritative model IDs!
+        const ids = list
+          .filter((m): m is { id: string } => typeof m?.id === 'string' && m.id.length > 0)
+          .map((m) => m.id);
+
+        // Replace catalog directly with latest; do not accumulate removed models
+        setCatalogModels(ids);
+      } catch (err: unknown) {
+        if (ac.signal.aborted) {
+          return;
+        }
+        if (!mountedRef.current || curGen !== generationRef.current) {
+          return;
+        }
+        const msg = errorMessage(err);
+        setFetchError(msg || '获取模型目录失败，您仍可手动添加精确模型 ID');
+      } finally {
+        if (mountedRef.current && curGen === generationRef.current) {
+          setLoading(false);
+        }
+      }
+    },
+    [api]
+  );
+
+  useEffect(() => {
+    loadModels(false);
   }, [loadModels]);
 
-  // Merge selected models into available options so preserved/custom IDs never disappear
+  // Combine selectedModels (never dropped even if missing from catalog),
+  // customModels, and current catalogModels.
   const allKnownModels = useMemo(() => {
-    const set = new Set([...selectedModels, ...availableModels]);
+    const set = new Set([...selectedModels, ...customModels, ...catalogModels]);
     return Array.from(set).sort();
-  }, [selectedModels, availableModels]);
+  }, [selectedModels, customModels, catalogModels]);
 
   const filteredModels = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -53,6 +100,11 @@ export function ModelPicker({ api, selectedModels, onChange, error }: ModelPicke
     }
     return allKnownModels.filter((id) => id.toLowerCase().includes(q));
   }, [allKnownModels, searchQuery]);
+
+  // Bound DOM nodes to at most 200 items
+  const displayedModels = useMemo(() => {
+    return filteredModels.slice(0, MAX_DISPLAY);
+  }, [filteredModels]);
 
   const handleToggle = (id: string) => {
     if (selectedModels.includes(id)) {
@@ -71,20 +123,29 @@ export function ModelPicker({ api, selectedModels, onChange, error }: ModelPicke
     onChange([]);
   };
 
-  const handleAddManual = (e: React.FormEvent) => {
+  const handleAddManual = (e: FormEvent) => {
     e.preventDefault();
     const id = manualInput.trim();
     if (!id) {
       setManualError('请输入精确模型 ID');
       return;
     }
+    if (id.length > 1024) {
+      setManualError('模型 ID 长度不能超过 1024 个字符');
+      return;
+    }
+    if (/[\r\n\t]/.test(id)) {
+      setManualError('模型 ID 不能包含换行或制表符');
+      return;
+    }
     if (selectedModels.includes(id)) {
       setManualError('该模型已在选择列表中');
       return;
     }
+
     setManualError('');
     setManualInput('');
-    setAvailableModels((prev) => Array.from(new Set([...prev, id])));
+    setCustomModels((prev) => Array.from(new Set([...prev, id])));
     onChange([...selectedModels, id]);
   };
 
@@ -205,7 +266,7 @@ export function ModelPicker({ api, selectedModels, onChange, error }: ModelPicke
         style={{
           border: '1px solid var(--border-color)',
           borderRadius: 'var(--radius-md)',
-          maxHeight: '180px',
+          maxHeight: '220px',
           overflowY: 'auto',
           backgroundColor: 'var(--bg-primary)',
           padding: '0.35rem 0.5rem',
@@ -216,32 +277,48 @@ export function ModelPicker({ api, selectedModels, onChange, error }: ModelPicke
             {loading ? '正在加载模型目录...' : '未找到匹配的模型'}
           </div>
         ) : (
-          filteredModels.map((id) => {
-            const isChecked = selectedModels.includes(id);
-            return (
-              <label
-                key={id}
+          <>
+            {displayedModels.map((id) => {
+              const isChecked = selectedModels.includes(id);
+              return (
+                <label
+                  key={id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.5rem',
+                    padding: '0.35rem 0.5rem',
+                    borderRadius: 'var(--radius-sm)',
+                    cursor: 'pointer',
+                    fontSize: '0.88rem',
+                    backgroundColor: isChecked ? 'var(--bg-tertiary)' : 'transparent',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={isChecked}
+                    onChange={() => handleToggle(id)}
+                    style={{ cursor: 'pointer' }}
+                  />
+                  <span style={{ fontFamily: 'var(--font-mono)', wordBreak: 'break-all' }}>{id}</span>
+                </label>
+              );
+            })}
+
+            {filteredModels.length > MAX_DISPLAY && (
+              <div
                 style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.5rem',
-                  padding: '0.35rem 0.5rem',
-                  borderRadius: 'var(--radius-sm)',
-                  cursor: 'pointer',
-                  fontSize: '0.88rem',
-                  backgroundColor: isChecked ? 'var(--bg-tertiary)' : 'transparent',
+                  padding: '0.5rem',
+                  textAlign: 'center',
+                  fontSize: '0.8rem',
+                  color: 'var(--text-secondary)',
+                  borderTop: '1px dashed var(--border-color)',
                 }}
               >
-                <input
-                  type="checkbox"
-                  checked={isChecked}
-                  onChange={() => handleToggle(id)}
-                  style={{ cursor: 'pointer' }}
-                />
-                <span style={{ fontFamily: 'var(--font-mono)', wordBreak: 'break-all' }}>{id}</span>
-              </label>
-            );
-          })
+                已显示前 {MAX_DISPLAY} 个模型（共 {filteredModels.length} 个），请输入关键字搜索缩小范围
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
