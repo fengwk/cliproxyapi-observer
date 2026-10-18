@@ -270,6 +270,21 @@
   width: 100%;
 }
 
+/* Capacity input + unit row */
+.settings-capacity-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-capacity-control .cpa-input {
+  flex: 1;
+}
+
+.settings-capacity-control .cpa-select-trigger {
+  min-width: 140px;
+}
+
 /* Help note */
 .settings-note {
   font-size: 12px;

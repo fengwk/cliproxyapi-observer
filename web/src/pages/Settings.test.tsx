@@ -253,7 +253,7 @@ describe('SettingsPage', () => {
         method: 'POST',
         body: {
           models: [
-            { model: 'gpt-4o', provider: 'openai' },
+            { model: 'gpt-4o', provider: '' },
             { model: 'custom-unpriced-model', provider: '' },
           ],
         },
@@ -442,5 +442,139 @@ describe('SettingsPage', () => {
       expect(screen.getByTestId('settings-error')).toBeDefined();
       expect(screen.getByText('Connection refused')).toBeDefined();
     });
+  });
+
+  // Regression: exact byte capacity preservation without lossy Math.round
+  it('preserves exact odd byte capacities (e.g. 1048577 bytes, 1 GiB) when editing unrelated settings', async () => {
+    const oddByteSettings: Settings = {
+      ...initialSettings,
+      max_body_bytes: 1048577, // 1 MiB + 1 Byte
+      max_body_storage_bytes: 1073741824, // Exact 1 GiB
+    };
+
+    const mockRequest = vi.fn(async (path: string, options?: { method?: string; body?: unknown }) => {
+      if (path === '/settings') {
+        if (options?.method === 'PUT') return options.body;
+        return oddByteSettings;
+      }
+      if (path === '/prices') return initialSnapshot;
+      if (path === '/health') return initialHealth;
+      if (path === '/prices/preview') return initialPreview;
+      return {};
+    });
+
+    mockApi = {
+      request: mockRequest as unknown as ApiClient['request'],
+      models: vi.fn(async () => initialModels),
+    };
+
+    render(<SettingsPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('observer-settings')).toBeDefined();
+    });
+
+    // Toggle capture_enabled without touching capacity inputs
+    const captureSwitch = screen.getByLabelText('保存请求内容');
+    fireEvent.click(captureSwitch);
+
+    // Click save general
+    const saveBtn = screen.getByTestId('settings-general-save');
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      const putCalls = (mockApi.request as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (call) => call[0] === '/settings' && call[1]?.method === 'PUT'
+      );
+      expect(putCalls.length).toBe(1);
+      const savedPayload = putCalls[0][1].body as Settings;
+      expect(savedPayload.max_body_bytes).toBe(1048577);
+      expect(savedPayload.max_body_storage_bytes).toBe(1073741824);
+      expect(savedPayload.capture_enabled).toBe(true);
+    });
+  });
+
+  // Regression: preview provider contract strictly decouples from model owned_by
+  it('sends empty string for preview provider and does not infer provider from owned_by', async () => {
+    const modelsWithOwnedBy: ModelInfo[] = [
+      { id: 'meta-llama/llama-3-70b', owned_by: 'meta-llama' },
+      { id: 'mistralai/mixtral-8x7b', owned_by: 'mistralai' },
+    ];
+
+    const mockRequest = vi.fn(async (path: string) => {
+      if (path === '/settings') return initialSettings;
+      if (path === '/prices') return initialSnapshot;
+      if (path === '/health') return initialHealth;
+      if (path === '/prices/preview') return { items: [] };
+      return {};
+    });
+
+    mockApi = {
+      request: mockRequest as unknown as ApiClient['request'],
+      models: vi.fn(async () => modelsWithOwnedBy),
+    };
+
+    render(<SettingsPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('observer-settings')).toBeDefined();
+    });
+
+    expect(mockApi.request).toHaveBeenCalledWith(
+      '/prices/preview',
+      expect.objectContaining({
+        method: 'POST',
+        body: {
+          models: [
+            { model: 'meta-llama/llama-3-70b', provider: '' },
+            { model: 'mistralai/mixtral-8x7b', provider: '' },
+          ],
+        },
+      })
+    );
+  });
+
+  // Regression: prevents saving before successful initial GET with deferred promise
+  it('blocks saving before initial GET succeeds and guards against wiping default settings on GET failure', async () => {
+    let rejectSettings!: (err: Error) => void;
+    const deferredSettingsPromise = new Promise<Settings>((_resolve, reject) => {
+      rejectSettings = reject;
+    });
+
+    const mockRequest = vi.fn(async (path: string, options?: { method?: string; body?: unknown }) => {
+      if (path === '/settings') {
+        if (options?.method === 'PUT') return options.body;
+        return deferredSettingsPromise;
+      }
+      if (path === '/prices') return initialSnapshot;
+      if (path === '/health') return initialHealth;
+      if (path === '/prices/preview') return initialPreview;
+      return {};
+    });
+
+    mockApi = {
+      request: mockRequest as unknown as ApiClient['request'],
+      models: vi.fn(async () => initialModels),
+    };
+
+    render(<SettingsPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
+
+    // While initial GET is unresolved, settings page is loading and save buttons do not exist
+    expect(screen.getByTestId('settings-loading')).toBeDefined();
+    expect(screen.queryByTestId('settings-general-save')).toBeNull();
+
+    // Reject initial GET
+    rejectSettings(new Error('Network error on load'));
+
+    // Should display error state, save buttons still do not exist, no PUT is ever triggered
+    await waitFor(() => {
+      expect(screen.getByTestId('settings-error')).toBeDefined();
+      expect(screen.queryByTestId('settings-general-save')).toBeNull();
+    });
+
+    const putCalls = (mockApi.request as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (call) => call[0] === '/settings' && call[1]?.method === 'PUT'
+    );
+    expect(putCalls.length).toBe(0);
   });
 });
