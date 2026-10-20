@@ -1,77 +1,139 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { PageProps } from '../lib/api';
-import type { RequestPage, Summary, Detail, ModelInfo, Key } from '../lib/types';
-import { formatDateTime, errorMessage } from '../lib/format';
-import { usePoll } from '../lib/usePoll';
-import { Button, Input, Field, Select, Modal, Badge, Notice, EmptyState } from '../components/ui';
+import type {
+  RequestView,
+  Detail,
+  ModelInfo,
+  Key,
+  FacetPage,
+  FacetItem,
+} from '../lib/types';
+import { errorMessage } from '../lib/format';
+import { Button, Notice, Select, type SelectOption } from '../components/ui';
 import {
-  FilterState,
-  PresetRange,
-  getTodayPresetRange,
-  getLast7DaysPresetRange,
+  type FilterState,
+  type PresetRange,
+  type ViewTab,
+  getPresetRange,
+  isDynamicRange,
+  buildRequestViewParams,
   snapToWholeDateRange,
   isHistoricalDateQueryError,
-  buildRequestsQueryParams,
-  CAPTURE_STATUS_LABELS,
-  formatPriceSource,
-  formatCostExact,
-  resolveKeyDisplay,
-  redactHeaders,
-  redactBody,
 } from './RequestsHelpers';
+import { RequestsMetrics } from './RequestsMetrics';
+import { RequestsTrend } from './RequestsTrend';
+import { RequestsFilters } from './RequestsFilters';
+import { RequestsTable } from './RequestsTable';
+import { RequestsDetailModal } from './RequestsDetailModal';
 import './Requests.css';
 
 export interface RequestsPageProps extends PageProps {}
 
-export function RequestsPage({ api, refreshInterval, onDirtyChange }: RequestsPageProps) {
+const pollOptions: SelectOption[] = [
+  { value: '0', label: '关闭自动刷新' },
+  { value: '5', label: '每 5 秒刷新' },
+  { value: '10', label: '每 10 秒刷新' },
+  { value: '30', label: '每 30 秒刷新' },
+];
+
+export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: RequestsPageProps) {
   // Preset range selection
   const [preset, setPreset] = useState<PresetRange>('today');
 
-  // Filter states: draft (being edited) vs applied (active on query)
-  const [draftFilters, setDraftFilters] = useState<FilterState>(() => ({
-    ...getTodayPresetRange(),
-    key_id: '',
-    model: '',
-    provider: '',
-    auth_index: '',
-    status: '',
-  }));
+  // Filter states: draft vs applied
+  const [draftFilters, setDraftFilters] = useState<FilterState>(() => {
+    const todayBounds = getPresetRange('today');
+    return {
+      from: todayBounds.from,
+      to: todayBounds.to,
+      key_id: '',
+      model: '',
+      provider: '',
+      auth_index: '',
+      status: '',
+    };
+  });
 
   const [appliedFilters, setAppliedFilters] = useState<FilterState>(() => ({
     ...draftFilters,
   }));
 
+  // Active view tab: requests, model, key, account, provider
+  const [view, setView] = useState<ViewTab>('requests');
+
   // Pagination
   const [page, setPage] = useState<number>(1);
 
-  // Data states
-  const [summary, setSummary] = useState<Summary | null>(null);
-  const [pageData, setPageData] = useState<RequestPage | null>(null);
+  // Dedicated poll interval for Requests page (defaults to 5s, options: 0/5/10/30)
+  const [pollInterval, setPollInterval] = useState<number>(() =>
+    refreshInterval !== undefined ? refreshInterval : 5
+  );
+
+  // View data (single-flight RequestView from GET /requests/view)
+  const [viewData, setViewData] = useState<RequestView | null>(null);
+
+  // Stable refs to prevent polling infinite loops
+  const appliedFiltersRef = useRef(appliedFilters);
+  appliedFiltersRef.current = appliedFilters;
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const pageRef = useRef(page);
+  pageRef.current = page;
+  const viewDataRef = useRef(viewData);
+  viewDataRef.current = viewData;
+
+  // Metadata lists for dropdown filters
   const [keysList, setKeysList] = useState<Key[]>([]);
-  const [modelsList, setModelsList] = useState<ModelInfo[]>([]);
+  const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [facetModels, setFacetModels] = useState<FacetItem[]>([]);
+  const [facetKeys, setFacetKeys] = useState<FacetItem[]>([]);
+  const [facetProviders, setFacetProviders] = useState<FacetItem[]>([]);
+  const [facetAccounts, setFacetAccounts] = useState<FacetItem[]>([]);
 
-  // Page level loading and errors
+  // Loading and error states
   const [loading, setLoading] = useState<boolean>(true);
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [queryError, setQueryError] = useState<string | null>(null);
-  const [actionNotice, setActionNotice] = useState<{ tone: 'success' | 'danger'; text: string } | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [copiedKeyNotice, setCopiedKeyNotice] = useState<string | null>(null);
 
-  // Detail modal state
+  // Detail Modal state
   const [activeDetailId, setActiveDetailId] = useState<string | null>(null);
   const [detailData, setDetailData] = useState<Detail | null>(null);
   const [detailLoading, setDetailLoading] = useState<boolean>(false);
   const [detailError, setDetailError] = useState<string | null>(null);
-  const [detailTab, setDetailTab] = useState<'summary' | 'headers' | 'body'>('summary');
 
-  // Generation gate and abort controllers for race conditions
-  const generationRef = useRef<number>(0);
+  // Selection tracking (pause polling when user selects text or reads)
+  const [isSelecting, setIsSelecting] = useState<boolean>(false);
+
+  // Refs for race-condition prevention & single-flight aborts
+  const seqRef = useRef<number>(0);
   const activeAbortControllerRef = useRef<AbortController | null>(null);
   const detailAbortControllerRef = useRef<AbortController | null>(null);
   const activeDetailIdRef = useRef<string | null>(null);
+  const failureCountRef = useRef(0);
+  const facetControllers = useRef<Record<string, AbortController>>({});
 
-  // Unmount cleanup: cancel any pending generation or abort controllers
+  const searchFacet = useCallback(async (field: string, search: string) => {
+    facetControllers.current[field]?.abort();
+    const controller = new AbortController();
+    facetControllers.current[field] = controller;
+    try {
+      const params = new URLSearchParams({ field, search: search.slice(0, 256), limit: '100' });
+      const result = await api.request<FacetPage>(`/requests/facets?${params}`, { signal: controller.signal });
+      if (controller.signal.aborted) return;
+      const setters: Record<string, (items: FacetItem[]) => void> = {
+        model: setFacetModels, key_id: setFacetKeys, provider: setFacetProviders, auth_index: setFacetAccounts,
+      };
+      setters[field]?.(result.items ?? []);
+    } catch { /* Preserve previous safe metadata choices on failure. */ }
+  }, [api]);
+
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
-      generationRef.current++;
+      seqRef.current++;
+      Object.values(facetControllers.current).forEach(controller => controller.abort());
       if (activeAbortControllerRef.current) {
         activeAbortControllerRef.current.abort();
         activeAbortControllerRef.current = null;
@@ -83,18 +145,20 @@ export function RequestsPage({ api, refreshInterval, onDirtyChange }: RequestsPa
     };
   }, []);
 
-  // Keys map for fast lookup
-  const keysMap = useMemo(() => {
-    const map = new Map<string, Key>();
-    for (const k of keysList) {
-      if (k && k.id) {
-        map.set(k.id, k);
-      }
-    }
-    return map;
-  }, [keysList]);
+  // Listen to text selection to pause auto-refresh
+  useEffect(() => {
+    const handleSelectionChange = () => {
+      const sel = window.getSelection();
+      const hasSelection = Boolean(sel && sel.toString().trim().length > 0);
+      setIsSelecting(hasSelection);
+    };
+    document.addEventListener('selectionchange', handleSelectionChange);
+    return () => {
+      document.removeEventListener('selectionchange', handleSelectionChange);
+    };
+  }, []);
 
-  // Determine if draft is dirty compared to applied filters
+  // Dirty state tracking (draft vs applied)
   const isDirty = useMemo(() => {
     return (
       draftFilters.from !== appliedFilters.from ||
@@ -107,140 +171,188 @@ export function RequestsPage({ api, refreshInterval, onDirtyChange }: RequestsPa
     );
   }, [draftFilters, appliedFilters]);
 
-  // Sync dirty flag to parent without object reference loop
   useEffect(() => {
     onDirtyChange(isDirty);
   }, [isDirty, onDirtyChange]);
 
-  // 1. Load keys authoritatively on mount for name-led key filter
+  // Keys Map for fast ID resolution
+  const keysMap = useMemo(() => {
+    const map = new Map<string, Key>();
+    for (const k of keysList) {
+      if (k && k.id) map.set(k.id, k);
+    }
+    return map;
+  }, [keysList]);
+
+  // 1. Initial metadata loading: Keys, Models, Facets
   useEffect(() => {
     let unmounted = false;
     const controller = new AbortController();
 
-    async function fetchKeys() {
+    async function loadMetadata() {
+      // Fetch /keys
       try {
-        const res = await api.request<{ items: Key[] }>('/keys', { signal: controller.signal });
+        const res = await api.request<{ items: Key[] }>('/keys?include_deleted=true', {
+          signal: controller.signal,
+        });
         if (!unmounted && res && Array.isArray(res.items)) {
           setKeysList(res.items);
         }
       } catch {
-        // Tolerated on keys fetch
+        /* tolerated */
       }
-    }
 
-    fetchKeys();
-    return () => {
-      unmounted = true;
-      controller.abort();
-    };
-  }, [api]);
-
-  // 2. Load models authoritatively via api.models()
-  useEffect(() => {
-    let unmounted = false;
-    const controller = new AbortController();
-
-    async function fetchModels() {
+      // Fetch api.models()
       try {
         const list = await api.models({ signal: controller.signal });
         if (!unmounted && Array.isArray(list)) {
-          setModelsList(list);
+          setAvailableModels(list);
         }
       } catch {
-        // Tolerated on models fetch
+        /* tolerated */
       }
+
+      // Fetch facets for model, key_id, provider, auth_index
+      const facetFields = ['model', 'key_id', 'provider', 'auth_index'] as const;
+      await Promise.all(
+        facetFields.map(async (field) => {
+          try {
+            const pageRes = await api.request<FacetPage>(
+              `/requests/facets?field=${field}`,
+              { signal: controller.signal }
+            );
+            if (!unmounted && pageRes && Array.isArray(pageRes.items)) {
+              if (field === 'model') setFacetModels(pageRes.items);
+              else if (field === 'key_id') setFacetKeys(pageRes.items);
+              else if (field === 'provider') setFacetProviders(pageRes.items);
+              else if (field === 'auth_index') setFacetAccounts(pageRes.items);
+            }
+          } catch {
+            /* tolerated */
+          }
+        })
+      );
     }
 
-    fetchModels();
+    loadMetadata();
     return () => {
       unmounted = true;
       controller.abort();
     };
   }, [api]);
 
-  // 3. Main Data Fetch Callback (Summary + Requests Page)
-  const fetchData = useCallback(
-    async (signal?: AbortSignal, currentFilters = appliedFilters, currentPage = page) => {
-      // If external signal is already aborted, return immediately
-      if (signal?.aborted) {
-        return;
-      }
+  // 2. Fetch RequestView (Single-flight abort + seq)
+  const fetchRequestView = useCallback(
+    async (
+      signal?: AbortSignal,
+      targetFilters = appliedFiltersRef.current,
+      targetView = viewRef.current,
+      targetPage = pageRef.current,
+      _isUserTriggered = false
+    ) => {
+      if (signal?.aborted) return;
 
-      // Abort any previous in-flight request
+      // Abort previous fetch
       if (activeAbortControllerRef.current) {
         activeAbortControllerRef.current.abort();
       }
       const localController = new AbortController();
       activeAbortControllerRef.current = localController;
 
-      // Link with external signal if provided
       let onAbort: (() => void) | undefined;
       if (signal) {
         onAbort = () => localController.abort();
         signal.addEventListener('abort', onAbort, { once: true });
       }
 
-      const generation = ++generationRef.current;
-      setLoading(true);
+      const seq = ++seqRef.current;
+      if (!viewDataRef.current) {
+        setLoading(true);
+      } else {
+        setIsRefreshing(true);
+      }
 
       try {
-        const queryStr = buildRequestsQueryParams(currentFilters, currentPage, 25);
-        const [sumRes, pageRes] = await Promise.all([
-          api.request<Summary>(`/summary?${queryStr}`, { signal: localController.signal }),
-          api.request<RequestPage>(`/requests?${queryStr}`, { signal: localController.signal }),
-        ]);
+        const queryStr = buildRequestViewParams(
+          targetFilters,
+          targetView,
+          targetPage,
+          25
+        );
+        const res = await api.request<RequestView>(`/requests/view?${queryStr}`, {
+          signal: localController.signal,
+        });
 
-        // Guard against stale responses or cancelled generations
-        if (generation !== generationRef.current || localController.signal.aborted) {
+        if (seq !== seqRef.current || localController.signal.aborted) {
           return;
         }
 
-        setSummary(sumRes);
-        setPageData(pageRes);
+        setViewData(res);
+        failureCountRef.current = 0;
         setQueryError(null);
+        setLastUpdated(new Date());
       } catch (err: unknown) {
-        if (generation !== generationRef.current || localController.signal.aborted) {
+        if (seq !== seqRef.current || localController.signal.aborted) {
           return;
         }
+        // Background refresh error retains old viewData! Does not pop toasts.
         setQueryError(errorMessage(err) || '加载请求数据失败');
+        failureCountRef.current++;
       } finally {
         if (signal && onAbort) {
           signal.removeEventListener('abort', onAbort);
         }
-        if (generation === generationRef.current) {
+        if (seq === seqRef.current) {
           setLoading(false);
+          setIsRefreshing(false);
           if (activeAbortControllerRef.current === localController) {
             activeAbortControllerRef.current = null;
           }
         }
       }
     },
-    [api, appliedFilters, page]
+    [api]
   );
 
-  // Polling via usePoll: automatically pauses when dirty, when modal is open, or refreshInterval <= 0
-  // usePoll triggers the single initial execution and handles loadData updates
-  const isPollingPaused = isDirty || activeDetailId !== null;
-  const loadData = useCallback(
-    async (signal: AbortSignal) => {
-      await fetchData(signal, appliedFilters, page);
-    },
-    [fetchData, appliedFilters, page]
-  );
-  usePoll(loadData, refreshInterval, isPollingPaused);
+  // 3. Polling via usePoll
+  // Dedicated poll interval (0 disables polling repeats, not initial load)
+  // Auto-refresh is paused when: page > 1, filters dirty, modal open, historical range, or text selected
+  const isDynamic = isDynamicRange(appliedFilters.to);
+  const isPollingPaused =
+    page !== 1 ||
+    isDirty ||
+    activeDetailId !== null ||
+    !isDynamic ||
+    isSelecting;
+
+  // Initial data load is independent of the timer. Resuming a paused timer
+  // must not start a second request alongside an explicit Query action.
+  useEffect(() => { void fetchRequestView(); }, [fetchRequestView]);
+  useEffect(() => {
+    if (pollInterval <= 0 || isPollingPaused) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      timer = setTimeout(async () => {
+        if (!document.hidden && !activeAbortControllerRef.current) {
+          await fetchRequestView();
+        }
+        if (!disposed) schedule();
+      }, Math.min(30000, pollInterval * 1000 * 2 ** Math.min(failureCountRef.current, 3)));
+    };
+    schedule();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [fetchRequestView, isPollingPaused, pollInterval]);
 
   // 4. Detail Fetch on demand
   const handleOpenDetail = useCallback(
     async (id: string) => {
-      // Synchronously assign ref to prevent fast promise / late writes race
       activeDetailIdRef.current = id;
       setActiveDetailId(id);
       setDetailData(null);
       setDetailError(null);
       setDetailLoading(true);
-      setDetailTab('summary');
 
-      // Abort any existing detail fetch
       if (detailAbortControllerRef.current) {
         detailAbortControllerRef.current.abort();
       }
@@ -248,11 +360,11 @@ export function RequestsPage({ api, refreshInterval, onDirtyChange }: RequestsPa
       detailAbortControllerRef.current = controller;
 
       try {
-        const res = await api.request<Detail>(`/requests/detail?id=${encodeURIComponent(id)}`, {
-          signal: controller.signal,
-        });
+        const res = await api.request<Detail>(
+          `/requests/detail?id=${encodeURIComponent(id)}`,
+          { signal: controller.signal }
+        );
 
-        // If modal was closed while request was in-flight, discard and do not reopen
         if (activeDetailIdRef.current !== id || controller.signal.aborted) {
           return;
         }
@@ -273,7 +385,6 @@ export function RequestsPage({ api, refreshInterval, onDirtyChange }: RequestsPa
   );
 
   const handleCloseDetail = useCallback(() => {
-    // Synchronously clear ref so any late in-flight resolution cannot write or reopen
     activeDetailIdRef.current = null;
     if (detailAbortControllerRef.current) {
       detailAbortControllerRef.current.abort();
@@ -285,699 +396,346 @@ export function RequestsPage({ api, refreshInterval, onDirtyChange }: RequestsPa
     setDetailLoading(false);
   }, []);
 
-  // Filter Presets Click Handlers
-  const applyPreset = useCallback((targetPreset: PresetRange) => {
-    setPreset(targetPreset);
-    if (targetPreset === 'today') {
-      const bounds = getTodayPresetRange();
-      setDraftFilters((prev) => ({ ...prev, from: bounds.from, to: bounds.to }));
-    } else if (targetPreset === 'last7days') {
-      const bounds = getLast7DaysPresetRange();
+  // 5. Filter Actions
+  const handlePresetChange = useCallback((nextPreset: PresetRange) => {
+    setPreset(nextPreset);
+    if (nextPreset !== 'custom') {
+      const bounds = getPresetRange(nextPreset);
       setDraftFilters((prev) => ({ ...prev, from: bounds.from, to: bounds.to }));
     }
   }, []);
 
-  // Form submit: apply draft, reset page to 1, clear dirty
-  const handleQuerySubmit = useCallback(
-    (e: React.FormEvent) => {
-      e.preventDefault();
-      setAppliedFilters({ ...draftFilters });
+  const handleResetFilters = useCallback(() => {
+    const todayBounds = getPresetRange('today');
+    setPreset('today');
+    setDraftFilters({
+      from: todayBounds.from,
+      to: todayBounds.to,
+      key_id: '',
+      model: '',
+      provider: '',
+      auth_index: '',
+      status: '',
+    });
+  }, []);
+
+  const handleApplyFilters = useCallback(() => {
+    setAppliedFilters({ ...draftFilters });
+    setPage(1);
+    fetchRequestView(undefined, draftFilters, view, 1, true);
+  }, [draftFilters, view, fetchRequestView]);
+
+  const handleViewChange = useCallback(
+    (nextView: ViewTab) => {
+      setView(nextView);
       setPage(1);
+      fetchRequestView(undefined, appliedFilters, nextView, 1, true);
     },
-    [draftFilters]
+    [appliedFilters, fetchRequestView]
   );
 
-  // Corrective action: snap to whole UTC dates upon query error
+  const handlePageChange = useCallback(
+    (newPage: number) => {
+      if (newPage >= 1) {
+        setPage(newPage);
+        fetchRequestView(undefined, appliedFilters, view, newPage, true);
+      }
+    },
+    [appliedFilters, view, fetchRequestView]
+  );
+
+  const handleManualRefresh = useCallback(() => {
+    fetchRequestView(undefined, appliedFilters, view, page, true);
+  }, [appliedFilters, view, page, fetchRequestView]);
+
   const handleCorrectiveWholeDate = useCallback(() => {
     const snapped = snapToWholeDateRange(draftFilters.from, draftFilters.to);
-    setDraftFilters((prev) => ({ ...prev, from: snapped.from, to: snapped.to }));
-    setAppliedFilters((prev) => ({ ...prev, from: snapped.from, to: snapped.to }));
+    const correctedDraft = { ...draftFilters, from: snapped.from, to: snapped.to };
+    setDraftFilters(correctedDraft);
+    setAppliedFilters(correctedDraft);
     setPage(1);
     setPreset('custom');
-  }, [draftFilters]);
+    fetchRequestView(undefined, correctedDraft, view, 1, true);
+  }, [draftFilters, view, fetchRequestView]);
 
-  // Pagination Next/Prev: preserves current applied filters
-  const handlePageChange = useCallback((newPage: number) => {
-    if (newPage >= 1) {
-      setPage(newPage);
-    }
-  }, []);
-
-  // Copy Key ID with inline notification (no alert/confirm)
+  // Copy Key ID with inline notification
   const handleCopyKey = useCallback(async (fullId: string) => {
     try {
       if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
       await navigator.clipboard.writeText(fullId);
-      setActionNotice({ tone: 'success', text: `已复制完整 Key ID: ${fullId.slice(0, 16)}…` });
+      setCopiedKeyNotice(`已复制完整 Key ID: ${fullId.slice(0, 16)}…`);
+      setTimeout(() => setCopiedKeyNotice(null), 3000);
     } catch {
-      setActionNotice({ tone: 'danger', text: '复制失败，请从 Key ID 提示中复制完整标识。' });
+      setCopiedKeyNotice('复制失败，请从 Key ID 提示中复制完整标识。');
+      setTimeout(() => setCopiedKeyNotice(null), 3000);
     }
   }, []);
 
-  // Copy JSON body with inline notification
-  const handleCopyJson = useCallback(async (text: string) => {
-    try {
-      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
-      await navigator.clipboard.writeText(text);
-      setActionNotice({ tone: 'success', text: '已复制请求 JSON 到剪贴板' });
-    } catch {
-      setActionNotice({ tone: 'danger', text: '复制 JSON 失败，请手动选取复制。' });
-    }
-  }, []);
+  // Deduplicate Models: availableModels + facetModels
+  const modelOptions = useMemo<SelectOption[]>(() => {
+    const opts: SelectOption[] = [{ value: '', label: '全部模型' }];
+    const seen = new Set<string>();
 
-  // Key filter select options
-  const keyOptions = useMemo(() => {
-    const opts: Array<{ value: string; label: string }> = [{ value: '', label: '全部 Key' }];
+    for (const m of availableModels) {
+      if (m.id && !seen.has(m.id)) {
+        seen.add(m.id);
+        opts.push({ value: m.id, label: m.id });
+      }
+    }
+
+    for (const f of facetModels) {
+      if (f.value && !seen.has(f.value)) {
+        seen.add(f.value);
+        opts.push({
+          value: f.value,
+          label: f.label ? f.label : `${f.value} (历史)`,
+        });
+      }
+    }
+
+    if (draftFilters.model && !seen.has(draftFilters.model)) {
+      opts.push({
+        value: draftFilters.model,
+        label: `${draftFilters.model} (自定义)`,
+      });
+    }
+
+    return opts;
+  }, [availableModels, facetModels, draftFilters.model]);
+
+  // Keys Options: /keys + facetKeys + deleted mark
+  const keyOptions = useMemo<SelectOption[]>(() => {
+    const opts: SelectOption[] = [{ value: '', label: '全部 Key' }];
+    const seen = new Set<string>();
+
     for (const k of keysList) {
-      const label = k.label ? k.label : k.id.length === 64 ? `${k.id.slice(0, 12)}…` : k.id;
-      opts.push({ value: k.id, label });
+      if (k && k.id && !seen.has(k.id)) {
+        seen.add(k.id);
+        const isDeleted = Boolean(k.deleted_at);
+        const namePart = k.label || (k.id.length === 64 ? `${k.id.slice(0, 12)}…` : k.id);
+        const label = isDeleted ? `${namePart} (已删除)` : namePart;
+        opts.push({ value: k.id, label });
+      }
     }
-    // If draft contains an unknown key_id, preserve it in options
-    if (draftFilters.key_id && !opts.some((o) => o.value === draftFilters.key_id)) {
+
+    for (const f of facetKeys) {
+      if (f.value && !seen.has(f.value)) {
+        seen.add(f.value);
+        const label = f.label
+          ? f.label
+          : f.value.length === 64
+          ? `${f.value.slice(0, 12)}…`
+          : f.value;
+        opts.push({ value: f.value, label });
+      }
+    }
+
+    if (draftFilters.key_id && !seen.has(draftFilters.key_id)) {
       const kId = draftFilters.key_id;
       opts.push({
         value: kId,
         label: kId.length === 64 ? `未知 Key (${kId.slice(0, 12)}…)` : `未知 Key (${kId})`,
       });
     }
-    return opts;
-  }, [keysList, draftFilters.key_id]);
 
-  // Distinct list of models for datalist suggestions
-  const modelSuggestions = useMemo(() => {
-    const set = new Set<string>();
-    for (const m of modelsList) {
-      if (m.id) set.add(m.id);
-    }
-    if (pageData && Array.isArray(pageData.items)) {
-      for (const item of pageData.items) {
-        if (item.model) set.add(item.model);
+    return opts;
+  }, [keysList, facetKeys, draftFilters.key_id]);
+
+  // Provider Options
+  const providerOptions = useMemo<SelectOption[]>(() => {
+    const opts: SelectOption[] = [{ value: '', label: '全部提供商' }];
+    const seen = new Set<string>();
+
+    for (const p of facetProviders) {
+      if (p.value && !seen.has(p.value)) {
+        seen.add(p.value);
+        opts.push({ value: p.value, label: p.label || p.value });
       }
     }
-    return Array.from(set).sort();
-  }, [modelsList, pageData]);
 
-  // Trend chart SVG coordinates calculation
-  const buckets = summary?.buckets || [];
-  const maxRequests = Math.max(1, ...buckets.map((b) => b.requests || 0));
+    if (draftFilters.provider && !seen.has(draftFilters.provider)) {
+      opts.push({ value: draftFilters.provider, label: draftFilters.provider });
+    }
 
-  const trendPoints = useMemo(() => {
-    if (!buckets.length) return { requests: '', failures: '' };
-    const len = buckets.length;
-    const reqPts: string[] = [];
-    const failPts: string[] = [];
+    return opts;
+  }, [facetProviders, draftFilters.provider]);
 
-    buckets.forEach((b, i) => {
-      const x = 10 + (i * 980) / Math.max(1, len - 1);
-      const reqY = 130 - ((b.requests || 0) * 120) / maxRequests;
-      const failY = 130 - ((b.failures || 0) * 120) / maxRequests;
-      reqPts.push(`${x.toFixed(1)},${reqY.toFixed(1)}`);
-      failPts.push(`${x.toFixed(1)},${failY.toFixed(1)}`);
-    });
+  // Account Options
+  const accountOptions = useMemo<SelectOption[]>(() => {
+    const opts: SelectOption[] = [{ value: '', label: '全部账户' }];
+    const seen = new Set<string>();
 
-    return {
-      requests: reqPts.join(' '),
-      failures: failPts.join(' '),
-    };
-  }, [buckets, maxRequests]);
+    for (const a of facetAccounts) {
+      if (a.value && !seen.has(a.value)) {
+        seen.add(a.value);
+        opts.push({ value: a.value, label: a.label || a.value });
+      }
+    }
 
-  const timeRangeLabel = useMemo(() => {
-    if (!buckets.length) return '暂无趋势数据';
-    const first = buckets[0].time;
-    const last = buckets[buckets.length - 1].time;
-    return `${first} — ${last} · 请求峰值 ${maxRequests} · 深线：请求 / 红线：失败`;
-  }, [buckets, maxRequests]);
+    if (draftFilters.auth_index && !seen.has(draftFilters.auth_index)) {
+      opts.push({ value: draftFilters.auth_index, label: draftFilters.auth_index });
+    }
 
-  const failureRate = useMemo(() => {
-    if (!summary || !summary.requests) return '0%';
-    const rate = ((summary.failures / summary.requests) * 100).toFixed(1);
-    return `${rate}% 失败率`;
-  }, [summary]);
+    return opts;
+  }, [facetAccounts, draftFilters.auth_index]);
+
+  // Check if historical error
+  const isDateError = isHistoricalDateQueryError(
+    queryError,
+    appliedFilters.from,
+    appliedFilters.to
+  );
 
   return (
-    <div className="requests-page">
-      {/* Action Notification */}
-      {actionNotice && (
+    <div className="requests-page" data-testid="requests-page">
+      {/* 1. Header with Title, Polling interval, and Manual refresh */}
+      <header className="requests-header">
+        <div className="requests-title-group">
+          <h1 className="requests-title">请求日志</h1>
+          <span className="requests-title-hint">
+            {lastUpdated
+              ? `更新于 ${lastUpdated.toTimeString().slice(0, 8)}`
+              : '正在加载...'}
+          </span>
+          {isRefreshing && (
+            <span className="requests-refreshing-badge" aria-label="后台更新中">
+              更新中...
+            </span>
+          )}
+        </div>
+
+        <div className="requests-header-controls">
+          {/* Pause reason hint */}
+          {isPollingPaused && pollInterval > 0 && (
+            <span className="requests-paused-hint">
+              {page !== 1
+                ? '分页浏览中，已暂停自动刷新'
+                : isDirty
+                ? '筛选未应用，已暂停自动刷新'
+                : activeDetailId !== null
+                ? '详情查看中，已暂停自动刷新'
+                : !isDynamic
+                ? '历史区间已暂停自动刷新'
+                : isSelecting
+                ? '文本选择中，已暂停自动刷新'
+                : '自动刷新已暂停'}
+            </span>
+          )}
+
+          {/* Local poll interval select */}
+          <div className="requests-poll-selector">
+            <Select
+              value={String(pollInterval)}
+              onChange={(val) => setPollInterval(Number(val))}
+              options={pollOptions}
+              aria-label="自动刷新周期"
+              className="cpa-select-compact"
+            />
+          </div>
+
+          {/* Manual Refresh Button */}
+          <Button
+            variant="secondary"
+            className="cpa-btn-sm"
+            onClick={handleManualRefresh}
+            loading={loading && !viewData}
+            title="立即手动刷新当前视图"
+          >
+            刷新
+          </Button>
+        </div>
+      </header>
+
+      {/* Copy notification */}
+      {copiedKeyNotice && (
         <div className="requests-action-notice">
-          <Notice tone={actionNotice.tone}>{actionNotice.text}</Notice>
+          <Notice tone="info">{copiedKeyNotice}</Notice>
         </div>
       )}
 
-      {/* Query Error Notice with Conditional Whole-Date Corrective Action or Retry */}
+      {/* Query Error Notice */}
       {queryError && (
-        <Notice tone="danger">
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+        <div className="requests-error-notice">
+          <Notice tone="danger">
             <span>{queryError}</span>
-            {isHistoricalDateQueryError(queryError, appliedFilters.from, appliedFilters.to) ? (
-              <Button variant="secondary" onClick={handleCorrectiveWholeDate}>
+            {isDateError ? (
+              <Button
+                variant="secondary"
+                className="cpa-btn-sm"
+                style={{ marginLeft: 12 }}
+                onClick={handleCorrectiveWholeDate}
+              >
                 修正为整日 UTC 范围
               </Button>
             ) : (
-              <Button variant="secondary" onClick={() => fetchData(undefined, appliedFilters, page)}>
+              <Button
+                variant="secondary"
+                className="cpa-btn-sm"
+                style={{ marginLeft: 12 }}
+                onClick={handleManualRefresh}
+              >
                 重试
               </Button>
             )}
-          </div>
-        </Notice>
+          </Notice>
+        </div>
       )}
 
-      {/* 1. Header & 4 Compact CPA Metrics Cards */}
-      <div className="requests-header">
-        <div className="requests-title-group">
-          <h2 className="requests-title">请求日志</h2>
-          <span className="requests-title-hint">
-            模型执行记录 · 按实际计费规则核算
-          </span>
-        </div>
-      </div>
+      {/* 2. Flat Filters */}
+      <RequestsFilters
+        draft={draftFilters}
+        onDraftChange={setDraftFilters}
+        onApply={handleApplyFilters}
+        onReset={handleResetFilters}
+        isDirty={isDirty}
+        loading={loading && !viewData}
+        keyOptions={keyOptions}
+        modelOptions={modelOptions}
+        providerOptions={providerOptions}
+        accountOptions={accountOptions}
+        preset={preset}
+        onPresetChange={handlePresetChange}
+        onFacetSearch={searchFacet}
+      />
 
-      <div className="requests-metrics-grid">
-        <div className="requests-metric-card">
-          <span className="requests-metric-label">总费用</span>
-          <span className="requests-metric-value">
-            ${formatCostExact(summary?.cost_micro_usd ?? 0)}
-          </span>
-          <span className="requests-metric-sub">按实际定价核算</span>
-        </div>
+      {/* 3. Metrics (6 cards + coverage) */}
+      <RequestsMetrics
+        summary={viewData?.summary ?? null}
+        coverage={viewData?.coverage}
+        loading={loading && !viewData}
+      />
 
-        <div className="requests-metric-card">
-          <span className="requests-metric-label">Token 消耗</span>
-          <span className="requests-metric-value">
-            {(summary?.tokens ?? 0).toLocaleString()}
-          </span>
-          <span className="requests-metric-sub">输入 + 输出合计</span>
-        </div>
+      {/* 4. Trend Chart (fixed height ~180px, no jitter) */}
+      <RequestsTrend
+        series={viewData?.series}
+        loading={loading && !viewData}
+      />
 
-        <div className="requests-metric-card">
-          <span className="requests-metric-label">执行次数</span>
-          <span className="requests-metric-value">
-            {(summary?.requests ?? 0).toLocaleString()}
-          </span>
-          <span className="requests-metric-sub">模型执行记录（非 HTTP 原始连接）</span>
-        </div>
+      {/* 5. Table Area (5 views tabs + records/groups table + pagination) */}
+      <RequestsTable
+        view={view}
+        onViewChange={handleViewChange}
+        records={viewData?.records}
+        groups={viewData?.groups}
+        page={page}
+        hasMore={Boolean(viewData?.pagination?.has_more)}
+        onPageChange={handlePageChange}
+        keysMap={keysMap}
+        onOpenDetail={handleOpenDetail}
+        onCopyKey={handleCopyKey}
+        loading={loading && !viewData}
+      />
 
-        <div className="requests-metric-card">
-          <span className="requests-metric-label">失败次数</span>
-          <span className="requests-metric-value">
-            {(summary?.failures ?? 0).toLocaleString()}
-          </span>
-          <span className="requests-metric-sub">{failureRate}</span>
-        </div>
-      </div>
-
-      {/* 2. SVG Request / Failure Trend Chart */}
-      <div className="requests-trend-container">
-        <div className="requests-trend-header">
-          <div className="requests-trend-legend">
-            <span className="requests-legend-item">
-              <span className="requests-legend-color requests-line-color" />
-              请求 (深线)
-            </span>
-            <span className="requests-legend-item">
-              <span className="requests-legend-color failures-line-color" />
-              失败 (红线)
-            </span>
-            <span className="requests-trend-meta">
-              粒度：{summary?.granularity || 'day'} · UTC
-            </span>
-          </div>
-          <span className="requests-trend-meta">{timeRangeLabel}</span>
-        </div>
-
-        {buckets.length > 0 ? (
-          <svg
-            className="requests-trend-svg trend"
-            viewBox="0 0 1000 140"
-            role="img"
-            aria-label="请求与失败趋势"
-          >
-            <polyline className="request-line" points={trendPoints.requests} />
-            <polyline className="failure-line" points={trendPoints.failures} />
-          </svg>
-        ) : (
-          <div className="requests-trend-empty">暂无趋势数据</div>
-        )}
-      </div>
-
-      {/* 3. Task Header & Filters Form */}
-      <div className="requests-filters-card">
-        <form
-          id="filters"
-          className="requests-filters-form"
-          aria-label="筛选条件"
-          onSubmit={handleQuerySubmit}
-        >
-          {/* Preset Buttons */}
-          <div className="requests-presets-bar">
-            <span className="requests-preset-label">快速预设：</span>
-            <Button
-              variant={preset === 'today' ? 'primary' : 'ghost'}
-              onClick={() => applyPreset('today')}
-            >
-              今天 (UTC)
-            </Button>
-            <Button
-              variant={preset === 'last7days' ? 'primary' : 'ghost'}
-              onClick={() => applyPreset('last7days')}
-            >
-              最近 7 天 (UTC)
-            </Button>
-            <Button
-              variant={preset === 'custom' ? 'primary' : 'ghost'}
-              onClick={() => applyPreset('custom')}
-            >
-              自定义
-            </Button>
-          </div>
-
-          {/* Primary Filters Grid */}
-          <div className="requests-filter-grid">
-            <Field label="开始日期 (UTC)" htmlFor="from">
-              <Input
-                id="from"
-                name="from"
-                type="date"
-                value={draftFilters.from}
-                onChange={(e) => {
-                  setPreset('custom');
-                  setDraftFilters((prev) => ({ ...prev, from: e.target.value }));
-                }}
-              />
-            </Field>
-
-            <Field label="结束日期 (UTC，不含)" htmlFor="to" hint="留空：今天截止当前；历史范围截止明日 UTC 零点">
-              <Input
-                id="to"
-                name="to"
-                type="date"
-                value={draftFilters.to}
-                onChange={(e) => {
-                  setPreset('custom');
-                  setDraftFilters((prev) => ({ ...prev, to: e.target.value }));
-                }}
-              />
-            </Field>
-
-            <Field label="Key" htmlFor="key_id">
-              <Select
-                id="key_id"
-                aria-label="Key"
-                value={draftFilters.key_id}
-                onChange={(val) => setDraftFilters((prev) => ({ ...prev, key_id: val }))}
-                options={keyOptions}
-              />
-              <input type="hidden" name="key_id" value={draftFilters.key_id} />
-            </Field>
-
-            <Field label="模型" htmlFor="model">
-              <Input
-                id="model"
-                name="model"
-                list="requests-models-list"
-                placeholder="全部模型"
-                value={draftFilters.model}
-                onChange={(e) => setDraftFilters((prev) => ({ ...prev, model: e.target.value }))}
-              />
-              <datalist id="requests-models-list">
-                {modelSuggestions.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </datalist>
-            </Field>
-          </div>
-
-          {/* Collapsible Advanced Filters (Provider / AuthIndex / Status) */}
-          <details className="requests-filter-advanced">
-            <summary>高级筛选（提供商 / 账户索引 / 状态）</summary>
-            <div className="requests-filter-advanced-grid">
-              <Field label="提供商" htmlFor="provider">
-                <Input
-                  id="provider"
-                  name="provider"
-                  placeholder="全部提供商"
-                  value={draftFilters.provider}
-                  onChange={(e) => setDraftFilters((prev) => ({ ...prev, provider: e.target.value }))}
-                />
-              </Field>
-
-              <Field label="账户索引" htmlFor="auth_index">
-                <Input
-                  id="auth_index"
-                  name="auth_index"
-                  placeholder="全部账户"
-                  value={draftFilters.auth_index}
-                  onChange={(e) => setDraftFilters((prev) => ({ ...prev, auth_index: e.target.value }))}
-                />
-              </Field>
-
-              <Field label="状态" htmlFor="status">
-                <Select
-                  id="status"
-                  aria-label="状态"
-                  value={draftFilters.status}
-                  onChange={(val) => setDraftFilters((prev) => ({ ...prev, status: val as FilterState['status'] }))}
-                  options={[
-                    { value: '', label: '全部状态' },
-                    { value: 'success', label: '成功' },
-                    { value: 'failed', label: '失败' },
-                  ]}
-                />
-                <input type="hidden" name="status" value={draftFilters.status} />
-              </Field>
-            </div>
-          </details>
-
-          {/* Single Clear Query Button */}
-          <div className="requests-filter-actions">
-            <Button type="submit" variant="primary" loading={loading}>
-              查询
-            </Button>
-          </div>
-        </form>
-      </div>
-
-      {/* 4. Requests Table */}
-      <div className="requests-table-section">
-        <div className="table-wrap">
-          <table className="requests-table">
-            <thead>
-              <tr>
-                <th scope="col">时间 / 模型</th>
-                <th scope="col">Key</th>
-                <th scope="col">提供商 / 账户</th>
-                <th scope="col">状态</th>
-                <th scope="col">延迟 / Token</th>
-                <th scope="col">费用</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pageData && pageData.items && pageData.items.length > 0 ? (
-                pageData.items.map((record) => {
-                  const keyDisplay = resolveKeyDisplay(record.key_id, keysMap);
-                  const priceSourceInfo = formatPriceSource(record.price_source, record.rule_id);
-                  const isUnclassified = record.accounting_quality === 'unclassified';
-                  const formattedTime = formatDateTime(record.time) || record.time;
-
-                  return (
-                    <tr key={record.id}>
-                      {/* Time & Model Button */}
-                      <td>
-                        <div title={record.time} className="requests-time-cell">
-                          {formattedTime}
-                        </div>
-                        <Button
-                          variant="ghost"
-                          className="requests-model-btn"
-                          onClick={() => handleOpenDetail(record.id)}
-                          title={`查看 ${record.model} 详情`}
-                        >
-                          {record.model}
-                        </Button>
-                      </td>
-
-                      {/* Key Name / Truncated ID fallback */}
-                      <td>
-                        <div className="requests-key-cell">
-                          <span
-                            className="requests-key-label"
-                            title={keyDisplay.fullId}
-                          >
-                            {keyDisplay.label}
-                          </span>
-                          {keyDisplay.isFallback && record.key_id ? (
-                            <Button
-                              variant="ghost"
-                              className="requests-copy-btn"
-                              aria-label="复制完整 Key ID"
-                              onClick={() => handleCopyKey(record.key_id)}
-                            >
-                              复制
-                            </Button>
-                          ) : null}
-                        </div>
-                      </td>
-
-                      {/* Provider & Auth Index */}
-                      <td>
-                        {record.provider || '—'} / {record.auth_index || '—'}
-                      </td>
-
-                      {/* Status */}
-                      <td>
-                        <Badge tone={record.failed ? 'danger' : 'success'}>
-                          {record.failed ? '失败' : '成功'} {record.status_code || ''}
-                        </Badge>
-                        {record.stream && (
-                          <span style={{ marginLeft: 4 }}>
-                            <Badge tone="neutral">流式</Badge>
-                          </span>
-                        )}
-                      </td>
-
-                      {/* Latency & Tokens */}
-                      <td>
-                        <div className="requests-tokens-cell">
-                          <span>
-                            {record.latency_ms}ms / {(record.tokens?.total ?? 0).toLocaleString()} Token
-                          </span>
-                          {isUnclassified && (
-                            <small className="requests-unclassified-tag muted" role="status">
-                              Token 口径未分类
-                            </small>
-                          )}
-                        </div>
-                      </td>
-
-                      {/* Cost & Price Source */}
-                      <td>
-                        <div className="requests-cost-cell">
-                          <span>${formatCostExact(record.cost_micro_usd)}</span>
-                          <span className="requests-source-tag muted">
-                            {priceSourceInfo.isWarning ? (
-                              <Badge tone="warning">未定价（0）</Badge>
-                            ) : (
-                              priceSourceInfo.label
-                            )}
-                          </span>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
-              ) : (
-                <tr>
-                  <td colSpan={6}>
-                    <EmptyState
-                      title="暂无请求记录"
-                      description="当前时间范围或筛选条件下无匹配的调用记录"
-                    />
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        {/* 5. Pagination */}
-        <div className="requests-pagination">
-          <span className="requests-page-indicator">第 {page} 页</span>
-          <div className="requests-page-controls">
-            <Button
-              variant="secondary"
-              disabled={page <= 1 || loading}
-              onClick={() => handlePageChange(page - 1)}
-            >
-              上一页
-            </Button>
-            <Button
-              variant="secondary"
-              disabled={!pageData?.has_more || loading}
-              onClick={() => handlePageChange(page + 1)}
-            >
-              下一页
-            </Button>
-          </div>
-        </div>
-      </div>
-
-      {/* 6. Detail Modal (On-Demand) */}
-      {activeDetailId && (
-        <Modal title="请求详情" onClose={handleCloseDetail} size="lg">
-          {detailLoading && <div>正在加载详情...</div>}
-
-          {detailError && <Notice tone="danger">{detailError}</Notice>}
-
-          {detailData && (
-            <div className="requests-detail-content">
-              {/* Capture Status Banner */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontSize: 13, fontWeight: 500 }}>采集状态：</span>
-                <Badge
-                  tone={
-                    detailData.capture_status === 'available' || detailData.capture_status === 'redacted'
-                      ? 'success'
-                      : detailData.capture_status === 'disabled' || detailData.capture_status === 'expired'
-                      ? 'warning'
-                      : 'neutral'
-                  }
-                >
-                  {CAPTURE_STATUS_LABELS[detailData.capture_status] || detailData.capture_status}
-                </Badge>
-              </div>
-
-              {/* Tabs Navigation */}
-              <div className="requests-tabs-nav" role="tablist">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={detailTab === 'summary'}
-                  className={`requests-tab-btn ${detailTab === 'summary' ? 'is-active' : ''}`}
-                  onClick={() => setDetailTab('summary')}
-                >
-                  概览
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={detailTab === 'headers'}
-                  className={`requests-tab-btn ${detailTab === 'headers' ? 'is-active' : ''}`}
-                  onClick={() => setDetailTab('headers')}
-                >
-                  请求头
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={detailTab === 'body'}
-                  className={`requests-tab-btn ${detailTab === 'body' ? 'is-active' : ''}`}
-                  onClick={() => setDetailTab('body')}
-                >
-                  请求体 (JSON)
-                </button>
-              </div>
-
-              {/* Tab 1: Summary */}
-              {detailTab === 'summary' && (
-                <div className="requests-summary-grid">
-                  <div className="requests-summary-item">
-                    <span className="requests-summary-item-label">请求 ID</span>
-                    <span className="requests-summary-item-val">{detailData.record.id}</span>
-                  </div>
-                  <div className="requests-summary-item">
-                    <span className="requests-summary-item-label">Trace ID</span>
-                    <span className="requests-summary-item-val">{detailData.record.trace_id || '—'}</span>
-                  </div>
-                  <div className="requests-summary-item">
-                    <span className="requests-summary-item-label">模型</span>
-                    <span className="requests-summary-item-val">{detailData.record.model}</span>
-                  </div>
-                  <div className="requests-summary-item">
-                    <span className="requests-summary-item-label">提供商 / 账户</span>
-                    <span className="requests-summary-item-val">
-                      {detailData.record.provider || '—'} / {detailData.record.auth_index || '—'}
-                    </span>
-                  </div>
-                  <div className="requests-summary-item">
-                    <span className="requests-summary-item-label">状态</span>
-                    <span className="requests-summary-item-val">
-                      {detailData.record.failed ? '失败' : '成功'} ({detailData.record.status_code || '—'})
-                    </span>
-                  </div>
-                  <div className="requests-summary-item">
-                    <span className="requests-summary-item-label">耗时</span>
-                    <span className="requests-summary-item-val">
-                      {detailData.record.latency_ms}ms
-                      {detailData.record.ttft_ms > 0 ? ` (首字延迟 TTFT ${detailData.record.ttft_ms}ms)` : ''}
-                    </span>
-                  </div>
-                  <div className="requests-summary-item">
-                    <span className="requests-summary-item-label">费用</span>
-                    <span className="requests-summary-item-val">
-                      ${formatCostExact(detailData.record.cost_micro_usd)}
-                      {detailData.record.price_source === 'unpriced' ? ' (未定价按 0)' : ` · ${detailData.record.price_source}`}
-                    </span>
-                  </div>
-                  <div className="requests-summary-item">
-                    <span className="requests-summary-item-label">Token 构成</span>
-                    <span className="requests-summary-item-val">
-                      输入 {detailData.record.tokens?.input ?? 0} / 输出 {detailData.record.tokens?.output ?? 0} / 总计 {detailData.record.tokens?.total ?? 0}
-                    </span>
-                  </div>
-
-                  {detailData.record.price_source === 'unpriced' && (
-                    <div style={{ gridColumn: '1 / -1' }}>
-                      <Notice tone="warning">当前模型未配置价格规则，费用按 $0 核算</Notice>
-                    </div>
-                  )}
-
-                  {detailData.record.accounting_quality === 'unclassified' && (
-                    <div style={{ gridColumn: '1 / -1' }}>
-                      <Notice tone="warning">Token 口径未分类：该模型返回的 Usage 未能映射至标准分类</Notice>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Tab 2: Redacted Headers */}
-              {detailTab === 'headers' && (
-                <div>
-                  {Object.keys(detailData.headers || {}).length > 0 ? (
-                    <table className="requests-headers-table">
-                      <thead>
-                        <tr>
-                          <th>Header 名称（已脱敏）</th>
-                          <th>值</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {redactHeaders(detailData.headers).map((h) => (
-                          <tr key={h.name}>
-                            <td>{h.name}</td>
-                            <td>{h.value}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  ) : (
-                    <EmptyState title="无请求头数据" />
-                  )}
-                </div>
-              )}
-
-              {/* Tab 3: Pretty JSON Body */}
-              {detailTab === 'body' && (
-                <div>
-                  {detailData.body !== null && detailData.body !== undefined ? (
-                    <div>
-                      <pre className="requests-json-body">
-                        {JSON.stringify(redactBody(detailData.body), null, 2)}
-                      </pre>
-                      <div className="requests-json-actions">
-                        <Button
-                          variant="secondary"
-                          onClick={() =>
-                            handleCopyJson(JSON.stringify(redactBody(detailData.body), null, 2))
-                          }
-                        >
-                          复制 JSON
-                        </Button>
-                      </div>
-                    </div>
-                  ) : (
-                    <Notice tone="info">
-                      无可用正文（采集状态：{CAPTURE_STATUS_LABELS[detailData.capture_status] || detailData.capture_status}）
-                    </Notice>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </Modal>
+      {/* 6. Detail Modal */}
+      {activeDetailId !== null && (
+        <RequestsDetailModal
+          detail={detailData}
+          loading={detailLoading}
+          error={detailError}
+          onClose={handleCloseDetail}
+          keysMap={keysMap}
+        />
       )}
     </div>
   );
 }
-
-export default RequestsPage;

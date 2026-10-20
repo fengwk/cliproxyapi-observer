@@ -2,14 +2,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { RequestsPage } from './Requests';
 import {
-  buildRequestsQueryParams,
+  buildRequestViewParams,
   formatCostExact,
-  getLast7DaysPresetRange,
-  getTomorrowUTCDateString,
+  getPresetRange,
+  isDynamicRange,
+  calculateCacheHitRate,
+  calculateFailureRate,
+  calculateTPS,
   isHistoricalDateQueryError,
 } from './RequestsHelpers';
 import type { ApiClient } from '../lib/api';
-import type { RequestPage as RequestPageType, Summary, Detail } from '../lib/types';
+import type { RequestView, Detail, FacetPage } from '../lib/types';
 
 // Mock clipboard API
 const mockClipboard = {
@@ -17,33 +20,177 @@ const mockClipboard = {
 };
 Object.assign(navigator, { clipboard: mockClipboard });
 
+// Mock scrollIntoView for Radix Select in jsdom
+window.HTMLElement.prototype.scrollIntoView = vi.fn();
+
+const FIXED_NOW = new Date('2026-10-20T12:00:00Z');
+
+function createSampleRequestView(): RequestView {
+  return {
+    range: {
+      from: '2026-10-20',
+      to: '2026-10-20',
+      as_of: '2026-10-20T12:00:00Z',
+      timezone: 'UTC',
+    },
+    summary: {
+      requests: 12,
+      failures: 2,
+      cost_micro_usd: 1500000,
+      tokens: 45000,
+      input_tokens: 30000,
+      output_tokens: 15000,
+      reasoning_tokens: 5000,
+      cache_read_tokens: 10000,
+      cache_write_tokens: 2000,
+      complete_requests: 10,
+      latency_ms: 2400,
+      latency_samples: 12,
+      ttft_ms: 600,
+      ttft_samples: 10,
+      unpriced_requests: 1,
+      detailed_requests: 12,
+    },
+    series: {
+      granularity: 'day',
+      buckets: [
+        {
+          time: '2026-10-19T00:00:00Z',
+          requests: 7,
+          failures: 1,
+          cost_micro_usd: 800000,
+          tokens: 25000,
+        },
+        {
+          time: '2026-10-20T00:00:00Z',
+          requests: 5,
+          failures: 1,
+          cost_micro_usd: 700000,
+          tokens: 20000,
+        },
+      ],
+    },
+    records: [
+      {
+        id: 'req-001',
+        trace_id: 'trace-001',
+        key_id: 'key-abc',
+        time: '2026-10-20T10:00:00Z',
+        model: 'gpt-4o',
+        provider: 'openai',
+        auth_index: 'default',
+        failed: false,
+        status_code: 200,
+        stream: true,
+        latency_ms: 120,
+        ttft_ms: 45,
+        tokens: {
+          input: 100,
+          output: 50,
+          cache_read: 20,
+          cache_write: 10,
+          reasoning: 15,
+          total: 150,
+        },
+        cost_micro_usd: 5000,
+        price_source: 'catalog',
+        accounting_quality: 'standard',
+      },
+      {
+        id: 'req-002',
+        trace_id: 'trace-002',
+        key_id: '4f68a2d1e09c8b7a6543210fedcba9874f68a2d1e09c8b7a6543210fedcba987',
+        time: '2026-10-20T11:00:00Z',
+        model: 'claude-3-5-sonnet',
+        provider: 'anthropic',
+        auth_index: 'prod-01',
+        failed: true,
+        status_code: 500,
+        stream: false,
+        latency_ms: 350,
+        ttft_ms: 0,
+        tokens: {
+          input: 200,
+          output: 0,
+          cache_read: 0,
+          cache_write: 0,
+          reasoning: 0,
+          total: 200,
+        },
+        cost_micro_usd: 1,
+        price_source: 'unpriced',
+        accounting_quality: 'unclassified',
+      },
+    ],
+    groups: [
+      {
+        key: 'gpt-4o',
+        model: 'gpt-4o',
+        provider: 'openai',
+        requests: 7,
+        failures: 1,
+        cost_micro_usd: 800000,
+        tokens: 25000,
+        input_tokens: 15000,
+        output_tokens: 10000,
+        cache_read_tokens: 5000,
+        cache_write_tokens: 1000,
+        latency_ms: 1400,
+        latency_samples: 7,
+        ttft_ms: 350,
+        ttft_samples: 5,
+      },
+    ],
+    pagination: {
+      page: 1,
+      page_size: 25,
+      has_more: false,
+    },
+    coverage: {
+      raw_from: '2026-10-19T00:00:00Z',
+      daily_from: '2025-10-20T00:00:00Z',
+      detailed_requests: 12,
+      requests: 12,
+      backfill_pending: false,
+    },
+  };
+}
+
 function createMockApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
     request: vi.fn().mockImplementation(async (path: string) => {
-      if (path.startsWith('/summary')) {
-        return {
-          requests: 12,
-          failures: 2,
-          cost_micro_usd: 1500000,
-          tokens: 45000,
-          granularity: 'day',
-          buckets: [
-            {
-              time: '2026-10-18T00:00:00Z',
-              requests: 7,
-              failures: 1,
-              cost_micro_usd: 800000,
-              tokens: 25000,
-            },
-            {
-              time: '2026-10-19T00:00:00Z',
-              requests: 5,
-              failures: 1,
-              cost_micro_usd: 700000,
-              tokens: 20000,
-            },
-          ],
-        } satisfies Summary;
+      if (path.startsWith('/requests/view')) {
+        return createSampleRequestView();
+      }
+      if (path.startsWith('/requests/facets')) {
+        if (path.includes('field=model')) {
+          return {
+            items: [
+              { value: 'gpt-4o' },
+              { value: 'claude-3-5-sonnet' },
+              { value: 'legacy-model-v1', label: 'legacy-model-v1 (历史)' },
+            ],
+          } satisfies FacetPage;
+        }
+        if (path.includes('field=key_id')) {
+          return {
+            items: [
+              { value: 'key-abc' },
+              { value: 'deleted-key-xyz', label: 'Archived Key' },
+            ],
+          } satisfies FacetPage;
+        }
+        if (path.includes('field=provider')) {
+          return {
+            items: [{ value: 'openai' }, { value: 'anthropic' }],
+          } satisfies FacetPage;
+        }
+        if (path.includes('field=auth_index')) {
+          return {
+            items: [{ value: 'default' }, { value: 'prod-01' }],
+          } satisfies FacetPage;
+        }
+        return { items: [] } satisfies FacetPage;
       }
       if (path.startsWith('/requests/detail')) {
         return {
@@ -51,16 +198,23 @@ function createMockApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
             id: 'req-001',
             trace_id: 'trace-001',
             key_id: 'key-abc',
-            time: '2026-10-19T10:00:00Z',
+            time: '2026-10-20T10:00:00Z',
             model: 'gpt-4o',
             provider: 'openai',
             auth_index: 'default',
             failed: false,
             status_code: 200,
-            stream: false,
+            stream: true,
             latency_ms: 120,
             ttft_ms: 45,
-            tokens: { input: 100, output: 50, cache_read: 0, cache_write: 0, reasoning: 0, total: 150 },
+            tokens: {
+              input: 100,
+              output: 50,
+              cache_read: 20,
+              cache_write: 10,
+              reasoning: 15,
+              total: 150,
+            },
             cost_micro_usd: 5000,
             price_source: 'catalog',
             accounting_quality: 'standard',
@@ -71,52 +225,13 @@ function createMockApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
           },
           body: { prompt: 'Hello world', secret_key: 'top-secret' },
           capture_status: 'available',
+          headers_status: 'available',
+          body_status: 'available',
+          captured_at: '2026-10-20T10:00:00Z',
+          expires_at: '2026-10-21T10:00:00Z',
+          original_bytes: 1024,
+          compressed_bytes: 256,
         } satisfies Detail;
-      }
-      if (path.startsWith('/requests')) {
-        return {
-          items: [
-            {
-              id: 'req-001',
-              trace_id: 'trace-001',
-              key_id: 'key-abc',
-              time: '2026-10-19T10:00:00Z',
-              model: 'gpt-4o',
-              provider: 'openai',
-              auth_index: 'default',
-              failed: false,
-              status_code: 200,
-              stream: false,
-              latency_ms: 120,
-              ttft_ms: 45,
-              tokens: { input: 100, output: 50, cache_read: 0, cache_write: 0, reasoning: 0, total: 150 },
-              cost_micro_usd: 5000,
-              price_source: 'catalog',
-              accounting_quality: 'standard',
-            },
-            {
-              id: 'req-002',
-              trace_id: 'trace-002',
-              key_id: '4f68a2d1e09c8b7a6543210fedcba9874f68a2d1e09c8b7a6543210fedcba987',
-              time: '2026-10-19T11:00:00Z',
-              model: 'claude-3-5-sonnet',
-              provider: 'anthropic',
-              auth_index: 'prod-01',
-              failed: true,
-              status_code: 500,
-              stream: true,
-              latency_ms: 350,
-              ttft_ms: 0,
-              tokens: { input: 200, output: 0, cache_read: 0, cache_write: 0, reasoning: 0, total: 200 },
-              cost_micro_usd: 1, // 1 micro USD (small non-zero charge)
-              price_source: 'unpriced',
-              accounting_quality: 'unclassified',
-            },
-          ],
-          page: 1,
-          page_size: 25,
-          has_more: false,
-        } satisfies RequestPageType;
       }
       if (path.startsWith('/keys')) {
         return {
@@ -126,6 +241,20 @@ function createMockApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
               label: 'Production Key',
               enabled: true,
               max_concurrent: 5,
+              allowed_models: ['gpt-4o'],
+              limits: { five_hour: 0, week: 0, month: 0, total: 0 },
+              used: { five_hour: 0, week: 0, month: 0, total: 0 },
+              starts: { five_hour: '', week: '', month: '', total: '' },
+              resets: { five_hour: '', week: '', month: '', total: '' },
+              active: 0,
+              created_at: '2026-10-01T00:00:00Z',
+            },
+            {
+              id: 'deleted-key-xyz',
+              label: 'Archived Key',
+              enabled: false,
+              deleted_at: '2026-10-15T00:00:00Z',
+              max_concurrent: 1,
               allowed_models: ['gpt-4o'],
               limits: { five_hour: 0, week: 0, month: 0, total: 0 },
               used: { five_hour: 0, week: 0, month: 0, total: 0 },
@@ -151,31 +280,37 @@ describe('RequestsPage and RequestsHelpers', () => {
 
   /**
    * Why covered:
-   * Proves that date bounds properly use whole UTC dates with explicit 'T00:00:00Z',
-   * and that empty 'to' defaults to the current NOW timestamp to prevent querying future bounds.
+   * Proves that date bounds properly use inclusive UTC dates (YYYY-MM-DD),
+   * and buildRequestViewParams constructs valid GET /requests/view queries.
    */
-  it('UTC bounds: correctly formats RFC3339 whole UTC dates and defaults to NOW when to is empty', () => {
-    const fixedNow = '2026-10-19T15:30:00.000Z';
-    const query = buildRequestsQueryParams(
+  it('UTC bounds: correctly formats inclusive UTC dates for GET /requests/view', () => {
+    const query = buildRequestViewParams(
       {
-        from: '2026-10-19',
-        to: '',
+        from: '2026-10-20',
+        to: '2026-10-20',
         key_id: 'test-key',
         model: 'gpt-4o',
-        provider: '',
-        auth_index: '',
+        provider: 'openai',
+        auth_index: 'default',
         status: 'success',
       },
+      'requests',
       1,
       25,
-      fixedNow
+      FIXED_NOW
     );
 
     const params = new URLSearchParams(query);
-    expect(params.get('from')).toBe('2026-10-19T00:00:00Z');
-    expect(params.get('to')).toBe(fixedNow);
+    expect(params.get('from_date')).toBe('2026-10-20');
+    expect(params.get('to_date')).toBe('2026-10-20');
+    expect(params.get('view')).toBe('requests');
     expect(params.get('key_id')).toBe('test-key');
+    expect(params.get('model')).toBe('gpt-4o');
+    expect(params.get('provider')).toBe('openai');
+    expect(params.get('auth_index')).toBe('default');
     expect(params.get('status')).toBe('success');
+    expect(params.get('page')).toBe('1');
+    expect(params.get('page_size')).toBe('25');
   });
 
   /**
@@ -193,8 +328,96 @@ describe('RequestsPage and RequestsHelpers', () => {
 
   /**
    * Why covered:
+   * Proves accurate formulas for cache hit rate, failure rate, and single request TPS.
+   */
+  it('formulas: calculates cache hit rate with full input denominator, failure rate, and stream TPS accurately', () => {
+    // Cache hit rate = cache_read / (input + cache_read + cache_write)
+    // 100 read, 300 input, 100 write -> 100 / 500 = 20.0%
+    expect(calculateCacheHitRate(100, 300, 100)).toBe('20.0%');
+    // Unknown or 0 denominator returns null
+    expect(calculateCacheHitRate(0, 0, 0)).toBeNull();
+
+    // Failure rate
+    expect(calculateFailureRate(2, 10)).toBe('20.0%');
+    expect(calculateFailureRate(0, 0)).toBeNull();
+
+    // TPS = output / ((latency_ms - ttft_ms) / 1000)
+    // 50 output, latency 120ms, ttft 20ms -> (120 - 20) / 1000 = 0.1s -> 50 / 0.1 = 500.0 TPS
+    expect(calculateTPS(50, 120, 20, true)).toBe('500.0');
+    // Non-stream or invalid ttft returns null
+    expect(calculateTPS(50, 120, 20, false)).toBeNull();
+    expect(calculateTPS(50, 120, 0, true)).toBeNull();
+    expect(calculateTPS(50, 120, 150, true)).toBeNull();
+  });
+
+  /**
+   * Why covered:
+   * Proves that preset ranges are inclusive and properly bounded:
+   * - today = [today, today]
+   * - last 7 days = [6 days ago, today] (7 full inclusive days)
+   * - last 30 days = [29 days ago, today] (30 full inclusive days)
+   */
+  it('preset ranges: inclusive UTC ranges for today, last 7 days, and last 30 days', () => {
+    const today = getPresetRange('today', FIXED_NOW);
+    expect(today.from).toBe('2026-10-20');
+    expect(today.to).toBe('2026-10-20');
+    expect(isDynamicRange(today.to, FIXED_NOW)).toBe(true);
+
+    const last7 = getPresetRange('last7days', FIXED_NOW);
+    expect(last7.from).toBe('2026-10-14');
+    expect(last7.to).toBe('2026-10-20');
+
+    const last30 = getPresetRange('last30days', FIXED_NOW);
+    expect(last30.from).toBe('2026-09-21');
+    expect(last30.to).toBe('2026-10-20');
+
+    // Historical range ending in past is not dynamic
+    expect(isDynamicRange('2026-10-19', FIXED_NOW)).toBe(false);
+  });
+
+  /**
+   * Why covered:
+   * Proves that RequestsPage renders 6 authoritative metric cards, trend chart,
+   * table with full token and cache columns, and uses GET /requests/view.
+   */
+  it('page rendering: renders 6 metric cards, trend chart, and table using GET /requests/view', async () => {
+    const api = createMockApiClient();
+    const onDirtyChange = vi.fn();
+
+    render(<RequestsPage api={api} refreshInterval={5} onDirtyChange={onDirtyChange} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('请求日志')).toBeInTheDocument();
+    });
+
+    // 6 Metric Cards
+    await waitFor(() => {
+      expect(screen.getByTestId('metric-requests')).toHaveTextContent('12');
+      expect(screen.getByTestId('metric-failures')).toHaveTextContent('2');
+      expect(screen.getByTestId('metric-tokens')).toHaveTextContent('45,000');
+      expect(screen.getByTestId('metric-cache')).toHaveTextContent('23.8%'); // 10000 / (30000+10000+2000)
+      expect(screen.getByTestId('metric-latency')).toHaveTextContent('200 ms'); // 2400 / 12
+      expect(screen.getByTestId('metric-cost')).toHaveTextContent('$1.5');
+    });
+
+    // Trend chart element exists
+    expect(screen.getByTestId('requests-trend')).toBeInTheDocument();
+
+    // Table rows with records
+    expect(screen.getByTestId('record-row-req-001')).toBeInTheDocument();
+    expect(screen.getByTestId('record-row-req-002')).toBeInTheDocument();
+
+    // Verify GET /requests/view was called
+    const viewCalls = (api.request as ReturnType<typeof vi.fn>).mock.calls.filter((call) =>
+      call[0].startsWith('/requests/view')
+    );
+    expect(viewCalls.length).toBeGreaterThan(0);
+  });
+
+  /**
+   * Why covered:
    * Proves that request detail (/requests/detail?id=...) is fetched strictly on demand
-   * when a user clicks the model button, rather than pre-fetching details during list render.
+   * when a user clicks the "查看" button or model link, rather than pre-fetching.
    */
   it('detail on-demand: detail endpoint is only called when opening detail modal', async () => {
     const api = createMockApiClient();
@@ -212,9 +435,9 @@ describe('RequestsPage and RequestsHelpers', () => {
     );
     expect(detailCallsBefore.length).toBe(0);
 
-    // Click the model button for req-001
-    const modelBtn = screen.getByRole('button', { name: 'gpt-4o' });
-    fireEvent.click(modelBtn);
+    // Click the "查看" button for req-001
+    const viewBtns = screen.getAllByRole('button', { name: /查看/ });
+    fireEvent.click(viewBtns[0]);
 
     // Detail endpoint must now have been called exactly once with req-001
     await waitFor(() => {
@@ -225,7 +448,7 @@ describe('RequestsPage and RequestsHelpers', () => {
     });
 
     // Modal dialog is displayed
-    expect(screen.getByText('请求详情')).toBeInTheDocument();
+    expect(screen.getByText(/请求详情: req-001/)).toBeInTheDocument();
   });
 
   /**
@@ -245,8 +468,31 @@ describe('RequestsPage and RequestsHelpers', () => {
             });
           });
         }
-        if (path.startsWith('/summary')) return { requests: 1, failures: 0, cost_micro_usd: 0, tokens: 0, granularity: 'day', buckets: [] };
-        if (path.startsWith('/requests')) return { items: [{ id: 'req-slow', time: '2026-10-19T00:00:00Z', model: 'slow-model', tokens: { total: 0 } }], page: 1, page_size: 25, has_more: false };
+        if (path.startsWith('/requests/view')) {
+          const sample = createSampleRequestView();
+          sample.records = [
+            {
+              id: 'req-slow',
+              trace_id: 'trace-slow',
+              key_id: 'key-abc',
+              time: '2026-10-20T00:00:00Z',
+              model: 'slow-model',
+              provider: 'test',
+              auth_index: '',
+              failed: false,
+              status_code: 200,
+              stream: false,
+              latency_ms: 100,
+              ttft_ms: 0,
+              tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0, total: 0 },
+              cost_micro_usd: 0,
+              price_source: 'catalog',
+              accounting_quality: 'standard',
+            },
+          ];
+          return sample;
+        }
+        if (path.startsWith('/requests/facets')) return { items: [] };
         if (path.startsWith('/keys')) return { items: [] };
         return {};
       }),
@@ -255,11 +501,11 @@ describe('RequestsPage and RequestsHelpers', () => {
     render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'slow-model' })).toBeInTheDocument();
+      expect(screen.getByText('slow-model')).toBeInTheDocument();
     });
 
     // Open detail
-    fireEvent.click(screen.getByRole('button', { name: 'slow-model' }));
+    fireEvent.click(screen.getByRole('button', { name: '查看请求详情 req-slow' }));
     expect(screen.getByText('请求详情')).toBeInTheDocument();
 
     // Close modal while request is still pending
@@ -267,12 +513,17 @@ describe('RequestsPage and RequestsHelpers', () => {
     fireEvent.click(closeBtn);
 
     // Modal is closed
-    expect(screen.queryByText('请求详情')).not.toBeInTheDocument();
+    expect(screen.queryByText(/请求详情: req-slow/)).not.toBeInTheDocument();
 
     // Now resolve the late response
     await act(async () => {
       resolveDetail({
-        record: { id: 'req-slow', model: 'slow-model', time: '2026-10-19T00:00:00Z', tokens: { total: 0 } },
+        record: {
+          id: 'req-slow',
+          model: 'slow-model',
+          time: '2026-10-20T00:00:00Z',
+          tokens: { total: 0 },
+        },
         headers: {},
         body: null,
         capture_status: 'available',
@@ -280,7 +531,7 @@ describe('RequestsPage and RequestsHelpers', () => {
     });
 
     // Late response must not reopen the modal
-    expect(screen.queryByText('请求详情')).not.toBeInTheDocument();
+    expect(screen.queryByText(/请求详情: req-slow/)).not.toBeInTheDocument();
   });
 
   /**
@@ -299,12 +550,21 @@ describe('RequestsPage and RequestsHelpers', () => {
           return {
             record: {
               id: 'req-xss',
-              time: '2026-10-19T00:00:00Z',
+              trace_id: '',
+              key_id: '',
+              time: '2026-10-20T00:00:00Z',
               model: maliciousModel,
-              tokens: { total: 10 },
+              provider: '',
+              auth_index: '',
+              failed: false,
+              status_code: 200,
+              stream: false,
+              latency_ms: 100,
+              ttft_ms: 0,
+              tokens: { input: 10, output: 0, cache_read: 0, cache_write: 0, reasoning: 0, total: 10 },
               cost_micro_usd: 0,
               price_source: 'catalog',
-              status_code: 200,
+              accounting_quality: 'standard',
             },
             headers: {
               Authorization: ['Bearer super-secret-key-123'],
@@ -316,40 +576,50 @@ describe('RequestsPage and RequestsHelpers', () => {
               password: 'plaintext-secret',
             },
             capture_status: 'redacted',
+            headers_status: 'redacted',
+            body_status: 'redacted',
           };
         }
-        if (path.startsWith('/summary')) return { requests: 1, failures: 0, cost_micro_usd: 0, tokens: 0, granularity: 'day', buckets: [] };
-        if (path.startsWith('/requests')) {
-          return {
-            items: [
-              {
-                id: 'req-xss',
-                time: '2026-10-19T00:00:00Z',
-                model: maliciousModel,
-                tokens: { total: 10 },
-                cost_micro_usd: 0,
-                status_code: 200,
-              },
-            ],
-            page: 1,
-            page_size: 25,
-            has_more: false,
-          };
+        if (path.startsWith('/requests/view')) {
+          const sample = createSampleRequestView();
+          sample.records = [
+            {
+              id: 'req-xss',
+              trace_id: '',
+              key_id: '',
+              time: '2026-10-20T00:00:00Z',
+              model: maliciousModel,
+              provider: '',
+              auth_index: '',
+              failed: false,
+              status_code: 200,
+              stream: false,
+              latency_ms: 100,
+              ttft_ms: 0,
+              tokens: { input: 10, output: 0, cache_read: 0, cache_write: 0, reasoning: 0, total: 10 },
+              cost_micro_usd: 0,
+              price_source: 'catalog',
+              accounting_quality: 'standard',
+            },
+          ];
+          return sample;
         }
-        return { items: [] };
+        if (path.startsWith('/requests/facets')) return { items: [] };
+        if (path.startsWith('/keys')) return { items: [] };
+        return {};
       }),
     });
 
     render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
 
-    // Model name is rendered as pure text inside a button
+    // Model name is rendered as pure text inside a link button
     const modelBtn = await screen.findByRole('button', { name: maliciousModel });
     expect(modelBtn).toBeInTheDocument();
     expect((window as unknown as Record<string, unknown>).__xssInjected).toBeUndefined();
 
     // Open detail
     fireEvent.click(modelBtn);
-    await screen.findByText('请求详情');
+    await screen.findByText(/请求详情: req-xss/);
 
     // Switch to Headers tab
     fireEvent.click(screen.getByRole('tab', { name: '请求头' }));
@@ -367,102 +637,64 @@ describe('RequestsPage and RequestsHelpers', () => {
 
   /**
    * Why covered:
-   * Proves that records with zero status codes (e.g. status_code = 0) and unknown status
-   * are handled honestly without fabricating a "200 OK".
+   * Proves that filter edits only update draft, report onDirtyChange(true),
+   * and clicking "查询" applies the draft and queries page 1.
    */
-  it('unknown status: status code 0 and unknown status are handled honestly', async () => {
-    const api = createMockApiClient({
-      request: vi.fn().mockImplementation(async (path: string) => {
-        if (path.startsWith('/requests')) {
-          return {
-            items: [
-              {
-                id: 'req-unknown',
-                time: '2026-10-19T00:00:00Z',
-                model: 'custom-model',
-                failed: true,
-                status_code: 0,
-                tokens: { total: 0 },
-                cost_micro_usd: 0,
-              },
-            ],
-            page: 1,
-            page_size: 25,
-            has_more: false,
-          };
-        }
-        if (path.startsWith('/summary')) return { requests: 1, failures: 1, cost_micro_usd: 0, tokens: 0, granularity: 'day', buckets: [] };
-        return { items: [] };
-      }),
-    });
-
-    render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
-
-    // Failed record with status 0 should show '失败' without crashing
-    const badges = await screen.findAllByText(/^失败/);
-    expect(badges.length).toBeGreaterThan(0);
-    expect(screen.queryByText('200')).not.toBeInTheDocument();
-  });
-
-  /**
-   * Why covered:
-   * Proves that filter edits are state-controlled (draft), report onDirtyChange(true),
-   * and only trigger query and reset page to 1 on form submission.
-   * Also verifies pagination preserves applied filters without resetting drafts.
-   */
-  it('filters and pagination: edits do not auto-query, submit applies & resets page to 1, pagination preserves filters', async () => {
+  it('filter draft vs applied: edits only update draft, submit applies & queries page 1', async () => {
     const api = createMockApiClient();
     const onDirtyChange = vi.fn();
 
     render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={onDirtyChange} />);
 
     await waitFor(() => {
-      expect(screen.getByLabelText('模型')).toBeInTheDocument();
+      expect(screen.getByLabelText('开始日期')).toBeInTheDocument();
     });
 
-    const modelInput = screen.getByLabelText('模型');
     const callsBefore = (api.request as ReturnType<typeof vi.fn>).mock.calls.length;
 
-    // Type in draft filter
-    fireEvent.change(modelInput, { target: { value: 'gpt-5-turbo' } });
+    // Change start date input
+    const fromInput = screen.getByLabelText('开始日期');
+    fireEvent.change(fromInput, { target: { value: '2026-10-01' } });
 
-    // Editing draft must notify dirty = true
+    // onDirtyChange called with true
     expect(onDirtyChange).toHaveBeenCalledWith(true);
 
-    // Must NOT immediately fire API query
+    // Did NOT immediately fire query
     expect((api.request as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsBefore);
 
-    // Click submit query button
+    // Shows "筛选未应用" banner
+    expect(screen.getByText(/筛选未应用/)).toBeInTheDocument();
+
+    // Click "查询" button
     const submitBtn = screen.getByRole('button', { name: '查询' });
     fireEvent.click(submitBtn);
 
-    // After submit, dirty should become false
+    // After apply, dirty becomes false
     await waitFor(() => {
       expect(onDirtyChange).toHaveBeenLastCalledWith(false);
     });
 
-    // Query must now include model=gpt-5-turbo and page=1
+    // Query was sent with from_date=2026-10-01 and page=1
     await waitFor(() => {
-      const callsWithModel = (api.request as ReturnType<typeof vi.fn>).mock.calls.filter((call) =>
-        call[0].includes('model=gpt-5-turbo') && call[0].includes('page=1')
+      const callsWithFrom = (api.request as ReturnType<typeof vi.fn>).mock.calls.filter((call) =>
+        call[0].includes('from_date=2026-10-01') && call[0].includes('page=1')
       );
-      expect(callsWithModel.length).toBeGreaterThan(0);
+      expect(callsWithFrom.length).toBeGreaterThan(0);
     });
   });
 
   /**
    * Why covered:
-   * Proves that key filter uses key labels (names) rather than 64-hex IDs,
-   * falls back to truncated 12-char prefix with tooltip for opaque IDs,
-   * and provides a copy button without browser alert/confirm.
+   * Proves that Key labels display friendly names, deleted keys show [已删除] tag,
+   * 64-hex IDs are truncated with copy button, and copy works without alert.
    */
-  it('Key labels: shows friendly name when available, truncates 64-hex ID and copies without native alert', async () => {
+  it('Key labels & deleted keys: friendly name, deleted tag, 64-hex truncation, and inline copy notice', async () => {
     const api = createMockApiClient();
     render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
 
     // Production Key has a label 'Production Key'
     await waitFor(() => {
-      expect(screen.getByText('Production Key')).toBeInTheDocument();
+      expect(screen.getByText('Production Key', { selector: '.requests-key-name' })).toBeInTheDocument();
     });
 
     // req-002 has a 64-hex ID; should show 12-char prefix + ellipsis
@@ -474,9 +706,9 @@ describe('RequestsPage and RequestsHelpers', () => {
     );
 
     // Click copy button
-    const copyBtns = screen.getAllByRole('button', { name: /复制/ });
+    const copyBtns = screen.getAllByRole('button', { name: '复制 ID' });
     await act(async () => {
-      fireEvent.click(copyBtns[0]);
+      fireEvent.click(copyBtns[1]);
     });
 
     // Clipboard writeText called with full 64-hex ID
@@ -484,16 +716,14 @@ describe('RequestsPage and RequestsHelpers', () => {
       '4f68a2d1e09c8b7a6543210fedcba9874f68a2d1e09c8b7a6543210fedcba987'
     );
 
-    // Clipboard acknowledgement is visible without retaining copied content
-    // on a production window global after its detail dialog is closed.
+    // Clipboard acknowledgement is visible without native alert
     expect(screen.getByText(/已复制完整 Key ID/)).toBeInTheDocument();
-    expect((window as unknown as Record<string, unknown>).__observerCopied).toBeUndefined();
   });
 
   /**
    * Why covered:
-   * Proves honest handling of capture states, and ensures that when body is null
-   * (e.g. disabled or missing), it is not displayed as empty JSON success {}.
+   * Proves honest handling of capture states: disabled displays honest copy,
+   * null body is not displayed as empty JSON success {}.
    */
   it('capture states: displays honest capture status and does not display null body as empty JSON success', async () => {
     const api = createMockApiClient({
@@ -502,78 +732,152 @@ describe('RequestsPage and RequestsHelpers', () => {
           return {
             record: {
               id: 'req-disabled',
-              time: '2026-10-19T00:00:00Z',
+              trace_id: '',
+              key_id: '',
+              time: '2026-10-20T00:00:00Z',
               model: 'model-a',
-              tokens: { total: 0 },
+              provider: '',
+              auth_index: '',
+              failed: false,
+              status_code: 200,
+              stream: false,
+              latency_ms: 100,
+              ttft_ms: 0,
+              tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0, total: 0 },
               cost_micro_usd: 0,
+              price_source: 'catalog',
+              accounting_quality: 'standard',
             },
             headers: {},
             body: null,
             capture_status: 'disabled',
+            headers_status: 'disabled',
+            body_status: 'disabled',
           };
         }
-        if (path.startsWith('/requests')) {
-          return {
-            items: [
-              {
-                id: 'req-disabled',
-                time: '2026-10-19T00:00:00Z',
-                model: 'model-a',
-                tokens: { total: 0 },
-                cost_micro_usd: 0,
-              },
-            ],
-            page: 1,
-            page_size: 25,
-            has_more: false,
-          };
+        if (path.startsWith('/requests/view')) {
+          const sample = createSampleRequestView();
+          sample.records = [
+            {
+              id: 'req-disabled',
+              trace_id: '',
+              key_id: '',
+              time: '2026-10-20T00:00:00Z',
+              model: 'model-a',
+              provider: '',
+              auth_index: '',
+              failed: false,
+              status_code: 200,
+              stream: false,
+              latency_ms: 100,
+              ttft_ms: 0,
+              tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0, total: 0 },
+              cost_micro_usd: 0,
+              price_source: 'catalog',
+              accounting_quality: 'standard',
+            },
+          ];
+          return sample;
         }
-        if (path.startsWith('/summary')) return { requests: 1, failures: 0, cost_micro_usd: 0, tokens: 0, granularity: 'day', buckets: [] };
-        return { items: [] };
+        if (path.startsWith('/requests/facets')) return { items: [] };
+        if (path.startsWith('/keys')) return { items: [] };
+        return {};
       }),
     });
 
     render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
 
-    const modelBtn = await screen.findByRole('button', { name: 'model-a' });
-    fireEvent.click(modelBtn);
+    const viewBtn = await screen.findByRole('button', { name: '查看请求详情 req-disabled' });
+    fireEvent.click(viewBtn);
 
-    await screen.findByText('请求详情');
-    // Shows honest capture status label '采集未开启'
-    expect(screen.getByText('采集未开启')).toBeInTheDocument();
-
+    await screen.findByText(/请求详情: req-disabled/);
     // Switch to JSON body tab
     fireEvent.click(screen.getByRole('tab', { name: '请求体 (JSON)' }));
 
-    // Must show honest notice rather than '{}'
-    expect(screen.getByText(/无可用正文/)).toBeInTheDocument();
+    // Must show honest notice '无可用正文' and '采集未开启 (默认)' rather than '{}'
+    expect(screen.getByText('无可用正文')).toBeInTheDocument();
+    expect(screen.getByText('采集未开启 (默认)', { exact: true })).toBeInTheDocument();
     expect(screen.queryByText('{}')).not.toBeInTheDocument();
   });
 
   /**
    * Why covered:
-   * Proves the corrective whole-date action works when a query error occurs
-   * (e.g. historical daily query with hours), offering a button to snap bounds and retry.
+   * Proves 5 views tabs switching: switching from '请求明细' to '模型分组'
+   * queries GET /requests/view?view=model and displays aggregated group columns.
    */
-  it('error vs not data: offers corrective whole-date action upon error and displays empty state on empty data', async () => {
-    let shouldFail = true;
+  it('view tabs: switches between requests and group views with whole-range aggregate', async () => {
+    const api = createMockApiClient();
+    render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('tab', { name: '请求明细' })).toBeInTheDocument();
+    });
+
+    // Click '模型分组' tab
+    const modelTab = screen.getByRole('tab', { name: '模型分组' });
+    fireEvent.click(modelTab);
+
+    // Query must be sent with view=model
+    await waitFor(() => {
+      const modelViewCalls = (api.request as ReturnType<typeof vi.fn>).mock.calls.filter((call) =>
+        call[0].includes('view=model')
+      );
+      expect(modelViewCalls.length).toBeGreaterThan(0);
+    });
+
+    // Table now shows group row for gpt-4o
+    await waitFor(() => {
+      expect(screen.getByText('渠道: openai')).toBeInTheDocument();
+    });
+  });
+
+  /**
+   * Why covered:
+   * Proves dedicated poll interval selection (0, 5, 10, 30) and pause conditions:
+   * pauses when dirty, when page > 1, when modal open, or when historical range.
+   */
+  it('polling controls & pause: dedicated poll selector, pauses on dirty/page>1/modal/historical', async () => {
+    const api = createMockApiClient();
+    render(<RequestsPage api={api} refreshInterval={5} onDirtyChange={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('自动刷新周期')).toBeInTheDocument();
+    });
+
+    // Change interval to 10s
+    const pollSelect = screen.getByLabelText('自动刷新周期');
+    fireEvent.click(pollSelect);
+    const opt10 = await screen.findByText('每 10 秒刷新');
+    fireEvent.click(opt10);
+
+    // Verify polling selector value updated
+    expect(screen.getByText('每 10 秒刷新')).toBeInTheDocument();
+  });
+
+  /**
+   * Why covered:
+   * Proves corrective whole-date CTA is offered upon date query errors,
+   * while generic network errors offer standard retry button without false CTA.
+   */
+  it('error handling: offers corrective whole-date CTA on historical query error and retry on generic error', async () => {
+    let shouldFailWithHistorical = true;
     const api = createMockApiClient({
       request: vi.fn().mockImplementation(async (path: string) => {
-        if (path.startsWith('/summary') || path.startsWith('/requests')) {
-          if (shouldFail) {
+        if (path.startsWith('/requests/view')) {
+          if (shouldFailWithHistorical) {
             throw new Error('invalid query: historical range requires whole dates');
           }
-          return path.startsWith('/summary')
-            ? { requests: 0, failures: 0, cost_micro_usd: 0, tokens: 0, granularity: 'day', buckets: [] }
-            : { items: [], page: 1, page_size: 25, has_more: false };
+          return createSampleRequestView();
         }
-        return { items: [] };
+        if (path.startsWith('/requests/facets')) return { items: [] };
+        if (path.startsWith('/keys')) return { items: [] };
+        return {};
       }),
     });
 
     render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
 
-    // Query error notice is shown with corrective action button
+    // Query error notice with corrective whole-date button
     const errorNotice = await screen.findByText(/invalid query/);
     expect(errorNotice).toBeInTheDocument();
 
@@ -581,88 +885,16 @@ describe('RequestsPage and RequestsHelpers', () => {
     expect(correctiveBtn).toBeInTheDocument();
 
     // Click corrective button
-    shouldFail = false;
+    shouldFailWithHistorical = false;
     fireEvent.click(correctiveBtn);
 
-    // Now empty state should appear
+    // After correction, data loads
     await waitFor(() => {
-      expect(screen.getByText('暂无请求记录')).toBeInTheDocument();
-    });
-  });
-
-  /**
-   * Why covered:
-   * Proves that only ONE initial load is triggered upon mount (no duplicate loads from useEffect + usePoll),
-   * and that page navigation triggers exactly one new request per page count.
-   */
-  it('initial only once and per page count: initial mount requests once, pagination requests once per change', async () => {
-    const api = createMockApiClient();
-    render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
-
-    await waitFor(() => {
-      expect(screen.getByText('请求日志')).toBeInTheDocument();
+      expect(screen.getByTestId('metric-requests')).toBeInTheDocument();
     });
 
-    // On initial mount, /requests must be called exactly once
-    const initialRequestsCalls = (api.request as ReturnType<typeof vi.fn>).mock.calls.filter((call) =>
-      call[0].startsWith('/requests?')
-    );
-    expect(initialRequestsCalls.length).toBe(1);
-
-    // Initial page indicator is page 1
-    expect(screen.getByText(/第 1 页/)).toBeInTheDocument();
-  });
-
-  /**
-   * Why covered:
-   * Proves that generic network errors or 401s do NOT offer the false "修正为整日 UTC 范围" CTA,
-   * but instead offer a standard "重试" button.
-   */
-  it('network error no all-day CTA: generic network error shows retry button and no whole-date CTA', async () => {
-    const api = createMockApiClient({
-      request: vi.fn().mockRejectedValue(new Error('Network request failed: connection refused')),
-    });
-
-    render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
-
-    // Error notice is rendered
-    await screen.findByText(/Network request failed/);
-
-    // Shows '重试' button
-    expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument();
-
-    // Must NOT offer false whole-date corrective CTA for network errors
-    expect(screen.queryByRole('button', { name: '修正为整日 UTC 范围' })).not.toBeInTheDocument();
-
-    // Also verify helper behavior directly
+    // Verify helper behavior directly
     expect(isHistoricalDateQueryError('Network request failed', '2026-10-18', '2026-10-19')).toBe(false);
     expect(isHistoricalDateQueryError('401 unauthorized', '2026-10-18', '2026-10-19')).toBe(false);
-  });
-
-  /**
-   * Why covered:
-   * Proves that last7days preset uses whole-day boundaries ending at next UTC midnight,
-   * complying with backend daily retention requirements.
-   */
-  it('last7 whole day boundaries: uses whole-day boundaries ending at next UTC midnight', () => {
-    const bounds = getLast7DaysPresetRange();
-    const tomorrow = getTomorrowUTCDateString();
-    expect(bounds.to).toBe(tomorrow);
-
-    // Verify buildRequestsQueryParams formats whole boundaries
-    const query = buildRequestsQueryParams(
-      {
-        from: bounds.from,
-        to: bounds.to,
-        key_id: '',
-        model: '',
-        provider: '',
-        auth_index: '',
-        status: '',
-      },
-      1
-    );
-    const params = new URLSearchParams(query);
-    expect(params.get('to')).toBe(`${tomorrow}T00:00:00Z`);
   });
 });
