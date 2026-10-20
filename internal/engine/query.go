@@ -1,10 +1,25 @@
 package engine
 
 import (
+	"encoding/base64"
 	"sort"
+	"strings"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+)
+
+const (
+	viewRequests = "requests"
+	viewModel    = "model"
+	viewKey      = "key"
+	viewAccount  = "account"
+	viewProvider = "provider"
+
+	facetModel     = "model"
+	facetKeyID     = "key_id"
+	facetProvider  = "provider"
+	facetAuthIndex = "auth_index"
 )
 
 func validQuery(q Query) bool {
@@ -13,9 +28,58 @@ func validQuery(q Query) bool {
 func matches(q Query, key, model, provider, auth string, failed bool) bool {
 	return (q.KeyID == "" || q.KeyID == key) && (q.Model == "" || q.Model == model) && (q.Provider == "" || q.Provider == provider) && (q.AuthIndex == "" || q.AuthIndex == auth) && (q.Status == "" || (q.Status == "failed") == failed)
 }
-func (s *Store) Requests(q Query) (RequestPage, error) {
+
+// queryEnv is a short-lived snapshot of the immutable query configuration and
+// a database read lease. s.mu is only held while taking it; the actual scan
+// never blocks admission, accounting or physical-maintenance bookkeeping.
+type queryEnv struct {
+	db        *bolt.DB
+	now       time.Time
+	rawCut    time.Time
+	dailyCut  time.Time
+	rawHours  int
+	dailyDays int
+}
+
+func (s *Store) queryEnv() (*queryEnv, func(), error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if e := s.check(); e != nil {
+		s.mu.Unlock()
+		return nil, nil, e
+	}
+	// Lock order is s.mu -> dbMu. Close and Compact take dbMu only while
+	// holding s.mu, so the handle stays valid for the entire read transaction.
+	s.dbMu.RLock()
+	db := s.db
+	env := &queryEnv{
+		db:        db,
+		now:       s.now().UTC(),
+		rawHours:  s.settings.RawRetentionHours,
+		dailyDays: s.settings.DailyRetentionDays,
+	}
+	env.rawCut = env.now.Add(-time.Duration(env.rawHours) * time.Hour)
+	env.dailyCut = day(env.now).AddDate(0, 0, -env.dailyDays)
+	s.mu.Unlock()
+	return env, s.dbMu.RUnlock, nil
+}
+
+func pageLimits(page, size, max int) (int, int, bool) {
+	if page < 0 || size < 0 {
+		return 0, 0, false
+	}
+	if page == 0 {
+		page = 1
+	}
+	if size == 0 {
+		size = 25
+	}
+	if size > max || page > int(^uint(0)>>1)/size {
+		return 0, 0, false
+	}
+	return page, size, true
+}
+
+func (s *Store) Requests(q Query) (RequestPage, error) {
 	out := RequestPage{Items: []Record{}, Page: q.Page, PageSize: q.PageSize}
 	if out.Page == 0 {
 		out.Page = 1
@@ -23,148 +87,569 @@ func (s *Store) Requests(q Query) (RequestPage, error) {
 	if out.PageSize == 0 {
 		out.PageSize = 25
 	}
-	if e := s.check(); e != nil {
+	env, release, e := s.queryEnv()
+	if e != nil {
 		return out, e
 	}
+	defer release()
 	if !validQuery(q) {
 		return out, ErrInvalid
 	}
 	if out.Page > int(^uint(0)>>1)/out.PageSize {
 		return out, ErrInvalid
 	}
-	skip := (out.Page - 1) * out.PageSize
-	cut := s.now().Add(-time.Duration(s.settings.RawRetentionHours) * time.Hour)
-	e := s.db.View(func(tx *bolt.Tx) error {
-		c := tx.Bucket([]byte("timeline")).Cursor()
-		k, v := c.Seek([]byte(timePrefix(q.To)))
-		if k == nil {
-			k, v = c.Last()
-		} else {
-			k, v = c.Prev()
+	e = env.db.View(func(tx *bolt.Tx) error {
+		items, more, e := scanRequestPage(tx, env, q, out.Page, out.PageSize)
+		out.Items, out.HasMore = items, more
+		return e
+	})
+	return out, e
+}
+
+func (s *Store) Summary(q Query) (Summary, error) {
+	out := Summary{Granularity: "day", Buckets: []Bucket{}}
+	env, release, e := s.queryEnv()
+	if e != nil {
+		return out, e
+	}
+	defer release()
+	if !validQuery(q) {
+		return out, ErrInvalid
+	}
+	granularity, e := summaryGranularity(env, q)
+	if e != nil {
+		return out, e
+	}
+	out.Granularity = granularity
+	e = env.db.View(func(tx *bolt.Tx) error {
+		agg, buckets, _, e := collect(tx, env, q, granularity, viewRequests, nil)
+		if e != nil {
+			return e
 		}
-		for ; k != nil; k, v = c.Prev() {
-			var r Record
-			if e := get(tx.Bucket([]byte("records")), string(v), &r); e != nil {
-				return e
-			}
-			if r.Time.Before(cut) || r.Time.Before(q.From) {
-				break
-			}
-			if !r.Time.Before(q.To) || !matches(q, r.KeyID, r.Model, r.Provider, r.AuthIndex, r.Failed) {
-				continue
-			}
-			if skip > 0 {
-				skip--
-				continue
-			}
-			if len(out.Items) == out.PageSize {
-				out.HasMore = true
-				break
-			}
-			out.Items = append(out.Items, r)
-		}
+		out.Aggregate = agg
+		out.Buckets = sortedBuckets(buckets)
 		return nil
 	})
 	return out, e
 }
-func (s *Store) Summary(q Query) (Summary, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := Summary{Granularity: "day", Buckets: []Bucket{}}
-	if e := s.check(); e != nil {
+
+// RequestView returns the summary, trend and one current view inside one read
+// transaction. Date-only inputs are inclusive UTC dates; the end is clamped to
+// the query instant so a "today" range never includes future buckets.
+func (s *Store) RequestView(v ViewQuery) (RequestView, error) {
+	env, release, e := s.queryEnv()
+	if e != nil {
+		return RequestView{}, e
+	}
+	defer release()
+	q, view, e := env.normalizeView(v)
+	if e != nil {
+		return RequestView{}, e
+	}
+	out := RequestView{
+		Range:   ViewRange{From: q.From, To: q.To, AsOf: env.now, Timezone: "UTC"},
+		Series:  Series{Granularity: "day", Buckets: []Bucket{}},
+		Records: []Record{}, Groups: []Group{},
+		Pagination: Pagination{Page: q.Page, PageSize: q.PageSize},
+	}
+	granularity, e := summaryGranularity(env, q)
+	if e != nil {
 		return out, e
 	}
-	if !validQuery(q) {
-		return out, ErrInvalid
-	}
-	cut := s.now().Add(-time.Duration(s.settings.RawRetentionHours) * time.Hour)
-	hourly := !q.From.Before(cut)
-	if hourly {
-		out.Granularity = "hour"
-	}
-	if (q.From.Before(cut) && !q.From.Equal(day(q.From))) || (q.From.Before(cut) && day(q.To).Before(cut) && !q.To.Equal(day(q.To))) {
-		return out, ErrInvalid
-	}
-	bs := map[time.Time]*Bucket{}
-	merge := func(b Bucket) error {
-		v := bs[b.Time]
-		if v == nil {
-			v = &Bucket{Time: b.Time}
-			bs[b.Time] = v
+	out.Series.Granularity = granularity
+	rawFrom, dailyFrom := env.rawCut, env.dailyCut
+	out.Coverage.RawFrom, out.Coverage.DailyFrom = &rawFrom, &dailyFrom
+	e = env.db.View(func(tx *bolt.Tx) error {
+		keyLabels := map[string]string(nil)
+		if view == viewKey {
+			keyLabels = readKeyLabels(tx)
 		}
-		for _, p := range []struct {
-			a *int64
-			b int64
-		}{{&v.Requests, b.Requests}, {&v.Failures, b.Failures}, {&v.CostMicroUSD, b.CostMicroUSD}, {&v.Tokens, b.Tokens}} {
-			n, e := add(*p.a, p.b)
+		agg, buckets, groups, e := collect(tx, env, q, granularity, view, keyLabels)
+		if e != nil {
+			return e
+		}
+		out.Summary = agg
+		out.Series.Buckets = sortedBuckets(buckets)
+		if view == viewRequests {
+			items, more, e := scanRequestPage(tx, env, q, q.Page, q.PageSize)
 			if e != nil {
 				return e
 			}
-			*p.a = n
+			out.Records, out.Pagination.HasMore = items, more
+		} else {
+			paged, more := pageGroups(groups, q.Page, q.PageSize)
+			out.Groups, out.Pagination.HasMore = paged, more
 		}
+		out.Coverage.DetailedRequests = out.Summary.DetailedRequests
+		out.Coverage.Requests = out.Summary.Requests
+		out.Coverage.BackfillPending = tx.Bucket([]byte("meta")).Get([]byte(statsBackfillDoneKey)) == nil
 		return nil
+	})
+	return out, e
+}
+
+// Facets returns bounded, stable metadata options. It reads long-lived daily
+// dimensions plus raw-retention hourly dimensions and Keys (including deleted
+// tombstones); it never scans capture bodies or credential files.
+func (s *Store) Facets(q FacetQuery) (FacetPage, error) {
+	if q.Field != facetModel && q.Field != facetKeyID && q.Field != facetProvider && q.Field != facetAuthIndex {
+		return FacetPage{}, ErrInvalid
 	}
-	dailyCut := day(s.now()).AddDate(0, 0, -s.settings.DailyRetentionDays)
-	full := func(t time.Time) bool {
-		return !hourly && !t.Before(q.From) && !t.AddDate(0, 0, 1).After(q.To) && !t.Before(dailyCut)
+	limit, ok := facetLimit(q.Limit)
+	if !ok {
+		return FacetPage{}, ErrInvalid
 	}
-	e := s.db.View(func(tx *bolt.Tx) error {
+	cursor := ""
+	if q.Cursor != "" {
+		raw, e := base64.RawURLEncoding.DecodeString(q.Cursor)
+		if e != nil {
+			return FacetPage{}, ErrInvalid
+		}
+		cursor = string(raw)
+	}
+	env, release, e := s.queryEnv()
+	if e != nil {
+		return FacetPage{}, e
+	}
+	defer release()
+	values := map[string]string{}
+	e = env.db.View(func(tx *bolt.Tx) error {
+		if q.Field == facetKeyID {
+			for id, label := range readKeyLabels(tx) {
+				values[id] = label
+			}
+		}
+		collectFacet := func(d daily) error {
+			var value string
+			switch q.Field {
+			case facetModel:
+				value = d.Model
+			case facetKeyID:
+				value = d.KeyID
+			case facetProvider:
+				value = d.Provider
+			case facetAuthIndex:
+				value = d.AuthIndex
+			}
+			if value != "" {
+				if _, ok := values[value]; !ok {
+					values[value] = value
+				}
+			}
+			return nil
+		}
 		if e := tx.Bucket([]byte("daily")).ForEach(func(_, v []byte) error {
 			var d daily
 			if e := decode(v, &d); e != nil {
 				return e
 			}
-			if full(d.Bucket.Time) && matches(q, d.KeyID, d.Model, d.Provider, d.AuthIndex, d.Failed) {
-				return merge(d.Bucket)
-			}
-			return nil
+			return collectFacet(d)
 		}); e != nil {
 			return e
 		}
-		return tx.Bucket([]byte("records")).ForEach(func(_, v []byte) error {
-			var r Record
-			if e := decode(v, &r); e != nil {
+		return tx.Bucket([]byte("hourly")).ForEach(func(_, v []byte) error {
+			var d daily
+			if e := decode(v, &d); e != nil {
 				return e
 			}
-			if full(day(r.Time)) || r.Time.Before(cut) || r.Time.Before(q.From) || !r.Time.Before(q.To) || !matches(q, r.KeyID, r.Model, r.Provider, r.AuthIndex, r.Failed) {
-				return nil
-			}
-			bt := day(r.Time)
-			if hourly {
-				bt = r.Time.UTC().Truncate(time.Hour)
-			}
-			b := Bucket{Time: bt}
-			if e := accumulate(&b, r); e != nil {
-				return e
-			}
-			return merge(b)
+			return collectFacet(d)
 		})
 	})
 	if e != nil {
-		return out, e
+		return FacetPage{}, e
 	}
-	if hourly && q.To.Sub(q.From) <= 168*time.Hour {
-		for t := q.From.UTC().Truncate(time.Hour); t.Before(q.To); t = t.Add(time.Hour) {
-			if bs[t] == nil {
-				bs[t] = &Bucket{Time: t}
-			}
+	search := strings.ToLower(strings.TrimSpace(q.Search))
+	type item struct{ value, label string }
+	all := make([]item, 0, len(values))
+	for value, label := range values {
+		if cursor != "" && value <= cursor {
+			continue
 		}
-	}
-	for _, b := range bs {
-		out.Buckets = append(out.Buckets, *b)
-		for _, p := range []struct {
-			a *int64
-			b int64
-		}{{&out.Requests, b.Requests}, {&out.Failures, b.Failures}, {&out.CostMicroUSD, b.CostMicroUSD}, {&out.Tokens, b.Tokens}} {
-			n, e := add(*p.a, p.b)
-			if e != nil {
-				return out, e
-			}
-			*p.a = n
+		if search != "" && !strings.Contains(strings.ToLower(value), search) && !strings.Contains(strings.ToLower(label), search) {
+			continue
 		}
+		all = append(all, item{value: value, label: label})
 	}
-	sort.Slice(out.Buckets, func(i, j int) bool { return out.Buckets[i].Time.Before(out.Buckets[j].Time) })
+	sort.Slice(all, func(i, j int) bool { return all[i].value < all[j].value })
+	out := FacetPage{Items: []FacetItem{}}
+	end := limit
+	if end > len(all) {
+		end = len(all)
+	}
+	for _, v := range all[:end] {
+		out.Items = append(out.Items, FacetItem{Value: v.value, Label: v.label})
+	}
+	if end < len(all) {
+		out.NextCursor = base64.RawURLEncoding.EncodeToString([]byte(all[end-1].value))
+	}
 	return out, nil
+}
+
+func facetLimit(limit int) (int, bool) {
+	if limit < 0 {
+		return 0, false
+	}
+	if limit == 0 {
+		return 25, true
+	}
+	if limit > 100 {
+		return 0, false
+	}
+	return limit, true
+}
+
+func readKeyLabels(tx *bolt.Tx) map[string]string {
+	out := map[string]string{}
+	b := tx.Bucket([]byte("keys"))
+	if b == nil {
+		return out
+	}
+	b.ForEach(func(k, v []byte) error {
+		var stored storedKey
+		if decode(v, &stored) == nil {
+			label := stored.Label
+			if label == "" {
+				label = stored.ID
+			}
+			out[string(k)] = label
+		}
+		return nil
+	})
+	return out
+}
+
+func scanRequestPage(tx *bolt.Tx, env *queryEnv, q Query, page, size int) ([]Record, bool, error) {
+	out := []Record{}
+	skip := (page - 1) * size
+	c := tx.Bucket([]byte("timeline")).Cursor()
+	k, v := c.Seek([]byte(timePrefix(q.To)))
+	if k == nil {
+		k, v = c.Last()
+	} else {
+		k, v = c.Prev()
+	}
+	for ; k != nil; k, v = c.Prev() {
+		var r Record
+		if e := get(tx.Bucket([]byte("records")), string(v), &r); e != nil {
+			return out, false, e
+		}
+		if r.Time.Before(env.rawCut) || r.Time.Before(q.From) {
+			break
+		}
+		if !r.Time.Before(q.To) || !matches(q, r.KeyID, r.Model, r.Provider, r.AuthIndex, r.Failed) {
+			continue
+		}
+		if skip > 0 {
+			skip--
+			continue
+		}
+		if len(out) == size {
+			return out, true, nil
+		}
+		out = append(out, r)
+	}
+	return out, false, nil
+}
+
+func summaryGranularity(env *queryEnv, q Query) (string, error) {
+	cut := env.rawCut
+	hourly := !q.From.Before(cut)
+	if (q.From.Before(cut) && !q.From.Equal(day(q.From))) || (q.From.Before(cut) && day(q.To).Before(cut) && !q.To.Equal(day(q.To))) {
+		return "", ErrInvalid
+	}
+	if hourly {
+		return "hour", nil
+	}
+	return "day", nil
+}
+
+type groupAgg struct {
+	key, label, model, provider, keyID, auth string
+	agg                                      Aggregate
+}
+
+type aggregator struct {
+	view      string
+	keyLabels map[string]string
+	total     Aggregate
+	series    map[time.Time]*Bucket
+	groups    map[string]*Group
+}
+
+func newAggregator(view string, keyLabels map[string]string) *aggregator {
+	return &aggregator{view: view, keyLabels: keyLabels, series: map[time.Time]*Bucket{}, groups: map[string]*Group{}}
+}
+
+func (a *aggregator) add(at time.Time, key, model, provider, auth string, failed bool, agg Aggregate) error {
+	if e := addAggregate(&a.total, agg); e != nil {
+		return e
+	}
+	b := a.series[at]
+	if b == nil {
+		b = &Bucket{Time: at}
+		a.series[at] = b
+	}
+	if e := addAggregate(&b.Aggregate, agg); e != nil {
+		return e
+	}
+	if a.view == viewRequests {
+		return nil
+	}
+	gk, label, gm, gp, kid, ga := groupIdentity(a.view, key, model, provider, auth, a.keyLabels)
+	g := a.groups[gk]
+	if g == nil {
+		g = &Group{Key: gk, Label: label, Model: gm, Provider: gp, KeyID: kid, AuthIndex: ga}
+		a.groups[gk] = g
+	}
+	return addAggregate(&g.Aggregate, agg)
+}
+
+func groupIdentity(view, key, model, provider, auth string, labels map[string]string) (gk, label, gm, gp, kid, ga string) {
+	switch view {
+	case viewModel:
+		if model == "" && provider == "" {
+			return "unknown", "unknown", "", "", "", ""
+		}
+		gk = captureID(provider, model)
+		label = model
+		if label == "" {
+			label = "unknown"
+		}
+		return gk, label, model, provider, "", ""
+	case viewKey:
+		if key == "" {
+			return "unknown", "unknown", "", "", "", ""
+		}
+		label = labels[key]
+		if label == "" {
+			label = key
+		}
+		return key, label, "", "", key, ""
+	case viewAccount:
+		if auth == "" {
+			return "unknown", "unknown", "", "", "", ""
+		}
+		return auth, auth, "", "", "", auth
+	case viewProvider:
+		if provider == "" {
+			return "unknown", "unknown", "", "", "", ""
+		}
+		return provider, provider, "", provider, "", ""
+	}
+	return "unknown", "unknown", "", "", "", ""
+}
+
+func pageGroups(groups map[string]*Group, page, size int) ([]Group, bool) {
+	all := make([]Group, 0, len(groups))
+	for _, g := range groups {
+		all = append(all, *g)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].Requests != all[j].Requests {
+			return all[i].Requests > all[j].Requests
+		}
+		return all[i].Key < all[j].Key
+	})
+	skip := (page - 1) * size
+	if skip >= len(all) {
+		return []Group{}, false
+	}
+	end := skip + size
+	more := end < len(all)
+	if end > len(all) {
+		end = len(all)
+	}
+	return all[skip:end], more
+}
+
+func collect(tx *bolt.Tx, env *queryEnv, q Query, granularity, view string, keyLabels map[string]string) (Aggregate, map[time.Time]*Bucket, map[string]*Group, error) {
+	a := newAggregator(view, keyLabels)
+	if granularity == "hour" {
+		if e := collectHourly(tx, env, q, a); e != nil {
+			return Aggregate{}, nil, nil, e
+		}
+	} else {
+		if e := collectDaily(tx, env, q, a); e != nil {
+			return Aggregate{}, nil, nil, e
+		}
+	}
+	return a.total, a.series, a.groups, nil
+}
+
+func collectHourly(tx *bolt.Tx, env *queryEnv, q Query, a *aggregator) error {
+	first := q.From.UTC().Truncate(time.Hour)
+	if first.Before(q.From) {
+		first = first.Add(time.Hour)
+	}
+	last := q.To.UTC().Truncate(time.Hour)
+	fullEnd := last
+	if fullEnd.After(q.To) {
+		fullEnd = q.To
+	}
+	if first.Before(fullEnd) {
+		if e := scanRollups(tx.Bucket([]byte("hourly")), first, fullEnd, func(d daily) error {
+			if !matches(q, d.KeyID, d.Model, d.Provider, d.AuthIndex, d.Failed) {
+				return nil
+			}
+			return a.add(d.Bucket.Time, d.KeyID, d.Model, d.Provider, d.AuthIndex, d.Failed, d.Bucket.Aggregate)
+		}); e != nil {
+			return e
+		}
+	}
+	// Only the two partial edge hours read raw records.
+	if q.From.Before(first) {
+		if e := scanRecordRange(tx, env, q, q.From, minTime(q.To, first), func(r Record) error {
+			return a.add(r.Time.UTC().Truncate(time.Hour), r.KeyID, r.Model, r.Provider, r.AuthIndex, r.Failed, recordAggregate(r))
+		}); e != nil {
+			return e
+		}
+	}
+	if !last.Before(q.From) && last.Before(q.To) {
+		start := last
+		if start.Before(q.From) {
+			start = q.From
+		}
+		if e := scanRecordRange(tx, env, q, start, q.To, func(r Record) error {
+			return a.add(r.Time.UTC().Truncate(time.Hour), r.KeyID, r.Model, r.Provider, r.AuthIndex, r.Failed, recordAggregate(r))
+		}); e != nil {
+			return e
+		}
+	}
+	if q.To.Sub(q.From) <= 168*time.Hour {
+		for t := q.From.UTC().Truncate(time.Hour); t.Before(q.To); t = t.Add(time.Hour) {
+			if a.series[t] == nil {
+				a.series[t] = &Bucket{Time: t}
+			}
+		}
+	}
+	return nil
+}
+
+func collectDaily(tx *bolt.Tx, env *queryEnv, q Query, a *aggregator) error {
+	full := func(t time.Time) bool {
+		return !t.Before(q.From) && !t.AddDate(0, 0, 1).After(q.To) && !t.Before(env.dailyCut)
+	}
+	start := day(q.From)
+	if start.Before(env.dailyCut) {
+		start = env.dailyCut
+	}
+	if e := scanRollups(tx.Bucket([]byte("daily")), start, day(q.To).AddDate(0, 0, 1), func(d daily) error {
+		if full(d.Bucket.Time) && matches(q, d.KeyID, d.Model, d.Provider, d.AuthIndex, d.Failed) {
+			return a.add(d.Bucket.Time, d.KeyID, d.Model, d.Provider, d.AuthIndex, d.Failed, d.Bucket.Aggregate)
+		}
+		return nil
+	}); e != nil {
+		return e
+	}
+	// The raw pass is bounded by raw retention and skips records whose entire
+	// day is already covered by the daily rollup.
+	from := q.From
+	if from.Before(env.rawCut) {
+		from = env.rawCut
+	}
+	return scanRecordRange(tx, env, q, from, q.To, func(r Record) error {
+		if full(day(r.Time)) {
+			return nil
+		}
+		return a.add(day(r.Time), r.KeyID, r.Model, r.Provider, r.AuthIndex, r.Failed, recordAggregate(r))
+	})
+}
+
+// scanRecordRange walks the reverse timeline only for an explicit partial edge.
+// It never decodes capture bodies or scans outside the requested interval.
+func scanRecordRange(tx *bolt.Tx, env *queryEnv, q Query, from, to time.Time, fn func(Record) error) error {
+	if !to.After(from) {
+		return nil
+	}
+	c := tx.Bucket([]byte("timeline")).Cursor()
+	k, v := c.Seek([]byte(timePrefix(to)))
+	if k == nil {
+		k, v = c.Last()
+	} else {
+		k, v = c.Prev()
+	}
+	for ; k != nil; k, v = c.Prev() {
+		var r Record
+		if e := get(tx.Bucket([]byte("records")), string(v), &r); e != nil {
+			return e
+		}
+		if r.Time.Before(from) || r.Time.Before(env.rawCut) {
+			break
+		}
+		if !r.Time.Before(to) || !r.Time.Before(q.To) || !matches(q, r.KeyID, r.Model, r.Provider, r.AuthIndex, r.Failed) {
+			continue
+		}
+		if e := fn(r); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+func sortedBuckets(buckets map[time.Time]*Bucket) []Bucket {
+	out := make([]Bucket, 0, len(buckets))
+	for _, b := range buckets {
+		out = append(out, *b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
+	return out
+}
+
+func (e *queryEnv) normalizeView(v ViewQuery) (Query, string, error) {
+	q := v.Query
+	view := v.View
+	if view == "" {
+		view = viewRequests
+	}
+	if view != viewRequests && view != viewModel && view != viewKey && view != viewAccount && view != viewProvider {
+		return Query{}, "", ErrInvalid
+	}
+	if v.FromDate == "" && v.ToDate == "" && !q.From.IsZero() && !q.To.IsZero() {
+		// Direct callers may use the legacy RFC3339 half-open range.
+	} else {
+		today := day(e.now)
+		fromDate, toDate := v.FromDate, v.ToDate
+		if fromDate == "" {
+			fromDate = today.Format("2006-01-02")
+		}
+		if toDate == "" {
+			toDate = today.Format("2006-01-02")
+		}
+		from, e1 := strictDate(fromDate)
+		to, e2 := strictDate(toDate)
+		if e1 != nil || e2 != nil || to.Before(from) {
+			return Query{}, "", ErrInvalid
+		}
+		q.From = from
+		q.To = to.AddDate(0, 0, 1)
+		if q.To.After(e.now) {
+			q.To = e.now
+		}
+	}
+	page, size, ok := pageLimits(q.Page, q.PageSize, 100)
+	if !ok {
+		return Query{}, "", ErrInvalid
+	}
+	q.Page, q.PageSize = page, size
+	if !validQuery(q) {
+		return Query{}, "", ErrInvalid
+	}
+	return q, view, nil
+}
+
+func strictDate(value string) (time.Time, error) {
+	t, e := time.Parse("2006-01-02", value)
+	if e != nil || t.Format("2006-01-02") != value {
+		return time.Time{}, ErrInvalid
+	}
+	return t.UTC(), nil
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
 }
 
 func timePrefix(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000000000Z") }

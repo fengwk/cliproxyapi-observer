@@ -116,20 +116,7 @@ func dailyID(d daily) string {
 	return string(p)
 }
 func accumulate(b *Bucket, r Record) error {
-	var e error
-	for _, p := range []struct {
-		a *int64
-		b int64
-	}{{&b.Requests, 1}, {&b.CostMicroUSD, r.CostMicroUSD}, {&b.Tokens, r.Tokens.Total}} {
-		*p.a, e = add(*p.a, p.b)
-		if e != nil {
-			return e
-		}
-	}
-	if r.Failed {
-		b.Failures, e = add(b.Failures, 1)
-	}
-	return e
+	return addAggregate(&b.Aggregate, recordAggregate(r))
 }
 func (s *Store) persistLocked(p pending) error {
 	if s.usageFault != nil {
@@ -171,24 +158,16 @@ func (s *Store) persistLocked(p pending) error {
 				*v.used = n
 			}
 		}
-		d := daily{KeyID: r.KeyID, Model: r.Model, Provider: r.Provider, AuthIndex: r.AuthIndex, Failed: r.Failed, Bucket: Bucket{Time: day(r.Time)}}
-		db := tx.Bucket([]byte("daily"))
-		id := dailyID(d)
-		if v := db.Get([]byte(id)); v != nil {
-			if e := decode(v, &d); e != nil {
-				return e
-			}
-		}
-		if e := accumulate(&d.Bucket, r); e != nil {
-			return e
-		}
 		if e := put(kb, k.ID, k); e != nil {
 			return e
 		}
-		if e := put(db, id, d); e != nil {
+		if e := applyRollup(tx, "daily", r, day(r.Time)); e != nil {
 			return e
 		}
-		if e := put(tx.Bucket([]byte("records")), r.ID, recordData{Record: r, Quote: p.Quote, CaptureEnabled: p.CaptureEnabled, CaptureMode: p.CaptureMode}); e != nil {
+		if e := applyRollup(tx, "hourly", r, r.Time.UTC().Truncate(time.Hour)); e != nil {
+			return e
+		}
+		if e := put(tx.Bucket([]byte("records")), r.ID, recordData{Record: r, Quote: p.Quote, CaptureEnabled: p.CaptureEnabled, CaptureMode: p.CaptureMode, StatsVersion: statsVersion}); e != nil {
 			return e
 		}
 		if e := tx.Bucket([]byte("timeline")).Put([]byte(timeID(r)), []byte(r.ID)); e != nil {

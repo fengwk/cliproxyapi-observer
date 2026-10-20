@@ -62,7 +62,7 @@ func (s *Store) Maintenance() error {
 		if e != nil {
 			return e
 		}
-		for _, name := range []string{"records", "daily", "dedup", "correlations"} {
+		for _, name := range []string{"records", "hourly", "daily", "dedup", "correlations"} {
 			b := tx.Bucket([]byte(name))
 			c := b.Cursor()
 			for k, v := c.First(); k != nil; k, v = c.Next() {
@@ -88,6 +88,12 @@ func (s *Store) Maintenance() error {
 							return e
 						}
 					}
+				case "hourly":
+					var d daily
+					if e := decode(v, &d); e != nil {
+						return e
+					}
+					expired = d.Bucket.Time.Before(cut)
 				case "dedup":
 					var entry dedupEntry
 					if e := decode(v, &entry); e != nil {
@@ -204,7 +210,11 @@ func (s *Store) compactLocked(manual bool) error {
 	if e = dst.Sync(); e != nil {
 		return e
 	}
+	// Wait for readers using the old handle, then swap. New query readers cannot
+	// enter because physical maintenance also holds s.mu while this runs.
+	s.dbMu.Lock()
 	if e = os.Rename(stage, s.path); e != nil {
+		s.dbMu.Unlock()
 		return e
 	}
 	old := s.db
@@ -213,6 +223,7 @@ func (s *Store) compactLocked(manual bool) error {
 	// The new locked handle remains valid even if closing/fsync subsequently
 	// fails. Never reopen or revert to the invalid old handle.
 	ce := old.Close()
+	s.dbMu.Unlock()
 	dir, e := os.Open(filepath.Dir(s.path))
 	if e != nil {
 		return e

@@ -19,13 +19,18 @@ import (
 )
 
 type fakePrice struct {
-	cost  int64
-	calls int
+	cost   int64
+	source string
+	calls  int
 }
 
 func (p *fakePrice) Quote(string, string, pricing.Tokens, time.Time) (pricing.Quote, error) {
 	p.calls++
-	return pricing.Quote{CostMicroUSD: p.cost, Source: "manual"}, nil
+	source := p.source
+	if source == "" {
+		source = "manual"
+	}
+	return pricing.Quote{CostMicroUSD: p.cost, Source: source}, nil
 }
 func (*fakePrice) Observe(string, string)         {}
 func (*fakePrice) Configure(pricing.Config) error { return nil }

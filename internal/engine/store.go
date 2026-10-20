@@ -13,7 +13,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-var buckets = []string{"meta", "keys", "hashes", "records", "dedup", "daily", "captures", "capture_state", "capture_fifo", "timeline", "correlations"}
+var buckets = []string{"meta", "keys", "hashes", "records", "dedup", "daily", "hourly", "captures", "capture_state", "capture_fifo", "timeline", "correlations"}
 
 type storedKey struct {
 	Key
@@ -33,6 +33,7 @@ type recordData struct {
 	Quote          pricing.Quote
 	CaptureEnabled bool
 	CaptureMode    string
+	StatsVersion   int
 }
 type Store struct {
 	cutoff       time.Time
@@ -42,6 +43,7 @@ type Store struct {
 	captureFault func() error // fault injection for capture transaction rollback tests
 
 	mu                sync.Mutex
+	dbMu              sync.RWMutex
 	db                *bolt.DB
 	path              string
 	now               func() time.Time
@@ -124,6 +126,9 @@ func storedSettings(raw []byte) (Settings, error) {
 // applies omitted-field preservation for callers that still send partial data.
 func (s *Store) effectiveSettings(v Settings) (Settings, bool) {
 	if v.CaptureMode == "" {
+		// Compatibility boundary for callers that only know the old boolean.
+		// The management layer normalizes new requests explicitly; the store
+		// only applies this projection when capture_mode was truly omitted.
 		switch {
 		case !v.CaptureEnabled && s.settings.CaptureEnabled:
 			v.CaptureMode = CaptureModeOff
@@ -135,18 +140,13 @@ func (s *Store) effectiveSettings(v Settings) (Settings, bool) {
 	} else if !validMode(v.CaptureMode) {
 		return Settings{}, false
 	} else if v.CaptureMode == CaptureModeOff && v.CaptureEnabled {
-		// Current management wiring forwards the older boolean verbatim. Keep
-		// that legacy input useful; the management layer still rejects a truly
-		// contradictory new caller before reaching the store.
+		// Legacy callers round-trip the old boolean with mode=off to enable
+		// capture. This narrow alias is retained for them.
 		v.CaptureMode = CaptureModeHeadersAndBody
-	} else if !v.CaptureEnabled && s.settings.CaptureEnabled && v.CaptureMode == s.settings.CaptureMode {
-		// The old UI round-trips the whole Settings object and only flips the
-		// boolean. Its unchanged mode is therefore a legacy disable request.
-		v.CaptureMode = CaptureModeOff
 	}
-	if !validMode(v.CaptureMode) {
-		return Settings{}, false
-	}
+	// Every other explicit mode wins. In particular headers + enabled=false must
+	// not be silently turned into off; new-caller consistency is enforced by the
+	// management normalization boundary before UpdateSettings is called.
 	v.CaptureEnabled = v.CaptureMode != CaptureModeOff
 	if v.CaptureRetentionSeconds == 0 {
 		v.CaptureRetentionSeconds = s.settings.CaptureRetentionSeconds
@@ -271,16 +271,25 @@ func Open(o Options) (*Store, error) {
 		if e := m.Put([]byte("schema"), []byte("2")); e != nil {
 			return e
 		}
-		if e := m.Put([]byte("observer_features"), []byte("1")); e != nil {
-			return e
-		}
-		return m.Put([]byte("running"), []byte("1"))
+		return m.Put([]byte("observer_features"), []byte("1"))
 	})
 	if e != nil {
 		db.Close()
 		return nil, e
 	}
 	if e = s.pricer.Configure(s.settings.Pricing); e != nil {
+		db.Close()
+		return nil, e
+	}
+	// Backfill before marking the process as running so a crash during the
+	// checkpointed pass does not look like an unclean live-store shutdown.
+	if e = s.backfillStatistics(); e != nil {
+		db.Close()
+		return nil, e
+	}
+	if e = s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte("meta")).Put([]byte("running"), []byte("1"))
+	}); e != nil {
 		db.Close()
 		return nil, e
 	}
@@ -460,7 +469,9 @@ func (s *Store) Close() (result error) {
 	} else if len(s.active) > 0 || len(s.pending) > 0 {
 		e = ErrAccounting
 	}
+	s.dbMu.Lock()
 	ce := s.db.Close()
+	s.dbMu.Unlock()
 	if e != nil {
 		return e
 	}
