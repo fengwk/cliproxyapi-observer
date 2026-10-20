@@ -1,18 +1,18 @@
-# Observer（重构候选，尚未发布）
+# Observer v0.8.0
 
 CLIProxyAPI（CPA）独立原生插件，稳定 ID `cliproxyapi-observer`。提供**专属客户端 Key
 认证、美元额度、固定成本记账与请求日志**，不修改 CPA 核心、请求正文/头、上游选择、
 模型路由、重试或会话。最低 CPA **v8.0.30 / 插件 schema 6**，SDK 锁定 v8.0.30；
 更高 v8 稳定版由 CI 验证，不承诺未验证版本或 v9 兼容。
 
-**本候选保留 v0.6/v0.7 的 schema2 数据库、Key 和历史费用，无需重新发放 Key。**
+**v0.8.0 保留 v0.6/v0.7 的 schema2 数据库、Key 和历史费用，无需重新发放 Key。**
 默认库仍为 `data/cliproxyapi-observer-v2.db`，增量添加 `observer_features=1`、
 小时汇总与内容索引。仅补全仍存在的明细，不重计已有汇总、额度或历史费用。
 从 v0.6.0 之前的旧实现升级时，
 仍须使用新数据库与新 Key；非空且无 schema2 标记的旧库会被拒绝，不会就地改写。
 升级前请备份，安排停流维护；发布不会自动修改生产配置或删除旧数据库。
-本候选不是新 Release；插件商店仍指向已经发布的版本。
 当前能力、API、SDK 限制和安全升级/回退步骤见 [重构说明](docs/reconstruction.md)。
+本版变化与升级须知见 [v0.8.0 发布说明](docs/release-notes-v0.8.0.md)；
 原 [v0.7.0 发布说明](docs/release-notes-v0.7.0.md) 仅描述历史发布。
 
 ## 安装与首次启动
@@ -71,7 +71,7 @@ CPA 原生 Key 继续由宿主管理，不进入 Observer 账本。目录/count 
 并发槽或内容采集；count 仍检查 Observer Key 的模型授权。
 **不要把同一明文同时设为 CPA 原生 Key 与 Observer Key**，否则宿主可能自行认证，
 Observer 的禁用/删除无法撤销另一套凭据。SDK 在完全没有原生 Key 的匿名配置中，
-注册认证 provider 会改变匿名行为（可能从 200 变为 401）；本候选不承诺透明匿名模式，
+注册认证 provider 会改变匿名行为（可能从 200 变为 401）；本版不承诺透明匿名模式，
 也不通过一律认证成功掩盖该限制。混合凭据来源亦由宿主 provider 顺序决定。
 卸载/停用插件后不能期待 Observer 继续保护请求；管理密钥也不用于推理。
 
@@ -177,7 +177,8 @@ CPA 宿主用量队列**不持久化且没有可靠的热替换前排空保证**
 一次一致 DB 读取返回范围/as_of、概览、趋势和选定明细或分组及覆盖情况；
 as_of 不是下一次查询可复用的快照令牌。过滤参数
 `key_id/model/provider/auth_index/status`，分页 `page`（默认1）、
-`page_size`（默认25，最多100），返回 `items/page/page_size/has_more`。
+`page_size`（默认25，最多100）。旧 `/requests` 返回 `items/page/page_size/has_more`；
+新 `/requests/view` 返回 `records` 或 `groups`，分页位于 `pagination` 对象。
 未知/畸形参数、未知字段、尾随 JSON 和不支持的方法拒绝；输入 JSON 上限1MiB。
 `/requests/facets?field=model|key_id|provider|auth_index&search=&cursor=&limit=`
 读取保留范围内历史维度，limit 最多 100。`GET /keys?include_deleted=true` 查询墓碑；
@@ -222,7 +223,7 @@ python3 scripts/test_publish_release.py
 浏览器入口见 [现有说明](internal/web/browser/README.md)，使用本地假数据和实际 Chrome，
 CI 上传报告及截图。`make build` 验证本机 c-shared；发布矩阵仍构建三个平台。
 版本通过 `internal/plugin.Version` ldflags 注入，正式版本来自 tag，开发构建为
-`0.7.0-dev+<commit>`，不取 SDK 版本。
+`0.8.0-dev+<commit>`，不取 SDK 版本。
 
 现有依赖维护策略保留：仅白名单 Go/官方 Actions 纯版本升级可经完整 CI 后自动合并，
 普通功能合并不会触发自动发版；不可变发布器校验源码、三个平台归档与校验和，

@@ -1092,7 +1092,7 @@ function createServer(options) {
         config: { 'api-keys': ['host-browser-probe-only'] },
         plugins: { plugins_enabled: true, plugins_dir: 'plugins', plugins: [{
           id: PLUGIN_ID, enabled: true, effective_enabled: true, registered: true, configured: true,
-          metadata: { name: 'Observer', version: '0.7.0' },
+          metadata: { name: 'Observer', version: '0.8.0' },
           menus: [{ path: RESOURCE_BASE + '/ui', menu: 'Observer', description: 'Key 与用量管理' }],
         }] },
         'auth-files': { files: [] }, usage: { usage: {} }, 'latest-version': { 'latest-version': 'v8.0.33' },
