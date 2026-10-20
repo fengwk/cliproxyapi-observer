@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -111,7 +112,7 @@ func rawWebSocket(t *testing.T, h *harness, secret string) (net.Conn, *bufio.Rea
 		conn.Close()
 		t.Fatal(err)
 	}
-	key := base64.StdEncoding.EncodeToString([]byte("observer-ws-test"))
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 16))
 	request := fmt.Sprintf("GET /v1/responses HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer %s\r\n\r\n",
 		strings.TrimPrefix(h.baseURL, "http://"), key, secret)
 	if _, err = io.WriteString(conn, request); err != nil {
@@ -193,6 +194,9 @@ func readWebSocketFrame(reader *bufio.Reader) (fin bool, opcode byte, payload []
 		}
 		length = binary.BigEndian.Uint64(size[:])
 	}
+	if length > 1<<20 {
+		return false, 0, nil, fmt.Errorf("WebSocket frame length %d exceeds 1MiB", length)
+	}
 	if header[1]&0x80 != 0 {
 		mask := make([]byte, 4)
 		if _, err = io.ReadFull(reader, mask); err != nil {
@@ -215,25 +219,50 @@ func readWebSocketFrame(reader *bufio.Reader) (fin bool, opcode byte, payload []
 // A native key may complete the Responses WebSocket handshake; the per-turn
 // before hook must still deny execution without dispatching to the fake
 // upstream. This is execution denial, not a handshake-status guarantee.
+const nativeResponsesWSTurn = `{"type":"response.create","model":"` + modelName + `","input":[{"role":"user","content":"observer"}]}`
+
+// TestNativeResponsesWebSocketExecutionIsDenied proves the per-turn hook, not
+// a handshake-status guarantee. A plugin-disabled host first executes the same
+// known-valid turn against the fake upstream. The guarded host must then reach
+// the before hook and close without dispatch; v8.0.30 intentionally discards a
+// DirectResponse body on WS, so EOF/close is the only client-visible denial and
+// a read timeout or malformed turn must fail instead of counting as success.
 func TestNativeResponsesWebSocketExecutionIsDenied(t *testing.T) {
+	baseline := newHarnessWith(t, hostOptions{PluginDisabled: true})
+	baseConn, _ := rawWebSocket(t, baseline, clientKey)
+	if err := writeWebSocketText(baseConn, []byte(nativeResponsesWSTurn)); err != nil {
+		baseConn.Close()
+		t.Fatal(err)
+	}
+	baseline.await(t, "baseline WebSocket turn reaches the fake upstream", func() bool {
+		return baseline.mock.callCount() >= 1
+	})
+	_ = baseConn.Close()
+
 	h := newHarness(t)
 	conn, reader := rawWebSocket(t, h, clientKey)
 	defer conn.Close()
-
-	if err := writeWebSocketText(conn, []byte(`{"type":"response.create","model":"`+modelName+`","input":[{"role":"user","content":"observer"}]}`)); err != nil {
+	if err := writeWebSocketText(conn, []byte(nativeResponsesWSTurn)); err != nil {
 		t.Fatal(err)
 	}
+
 	var messages bytes.Buffer
 	closed := false
 	sawCode := false
 	for i := 0; i < 32; i++ {
 		fin, opcode, payload, err := readWebSocketFrame(reader)
 		if err != nil {
-			// v8.0.30 suppresses a DirectResponse body on WS (403 with a nil
-			// Error means "close without an error event"), so EOF after the
-			// turn is the observable denial. Never treat it as success.
-			closed = true
-			break
+			// Only EOF/closed counts as the SDK's silent denial; a timeout
+			// means the guard never completed and must fail.
+			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+				closed = true
+				break
+			}
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				t.Fatalf("WebSocket read timed out instead of closing; messages=%s", truncate(messages.Bytes(), 500))
+			}
+			t.Fatalf("unexpected WebSocket read error: %v; messages=%s", err, truncate(messages.Bytes(), 500))
 		}
 		switch opcode {
 		case 0x1:
@@ -249,8 +278,11 @@ func TestNativeResponsesWebSocketExecutionIsDenied(t *testing.T) {
 		}
 	}
 	if !sawCode && !closed {
-		t.Fatalf("WebSocket turn neither received an observer_key_required event nor closed; messages=%s", truncate(messages.Bytes(), 500))
+		t.Fatalf("WebSocket turn neither received a denial nor closed; messages=%s", truncate(messages.Bytes(), 500))
 	}
+	// The host artifact records the intercepted execution session, while the
+	// zero upstream count proves the before hook closed it before dispatch.
+	h.waitForLog(t, "upstream execution session closed", 5*time.Second)
 	if calls := h.mock.callCount(); calls != 0 {
 		t.Fatalf("native WebSocket execution reached the fake upstream %d times", calls)
 	}
