@@ -15,7 +15,7 @@ export interface RequestsMetricsProps {
 }
 
 export function RequestsMetrics({ summary, coverage }: RequestsMetricsProps) {
-  const details = summary?.detailed_requests === 0 ? null : summary;
+  const details = summary?.detailed_requests === 0 || summary?.complete_requests === 0 ? null : summary;
   // 1. Requests
   const totalRequests = summary?.requests !== undefined ? formatNumber(summary.requests) : '—';
   const completedRequestsSub =
@@ -36,7 +36,7 @@ export function RequestsMetrics({ summary, coverage }: RequestsMetricsProps) {
     summary?.reasoning_tokens && summary.reasoning_tokens > 0
       ? `(含思考 ${formatNumber(summary.reasoning_tokens)})`
       : '';
-  const tokensSub = `入 ${inTokens} / 出 ${outTokens} ${reasoningNote}`.trim();
+  const tokensSub = `未缓存入 ${inTokens} / 出 ${outTokens} ${reasoningNote}`.trim();
 
   // 4. Cache Hit Rate & Read/Write
   const hitRateStr = calculateCacheHitRate(
@@ -54,7 +54,7 @@ export function RequestsMetrics({ summary, coverage }: RequestsMetricsProps) {
   // 5. Latency & TTFT
   const avgLatency = formatAvgLatency(summary?.latency_ms, summary?.latency_samples);
   const avgTTFT = formatAvgTTFT(summary?.ttft_ms, summary?.ttft_samples);
-  const latencySub = `平均 TTFT: ${avgTTFT}`;
+  const latencySub = `TTFT: ${avgTTFT} · 样本 ${summary?.ttft_samples ?? '—'} / 耗时样本 ${summary?.latency_samples ?? '—'}`;
 
   // 6. Cost
   const totalCost = summary ? `$${formatCostExact(summary.cost_micro_usd)}` : '—';

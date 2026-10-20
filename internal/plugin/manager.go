@@ -468,11 +468,10 @@ func (m *Manager) before(raw []byte) (out []byte, err error) {
 		}
 		return okEnvelope(pluginapi.RequestInterceptResponse{})
 	}
-	generate := true
-	if b, ok := r.Metadata[coreexecutor.GenerateMetadataKey].(bool); ok {
-		generate = b
-	}
-	if e == nil && generate {
+	// The exact supported operation, not a generic Generate flag, owns
+	// admission. Count helpers were returned above. A misleading false flag on
+	// a real generation route must never bypass quotas or concurrency.
+	if e == nil {
 		if _, fault := m.billingFaults.Load(id); fault {
 			return okEnvelope(denied(503))
 		}
@@ -487,9 +486,7 @@ func (m *Manager) before(raw []byte) (out []byte, err error) {
 	if e != nil {
 		return okEnvelope(denied(denialStatus(e)))
 	}
-	if generate {
-		m.store.Capture(engine.CaptureInput{RequestID: r.RequestID, TraceID: r.TraceID, KeyID: id, Headers: r.Headers, Body: r.Body, At: m.now()})
-	}
+	m.store.Capture(engine.CaptureInput{RequestID: r.RequestID, TraceID: r.TraceID, KeyID: id, Headers: r.Headers, Body: r.Body, At: m.now()})
 	return okEnvelope(pluginapi.RequestInterceptResponse{})
 }
 

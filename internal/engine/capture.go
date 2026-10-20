@@ -108,38 +108,46 @@ func migrateCaptureIndex(tx *bolt.Tx, retention int) error {
 	m := tx.Bucket([]byte("meta"))
 	fifo := tx.Bucket([]byte("capture_fifo"))
 	captures := tx.Bucket([]byte("captures"))
-	if m.Get([]byte("capture_index_ready")) == nil {
-		if e := tx.DeleteBucket([]byte("capture_fifo")); e != nil && e != bolt.ErrBucketNotFound {
-			return e
+	if string(m.Get([]byte("capture_index_ready"))) != "2" {
+		for _, name := range []string{"capture_fifo", "capture_expiry"} {
+			if e := tx.DeleteBucket([]byte(name)); e != nil && e != bolt.ErrBucketNotFound {
+				return e
+			}
+			if _, e := tx.CreateBucket([]byte(name)); e != nil {
+				return e
+			}
 		}
-		var e error
-		if fifo, e = tx.CreateBucket([]byte("capture_fifo")); e != nil {
-			return e
-		}
-		states := tx.Bucket([]byte("capture_state"))
-		if e = captures.ForEach(func(k, v []byte) error {
+		fifo = tx.Bucket([]byte("capture_fifo"))
+		if e := captures.ForEach(func(k, v []byte) error {
 			var c capture
 			if e := decode(v, &c); e != nil {
 				return e
 			}
-			at := c.At
-			if at.IsZero() {
-				at = time.Unix(0, 0).UTC()
+			st, e := loadCaptureState(tx, string(k))
+			if e != nil {
+				return e
 			}
-			// Legacy rows have no saved expiry. Record the inherited expiry in
-			// lightweight state without rewriting their compressed content.
-			if c.Version < captureEnvelopeVersion && states.Get(k) == nil && !c.At.IsZero() {
-				hs, bs, status, reason := legacyCaptureStatuses(c)
-				st := captureState{RequestID: c.RequestID, At: c.At, ExpiresAt: c.At.Add(time.Duration(retention) * time.Second), HeadersStatus: hs, BodyStatus: bs, Status: status, Reason: reason, OriginalBytes: c.OriginalBytes, CompressedBytes: int64(len(v))}
-				if e := putCaptureState(tx, string(k), st); e != nil {
-					return e
+			if st.At.IsZero() {
+				st = stateFromCapture(c, int64(len(v)))
+				if c.Version < captureEnvelopeVersion {
+					st.HeadersStatus, st.BodyStatus, st.Status, st.Reason = legacyCaptureStatuses(c)
 				}
 			}
-			return fifo.Put([]byte(captureFIFOKey(at, string(k))), k)
+			if st.At.IsZero() {
+				st.At = time.Unix(0, 0).UTC()
+			}
+			expiry := st.At.Add(time.Duration(retention) * time.Second)
+			if st.ExpiresAt.IsZero() || expiry.Before(st.ExpiresAt) {
+				st.ExpiresAt = expiry
+			}
+			if e := putCaptureState(tx, string(k), st); e != nil {
+				return e
+			}
+			return fifo.Put([]byte(captureFIFOKey(st.At, string(k))), k)
 		}); e != nil {
 			return e
 		}
-		if e = m.Put([]byte("capture_index_ready"), []byte("1")); e != nil {
+		if e := m.Put([]byte("capture_index_ready"), []byte("2")); e != nil {
 			return e
 		}
 	}
@@ -269,6 +277,7 @@ func (s *Store) Capture(v CaptureInput) bool {
 		v.At = v.At.UTC()
 	}
 	v.mode = mode
+	v.expiresAt = v.At.Add(time.Duration(s.settings.CaptureRetentionSeconds) * time.Second)
 	v.generation = s.captureGeneration
 	v.originalBytes = int64(len(v.Body))
 
@@ -421,6 +430,9 @@ func (s *Store) writeCapture(v CaptureInput, c capture) {
 	}
 	retention := s.settings.CaptureRetentionSeconds
 	c.ExpiresAt = c.At.Add(time.Duration(retention) * time.Second)
+	if !v.expiresAt.IsZero() && v.expiresAt.Before(c.ExpiresAt) {
+		c.ExpiresAt = v.expiresAt
+	}
 	c.Status = captureAggregate(c)
 	now := s.now().UTC()
 	var evicted, storageDropped int64
@@ -441,8 +453,8 @@ func (s *Store) writeCapture(v CaptureInput, c capture) {
 		}
 		b := tx.Bucket([]byte("captures"))
 		if old := b.Get([]byte(id)); old != nil {
-			var previous capture
-			if e := decode(old, &previous); e != nil {
+			previous, e := captureMetadata(tx, id, old)
+			if e != nil {
 				return e
 			}
 			if previous.RequestID == v.RequestID {
@@ -456,6 +468,9 @@ func (s *Store) writeCapture(v CaptureInput, c capture) {
 		// mistakes stale content for live pressure.
 		if _, e := cleanupExpiredLocked(tx, now, retention); e != nil {
 			return e
+		}
+		if !now.Before(c.ExpiresAt) {
+			return putCaptureState(tx, id, removedCaptureState(c, captureState{}, 0, captureStatusExpired, captureReasonExpired))
 		}
 		payload, e := encode(c)
 		if e != nil {
@@ -531,7 +546,39 @@ func removedCaptureState(c capture, prior captureState, compressed int64, status
 	return st
 }
 func putCaptureState(tx *bolt.Tx, id string, st captureState) error {
+	// Expiry and FIFO indexes contain metadata only. Updating the saved policy
+	// must not decode/recompress every request body.
+	expiry := tx.Bucket([]byte("capture_expiry"))
+	if expiry != nil {
+		prior, e := loadCaptureState(tx, id)
+		if e != nil {
+			return e
+		}
+		if !prior.ExpiresAt.IsZero() {
+			if e := expiry.Delete([]byte(captureFIFOKey(prior.ExpiresAt, id))); e != nil {
+				return e
+			}
+		}
+		if tx.Bucket([]byte("captures")).Get([]byte(id)) != nil && !st.ExpiresAt.IsZero() {
+			if e := expiry.Put([]byte(captureFIFOKey(st.ExpiresAt, id)), []byte(id)); e != nil {
+				return e
+			}
+		}
+	}
 	return put(tx.Bucket([]byte("capture_state")), id, st)
+}
+
+func captureMetadata(tx *bolt.Tx, id string, raw []byte) (captureState, error) {
+	st, e := loadCaptureState(tx, id)
+	if e != nil || !st.At.IsZero() || raw == nil {
+		return st, e
+	}
+	// Only pre-index legacy/direct test fixtures can lack lightweight metadata.
+	var c capture
+	if e := decode(raw, &c); e != nil {
+		return st, e
+	}
+	return stateFromCapture(c, int64(len(raw))), nil
 }
 func deleteCaptureIndex(tx *bolt.Tx, id string, at time.Time) error {
 	return tx.Bucket([]byte("capture_fifo")).Delete([]byte(captureFIFOKey(at, id)))
@@ -552,11 +599,7 @@ func removeCaptureContent(tx *bolt.Tx, id, status, reason string) error {
 		}
 		return nil
 	}
-	var c capture
-	if e := decode(raw, &c); e != nil {
-		return e
-	}
-	prior, e := loadCaptureState(tx, id)
+	prior, e := captureMetadata(tx, id, raw)
 	if e != nil {
 		return e
 	}
@@ -564,13 +607,15 @@ func removeCaptureContent(tx *bolt.Tx, id, status, reason string) error {
 	if e := b.Delete([]byte(id)); e != nil {
 		return e
 	}
-	if e := deleteCaptureIndex(tx, id, c.At); e != nil {
+	if e := deleteCaptureIndex(tx, id, prior.At); e != nil {
 		return e
 	}
 	if e := setCaptureUsed(tx, used-int64(len(raw))); e != nil {
 		return e
 	}
-	return putCaptureState(tx, id, removedCaptureState(c, prior, int64(len(raw)), status, reason))
+	prior.CompressedBytes = int64(len(raw))
+	prior.HeadersStatus, prior.BodyStatus, prior.Status, prior.Reason = status, status, status, reason
+	return putCaptureState(tx, id, prior)
 }
 
 func captureExpired(c capture, st captureState, now time.Time, retention int) bool {
@@ -598,13 +643,19 @@ func captureExpired(c capture, st captureState, now time.Time, retention int) bo
 func cleanupExpiredLocked(tx *bolt.Tx, now time.Time, retention int) (CleanupResult, error) {
 	out := CleanupResult{}
 	b := tx.Bucket([]byte("captures"))
-	f := tx.Bucket([]byte("capture_fifo"))
+	f := tx.Bucket([]byte("capture_expiry"))
 	if b == nil || f == nil {
 		return out, nil
 	}
-	used := captureUsedBytes(tx)
 	c := f.Cursor()
-	for k, v := c.First(); k != nil; k, v = c.Next() {
+	for k, v := c.First(); k != nil; k, v = c.First() {
+		prefix := timePrefix(now)
+		if len(k) < len(prefix) {
+			return out, ErrInvalid
+		}
+		if string(k[:len(prefix)]) > prefix {
+			break
+		}
 		id := captureIndexID(k, v)
 		raw := b.Get([]byte(id))
 		if raw == nil {
@@ -613,34 +664,21 @@ func cleanupExpiredLocked(tx *bolt.Tx, now time.Time, retention int) (CleanupRes
 			}
 			continue
 		}
-		var cap capture
-		if e := decode(raw, &cap); e != nil {
+		st, e := captureMetadata(tx, id, raw)
+		if e != nil {
 			return out, e
 		}
-		var st captureState
-		if rawState := tx.Bucket([]byte("capture_state")).Get([]byte(id)); rawState != nil {
-			if e := decode(rawState, &st); e != nil {
+		if st.ExpiresAt.After(now) {
+			if e := c.Delete(); e != nil {
 				return out, e
 			}
-		}
-		if !captureExpired(cap, st, now, retention) {
 			continue
 		}
-		if e := b.Delete([]byte(id)); e != nil {
-			return out, e
-		}
-		if e := c.Delete(); e != nil {
+		if e := removeCaptureContent(tx, id, captureStatusExpired, captureReasonExpired); e != nil {
 			return out, e
 		}
 		out.RemovedRecords++
 		out.RemovedBytes += int64(len(raw))
-		st = removedCaptureState(cap, st, int64(len(raw)), captureStatusExpired, captureReasonExpired)
-		if e := putCaptureState(tx, id, st); e != nil {
-			return out, e
-		}
-	}
-	if e := setCaptureUsed(tx, used-out.RemovedBytes); e != nil {
-		return out, e
 	}
 	return out, nil
 }
@@ -667,26 +705,11 @@ func evictOldestLocked(tx *bolt.Tx, needed, limit int64, retention int) (int64, 
 			}
 			continue
 		}
-		var cap capture
-		if e := decode(raw, &cap); e != nil {
-			return evicted, e
-		}
-		prior, e := loadCaptureState(tx, id)
-		if e != nil {
-			return evicted, e
-		}
-		if e := b.Delete([]byte(id)); e != nil {
-			return evicted, e
-		}
-		if e := c.Delete(); e != nil {
+		if e := removeCaptureContent(tx, id, captureStatusEvicted, captureReasonCapacity); e != nil {
 			return evicted, e
 		}
 		used -= int64(len(raw))
 		evicted++
-		st := removedCaptureState(cap, prior, int64(len(raw)), captureStatusEvicted, captureReasonCapacity)
-		if e := putCaptureState(tx, id, st); e != nil {
-			return evicted, e
-		}
 	}
 	if e := setCaptureUsed(tx, used); e != nil {
 		return evicted, e
@@ -699,42 +722,35 @@ func evictOldestLocked(tx *bolt.Tx, needed, limit int64, retention int) (int64, 
 func reconfigureCaptures(tx *bolt.Tx, now time.Time, oldRetention, retention int, limit int64) error {
 	if retention < oldRetention {
 		b := tx.Bucket([]byte("captures"))
-		oldUsed := captureUsedBytes(tx)
 		type update struct {
-			key, payload []byte
-			delta        int64
+			id    string
+			state captureState
 		}
 		var updates []update
-		if e := b.ForEach(func(k, v []byte) error {
-			var c capture
-			if e := decode(v, &c); e != nil {
-				return e
-			}
-			if c.At.IsZero() {
+		if e := tx.Bucket([]byte("capture_state")).ForEach(func(k, _ []byte) error {
+			if b.Get(k) == nil {
 				return nil
 			}
-			tight := c.At.Add(time.Duration(retention) * time.Second)
-			if c.ExpiresAt.IsZero() || tight.Before(c.ExpiresAt) {
-				c.ExpiresAt = tight
-				payload, e := encode(c)
-				if e != nil {
-					return e
-				}
-				updates = append(updates, update{key: append([]byte(nil), k...), payload: payload, delta: int64(len(payload) - len(v))})
+			st, e := loadCaptureState(tx, string(k))
+			if e != nil {
+				return e
+			}
+			if st.At.IsZero() {
+				return nil
+			}
+			tight := st.At.Add(time.Duration(retention) * time.Second)
+			if st.ExpiresAt.IsZero() || tight.Before(st.ExpiresAt) {
+				st.ExpiresAt = tight
+				updates = append(updates, update{id: string(k), state: st})
 			}
 			return nil
 		}); e != nil {
 			return e
 		}
-		var delta int64
 		for _, u := range updates {
-			if e := b.Put(u.key, u.payload); e != nil {
+			if e := putCaptureState(tx, u.id, u.state); e != nil {
 				return e
 			}
-			delta += u.delta
-		}
-		if e := setCaptureUsed(tx, oldUsed+delta); e != nil {
-			return e
 		}
 	}
 	if _, e := cleanupExpiredLocked(tx, now, retention); e != nil {
@@ -799,10 +815,9 @@ func (s *Store) PurgeCaptures() (CleanupResult, error) {
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			out.RemovedRecords++
 			out.RemovedBytes += int64(len(v))
-			var cap capture
-			if e := decode(v, &cap); e == nil {
-				prior, _ := loadCaptureState(tx, string(k))
-				st := removedCaptureState(cap, prior, int64(len(v)), captureStatusPurged, captureReasonPurged)
+			if st, e := captureMetadata(tx, string(k), v); e == nil {
+				st.CompressedBytes = int64(len(v))
+				st.HeadersStatus, st.BodyStatus, st.Status, st.Reason = captureStatusPurged, captureStatusPurged, captureStatusPurged, captureReasonPurged
 				if e := putCaptureState(tx, string(k), st); e != nil {
 					return e
 				}
@@ -815,6 +830,12 @@ func (s *Store) PurgeCaptures() (CleanupResult, error) {
 			return e
 		}
 		if _, e := tx.CreateBucketIfNotExists([]byte("capture_fifo")); e != nil {
+			return e
+		}
+		if e := tx.DeleteBucket([]byte("capture_expiry")); e != nil && e != bolt.ErrBucketNotFound {
+			return e
+		}
+		if _, e := tx.CreateBucketIfNotExists([]byte("capture_expiry")); e != nil {
 			return e
 		}
 		if e := tx.Bucket([]byte("meta")).Put([]byte("capture_generation"), []byte(strconv.FormatUint(s.captureGeneration, 10))); e != nil {

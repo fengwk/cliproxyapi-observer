@@ -42,6 +42,8 @@ func TestManagementRegistrationHasOnlyStaticExactRoutes(t *testing.T) {
 		"POST " + routeKeyReset:        true,
 		"POST " + routeKeyRecover:      true,
 		"GET " + routeRequests:         true,
+		"GET " + routeRequestView:      true,
+		"GET " + routeRequestFacets:    true,
 		"GET " + routeRequestDetail:    true,
 		"GET " + routeSummary:          true,
 		"GET " + routeSettings:         true,

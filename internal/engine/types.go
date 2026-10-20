@@ -60,6 +60,7 @@ type CaptureInput struct {
 	// Queue snapshot fields. They are internal so plugin callers keep using the
 	// stable exported shape while the worker can re-check the accepted policy.
 	mode           string
+	expiresAt      time.Time
 	generation     uint64
 	bodyTooLarge   bool
 	headersTooWide bool

@@ -76,6 +76,7 @@ func TestBrowserAgainstRealHost(t *testing.T) {
 
 	settings := acceptanceGetSettings(t, h)
 	settings["capture_enabled"] = true
+	settings["capture_mode"] = "headers_and_body"
 	var updated acceptanceSettings
 	h.api(t, http.MethodPut, "/settings", settings, http.StatusOK, &updated)
 	if !updated.CaptureEnabled {

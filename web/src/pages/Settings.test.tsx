@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { SettingsPage } from './Settings';
 import type { ApiClient } from '../lib/api';
 import type { Settings, PriceSnapshot, Health, ModelInfo, PricePreview } from '../lib/types';
@@ -581,8 +581,9 @@ describe('SettingsPage', () => {
     expect(putCalls.length).toBe(0);
   });
 
-  // Intent: 验证延迟到达的后台轮询响应不会覆盖用户已编辑的未保存草稿 (deferred poll arriving after user edit does not clobber draft)
-  it('does not overwrite active user draft when deferred background poll completes', async () => {
+  // A manual refresh can finish after editing starts; confirmed data changes
+  // must not clobber a draft. Actually resolve the deferred request.
+  it('does not overwrite active user draft when a deferred manual refresh completes', async () => {
     let resolveDeferredPoll!: (val: Settings) => void;
     let pollCount = 0;
 
@@ -616,6 +617,9 @@ describe('SettingsPage', () => {
       expect(screen.getByTestId('observer-settings')).toBeDefined();
     });
 
+    fireEvent.click(screen.getByRole('button', { name: '刷新状态' }));
+    await waitFor(() => expect(pollCount).toBe(2));
+
     // User edits draft: change capacity amount from 1 to 2
     const bodyInput = screen.getByLabelText('单条请求体上限数值');
     fireEvent.change(bodyInput, { target: { value: '2' } });
@@ -624,22 +628,20 @@ describe('SettingsPage', () => {
     expect(onDirtyChange).toHaveBeenLastCalledWith(true);
 
     // Now resolve the deferred poll with new server settings that would normally change body bytes to 5242880 (5MB)
-    if (resolveDeferredPoll) {
+    await act(async () => {
       resolveDeferredPoll({
         ...initialSettings,
         max_body_bytes: 5242880,
       });
-    }
-
-    // Give microtasks time to run
-    await new Promise((r) => setTimeout(r, 50));
+    });
 
     // Draft should NOT be overwritten; input value must still be 2
     expect((screen.getByLabelText('单条请求体上限数值') as HTMLInputElement).value).toBe('2');
   });
 
-  // Intent: 验证当存在脏数据或确认弹窗打开时，轮询被暂停且不再发送周期请求 (dirty drafts or open modals stop polling)
-  it('pauses periodic polling when draft is dirty or when compact modal is open', async () => {
+  // Settings never polls, even if a caller passes a nonzero interval;
+  // dialog/dirty transitions must not reload the price table.
+  it('does not poll or reload on modal or dirty transitions', async () => {
     vi.useFakeTimers();
     try {
       let settingsCalls = 0;
@@ -663,7 +665,7 @@ describe('SettingsPage', () => {
       render(<SettingsPage api={mockApi} refreshInterval={5} onDirtyChange={onDirtyChange} />);
 
       // Initial execution
-      await vi.advanceTimersByTimeAsync(10);
+      await act(async () => { await vi.advanceTimersByTimeAsync(10); });
       expect(settingsCalls).toBe(1);
 
       // Open compact modal
@@ -672,22 +674,22 @@ describe('SettingsPage', () => {
       expect(screen.getByTestId('compact-confirm')).toBeDefined();
 
       // Advance time by 15s while modal is open; polling should be paused
-      await vi.advanceTimersByTimeAsync(15000);
+      await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
       expect(settingsCalls).toBe(1);
 
-      // Close modal (unpauses, triggering one execute)
+      // Closing a modal is not a refresh event.
       const cancelBtn = screen.getByTestId('compact-cancel');
       fireEvent.click(cancelBtn);
-      await vi.advanceTimersByTimeAsync(10);
-      expect(settingsCalls).toBe(2);
+      await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+      expect(settingsCalls).toBe(1);
 
       // Now make draft dirty
       const captureSwitch = screen.getByLabelText('保存请求内容');
       fireEvent.click(captureSwitch);
 
       // Advance time again by 20s; dirty draft keeps periodic polling paused
-      await vi.advanceTimersByTimeAsync(20000);
-      expect(settingsCalls).toBe(2);
+      await act(async () => { await vi.advanceTimersByTimeAsync(20000); });
+      expect(settingsCalls).toBe(1);
     } finally {
       vi.useRealTimers();
     }
@@ -839,5 +841,119 @@ describe('SettingsPage', () => {
 
     // Only one PUT request should have been dispatched
     expect(putCallsCount).toBe(1);
+  });
+
+  // A state refresh cannot race a write or unmount the last valid table on
+  // failure. Keep the dirty draft and allow saving it after the read settles.
+  it('serializes state refresh against saves and preserves exact table nodes on refresh failure', async () => {
+    const original = mockApi.request;
+    let failRefresh = false;
+    let rejectRefresh!: (error: Error) => void;
+    mockApi.request = vi.fn((path, options) => {
+      if (path === '/settings' && !options?.method && failRefresh) {
+        return new Promise((_, reject) => { rejectRefresh = reject; });
+      }
+      return original(path, options);
+    }) as ApiClient['request'];
+    render(<SettingsPage api={mockApi} onDirtyChange={onDirtyChange} />);
+    const row = (await screen.findByText('custom-unpriced-model')).closest('tr');
+    fireEvent.change(screen.getByLabelText('单条请求体上限数值'), { target: { value: '2' } });
+    failRefresh = true;
+    fireEvent.click(screen.getByRole('button', { name: '刷新状态' }));
+    await waitFor(() => expect(rejectRefresh).toBeDefined());
+    const save = screen.getByTestId('settings-general-save');
+    expect(save).toBeDisabled();
+    fireEvent.click(save);
+    expect(vi.mocked(mockApi.request).mock.calls.filter(([, opts]) => opts?.method === 'PUT')).toHaveLength(0);
+    await act(async () => { rejectRefresh(new Error('state offline')); });
+    expect(screen.getByText(/state offline.*保留上次成功状态/)).toBeInTheDocument();
+    expect(screen.getByText('custom-unpriced-model').closest('tr')).toBe(row);
+    expect(screen.getByLabelText('单条请求体上限数值')).toHaveValue('2');
+    expect(save).toBeEnabled();
+    fireEvent.click(save);
+    await screen.findByText('请求记录与存储限制设置已保存');
+    expect(vi.mocked(mockApi.request).mock.calls.find(([, opts]) => opts?.method === 'PUT')?.[1]?.body)
+      .toMatchObject({ max_body_bytes: 2 * 1048576 });
+  });
+
+  // A narrower capture mode and non-minute TTL must survive unrelated edits.
+  // Invalid TTL cannot be sent; stopping capture must not become a purge.
+  it('preserves headers-only mode and exact TTL, validates bounds and turns capture off explicitly', async () => {
+    const original = mockApi.request;
+    mockApi.request = vi.fn((path, options) => {
+      if (path === '/settings' && !options?.method) return Promise.resolve({
+        ...initialSettings, capture_enabled: true, capture_mode: 'headers', capture_retention_seconds: 75,
+      });
+      return original(path, options);
+    }) as ApiClient['request'];
+    render(<SettingsPage api={mockApi} onDirtyChange={onDirtyChange} />);
+    const ttl = await screen.findByLabelText('内容保留时间（秒）');
+    fireEvent.change(ttl, { target: { value: '59' } });
+    fireEvent.click(screen.getByTestId('settings-general-save'));
+    expect(await screen.findByText(/至少 60 秒/)).toBeInTheDocument();
+    const puts = () => vi.mocked(mockApi.request).mock.calls.filter(call => call[1]?.method === 'PUT');
+    expect(puts()).toHaveLength(0);
+    fireEvent.change(ttl, { target: { value: '75' } });
+    fireEvent.click(screen.getByTestId('settings-general-save'));
+    await screen.findByText('请求记录与存储限制设置已保存');
+    expect(puts()[0][1]?.body).toMatchObject({ capture_enabled: true, capture_mode: 'headers', capture_retention_seconds: 75 });
+    fireEvent.click(screen.getByLabelText('保存请求内容'));
+    fireEvent.click(screen.getByTestId('settings-general-save'));
+    await waitFor(() => expect(puts()).toHaveLength(2));
+    expect(puts()[1][1]?.body).toMatchObject({ capture_enabled: false, capture_mode: 'off', capture_retention_seconds: 75 });
+    expect(vi.mocked(mockApi.request).mock.calls.some(call => call[0].startsWith('/captures/'))).toBe(false);
+  });
+
+  // Destructive content deletion needs its own confirmation and API payload;
+  // neither cancellation nor cleanup may silently become a global purge.
+  it('separates expired cleanup and confirmed purge without touching accounting', async () => {
+    const original = mockApi.request;
+    mockApi.request = vi.fn((path, options) => path.startsWith('/captures/')
+      ? Promise.resolve({ removed_records: 2, removed_bytes: 2048 }) : original(path, options)) as ApiClient['request'];
+    render(<SettingsPage api={mockApi} onDirtyChange={onDirtyChange} />);
+    fireEvent.click(await screen.findByRole('button', { name: '立即清空全部内容' }));
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    expect(vi.mocked(mockApi.request).mock.calls.some(call => call[0] === '/captures/purge')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: '清理过期内容' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认执行' }));
+    await screen.findByText(/已移除 2 条内容/);
+    expect(vi.mocked(mockApi.request).mock.calls.find(call => call[0] === '/captures/cleanup')?.[1]?.body).toBeUndefined();
+    fireEvent.click(screen.getByRole('button', { name: '立即清空全部内容' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认执行' }));
+    await waitFor(() => expect(vi.mocked(mockApi.request).mock.calls.find(call => call[0] === '/captures/purge')?.[1]?.body).toEqual({ confirm: true }));
+    expect(vi.mocked(mockApi.request).mock.calls.some(call => call[0].startsWith('/keys/'))).toBe(false);
+  });
+
+  // Candidates become explicit billing mappings in the pricing draft, not a
+  // model-route rewrite or an immediate server write.
+  it('saves a selected catalog candidate as an explicit pricing mapping', async () => {
+    const original = mockApi.request;
+    mockApi.request = vi.fn((path, options) => path === '/prices/preview' ? Promise.resolve({ items: [{
+      model: 'channel/model', source: 'unpriced', has_rules: false, reason: 'ambiguous',
+      rates: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+      candidates: [{ provider: 'channel', model: 'full/model', rates: { input: 1, output: 2, cache_read: 0, cache_write: 0 } }],
+    }] }) : original(path, options)) as ApiClient['request'];
+    render(<SettingsPage api={mockApi} onDirtyChange={onDirtyChange} />);
+    fireEvent.click(await screen.findByRole('button', { name: '为 channel/model 选择价格来源' }));
+    fireEvent.click(screen.getByRole('button', { name: '加入草稿' }));
+    expect(vi.mocked(mockApi.request).mock.calls.some(call => call[1]?.method === 'PUT')).toBe(false);
+    fireEvent.click(screen.getByTestId('settings-pricing-save'));
+    await screen.findByText('价格设置已保存');
+    const saved = vi.mocked(mockApi.request).mock.calls.find(call => call[1]?.method === 'PUT')?.[1]?.body as Settings;
+    expect(saved.pricing.mappings).toEqual([{ model: 'channel/model', provider: 'channel', catalog_model: 'full/model' }]);
+    expect(saved.capture_enabled).toBe(initialSettings.capture_enabled);
+  });
+
+  // A failed manual preview refresh must leave the previous table node in place.
+  it('retains the last successful preview table on refresh failure', async () => {
+    render(<SettingsPage api={mockApi} onDirtyChange={onDirtyChange} />);
+    const row = await screen.findByText('gpt-4o', { selector: 'strong' });
+    const original = mockApi.request;
+    mockApi.request = vi.fn((path, options) => path === '/prices/preview'
+      ? Promise.reject(new Error('offline preview')) : original(path, options)) as ApiClient['request'];
+    fireEvent.click(screen.getByRole('button', { name: '刷新状态' }));
+    await screen.findByText(/offline preview/);
+    expect(row.isConnected).toBe(true);
+    expect(screen.getByText('gpt-4o', { selector: 'strong' })).toBe(row);
   });
 });

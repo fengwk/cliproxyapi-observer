@@ -38,6 +38,8 @@ const (
 	routeCapturesPurge   = routesPrefix + "/captures/purge"
 	routeRequests        = routesPrefix + "/requests"
 	routeRequestDetail   = routeRequests + "/detail"
+	routeRequestView     = routeRequests + "/view"
+	routeRequestFacets   = routeRequests + "/facets"
 	routeSummary         = routesPrefix + "/summary"
 	routeSettings        = routesPrefix + "/settings"
 	routePrices          = routesPrefix + "/prices"
@@ -93,6 +95,8 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPost, Path: routeKeyReset, Description: "Reset selected usage windows for a client key."},
 			{Method: http.MethodPost, Path: routeKeyRecover, Description: "Acknowledge unknown accounting for a client key."},
 			{Method: http.MethodGet, Path: routeRequests, Description: "Paginated request records."},
+			{Method: http.MethodGet, Path: routeRequestView, Description: "Consistent UTC summary, series and records or groups."},
+			{Method: http.MethodGet, Path: routeRequestFacets, Description: "Searchable historical request dimensions."},
 			{Method: http.MethodGet, Path: routeRequestDetail, Description: "One request record plus captured details selected by the id query parameter."},
 			{Method: http.MethodGet, Path: routeSummary, Description: "Aggregated request and cost summary."},
 			{Method: http.MethodGet, Path: routeSettings, Description: "Effective capture, retention and pricing settings."},
@@ -313,6 +317,18 @@ func (m *Manager) dispatchManagementRoute(req managementRequest, route string) p
 			return invalidQueryResponse()
 		}
 		return m.serveRequestDetail(id)
+
+	case "/requests/view":
+		if !requireMethod(req.Method, http.MethodGet) {
+			return methodNotAllowedResponse()
+		}
+		return m.serveRequestView(req.Query)
+
+	case "/requests/facets":
+		if !requireMethod(req.Method, http.MethodGet) {
+			return methodNotAllowedResponse()
+		}
+		return m.serveRequestFacets(req.Query)
 
 	case "/summary":
 		if !requireMethod(req.Method, http.MethodGet) {

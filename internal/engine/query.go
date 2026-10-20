@@ -238,22 +238,10 @@ func (s *Store) Facets(q FacetQuery) (FacetPage, error) {
 			}
 			return nil
 		}
-		if e := tx.Bucket([]byte("daily")).ForEach(func(_, v []byte) error {
-			var d daily
-			if e := decode(v, &d); e != nil {
-				return e
-			}
-			return collectFacet(d)
-		}); e != nil {
+		if e := scanRollups(tx.Bucket([]byte("daily")), env.dailyCut, day(env.now).AddDate(0, 0, 1), collectFacet); e != nil {
 			return e
 		}
-		return tx.Bucket([]byte("hourly")).ForEach(func(_, v []byte) error {
-			var d daily
-			if e := decode(v, &d); e != nil {
-				return e
-			}
-			return collectFacet(d)
-		})
+		return scanRollups(tx.Bucket([]byte("hourly")), env.rawCut.UTC().Truncate(time.Hour), env.now.Add(time.Hour), collectFacet)
 	})
 	if e != nil {
 		return FacetPage{}, e
@@ -321,6 +309,11 @@ func readKeyLabels(tx *bolt.Tx) map[string]string {
 func scanRequestPage(tx *bolt.Tx, env *queryEnv, q Query, page, size int) ([]Record, bool, error) {
 	out := []Record{}
 	skip := (page - 1) * size
+	from := q.From
+	if from.Before(env.rawCut) {
+		from = env.rawCut
+	}
+	lower := timePrefix(from)
 	c := tx.Bucket([]byte("timeline")).Cursor()
 	k, v := c.Seek([]byte(timePrefix(q.To)))
 	if k == nil {
@@ -329,6 +322,9 @@ func scanRequestPage(tx *bolt.Tx, env *queryEnv, q Query, page, size int) ([]Rec
 		k, v = c.Prev()
 	}
 	for ; k != nil; k, v = c.Prev() {
+		if string(k) < lower {
+			break
+		}
 		var r Record
 		if e := get(tx.Bucket([]byte("records")), string(v), &r); e != nil {
 			return out, false, e
@@ -370,6 +366,7 @@ type groupAgg struct {
 
 type aggregator struct {
 	view      string
+	daily     bool
 	keyLabels map[string]string
 	total     Aggregate
 	series    map[time.Time]*Bucket
@@ -381,6 +378,9 @@ func newAggregator(view string, keyLabels map[string]string) *aggregator {
 }
 
 func (a *aggregator) add(at time.Time, key, model, provider, auth string, failed bool, agg Aggregate) error {
+	if a.daily {
+		at = day(at)
+	}
 	if e := addAggregate(&a.total, agg); e != nil {
 		return e
 	}
@@ -464,6 +464,7 @@ func pageGroups(groups map[string]*Group, page, size int) ([]Group, bool) {
 
 func collect(tx *bolt.Tx, env *queryEnv, q Query, granularity, view string, keyLabels map[string]string) (Aggregate, map[time.Time]*Bucket, map[string]*Group, error) {
 	a := newAggregator(view, keyLabels)
+	a.daily = granularity == "day"
 	if granularity == "hour" {
 		if e := collectHourly(tx, env, q, a); e != nil {
 			return Aggregate{}, nil, nil, e
@@ -515,7 +516,7 @@ func collectHourly(tx *bolt.Tx, env *queryEnv, q Query, a *aggregator) error {
 			return e
 		}
 	}
-	if q.To.Sub(q.From) <= 168*time.Hour {
+	if !a.daily && q.To.Sub(q.From) <= 168*time.Hour {
 		for t := q.From.UTC().Truncate(time.Hour); t.Before(q.To); t = t.Add(time.Hour) {
 			if a.series[t] == nil {
 				a.series[t] = &Bucket{Time: t}
@@ -541,18 +542,28 @@ func collectDaily(tx *bolt.Tx, env *queryEnv, q Query, a *aggregator) error {
 	}); e != nil {
 		return e
 	}
-	// The raw pass is bounded by raw retention and skips records whose entire
-	// day is already covered by the daily rollup.
+	// Partial days reuse hourly rollups too. Decoding all surviving raw records
+	// for the partial "today" tail makes a month view scale with raw traffic,
+	// despite those hours already having transactional aggregates.
 	from := q.From
 	if from.Before(env.rawCut) {
 		from = env.rawCut
 	}
-	return scanRecordRange(tx, env, q, from, q.To, func(r Record) error {
-		if full(day(r.Time)) {
-			return nil
+	for at := day(from); at.Before(q.To); at = at.AddDate(0, 0, 1) {
+		if full(at) {
+			continue
 		}
-		return a.add(day(r.Time), r.KeyID, r.Model, r.Provider, r.AuthIndex, r.Failed, recordAggregate(r))
-	})
+		edge := q
+		edge.From = from
+		if at.After(edge.From) {
+			edge.From = at
+		}
+		edge.To = minTime(q.To, at.AddDate(0, 0, 1))
+		if e := collectHourly(tx, env, edge, a); e != nil {
+			return e
+		}
+	}
+	return nil
 }
 
 // scanRecordRange walks the reverse timeline only for an explicit partial edge.
@@ -561,6 +572,10 @@ func scanRecordRange(tx *bolt.Tx, env *queryEnv, q Query, from, to time.Time, fn
 	if !to.After(from) {
 		return nil
 	}
+	if from.Before(env.rawCut) {
+		from = env.rawCut
+	}
+	lower := timePrefix(from)
 	c := tx.Bucket([]byte("timeline")).Cursor()
 	k, v := c.Seek([]byte(timePrefix(to)))
 	if k == nil {
@@ -569,6 +584,9 @@ func scanRecordRange(tx *bolt.Tx, env *queryEnv, q Query, from, to time.Time, fn
 		k, v = c.Prev()
 	}
 	for ; k != nil; k, v = c.Prev() {
+		if string(k) < lower {
+			break
+		}
 		var r Record
 		if e := get(tx.Bucket([]byte("records")), string(v), &r); e != nil {
 			return e

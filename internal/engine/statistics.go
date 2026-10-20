@@ -53,15 +53,15 @@ func addAggregate(dst *Aggregate, src Aggregate) error {
 // version. Backfill must not add the original four totals again.
 func detailedAggregate(r Record) Aggregate {
 	a := Aggregate{
-		InputTokens:      r.Tokens.Input,
-		OutputTokens:     r.Tokens.Output,
-		CacheReadTokens:  r.Tokens.CacheRead,
-		CacheWriteTokens: r.Tokens.CacheWrite,
-		ReasoningTokens:  r.Tokens.Reasoning,
 		DetailedRequests: 1,
 	}
 	if r.AccountingQuality == string(usage.TokenAccountingQualityComplete) {
 		a.CompleteRequests = 1
+		a.InputTokens = r.Tokens.Input
+		a.OutputTokens = r.Tokens.Output
+		a.CacheReadTokens = r.Tokens.CacheRead
+		a.CacheWriteTokens = r.Tokens.CacheWrite
+		a.ReasoningTokens = r.Tokens.Reasoning
 	}
 	if r.LatencyMS > 0 {
 		a.LatencyMS = r.LatencyMS

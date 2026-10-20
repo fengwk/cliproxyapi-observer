@@ -23,6 +23,10 @@ jobs:
       CHROME_BIN: /usr/bin/google-chrome-stable
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The upgrade test builds the pinned v0.7.0 source without downloading
+          # an unverified library or relying on a generated imitation database.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v7
         with:

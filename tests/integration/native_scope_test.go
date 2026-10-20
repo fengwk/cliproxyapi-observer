@@ -252,3 +252,53 @@ func TestNativeAuthenticationScopeCoexistence(t *testing.T) {
 		}
 	})
 }
+
+// Pin the SDK limitation instead of "fixing" anonymous access by returning
+// universal auth success. Registering a provider creates an authentication
+// chain even when the host has no native API keys.
+func TestSDKAnonymousAuthenticationBoundary(t *testing.T) {
+	baseline := newHarnessWith(t, hostOptions{PluginDisabled: true, NoNativeKeys: true})
+	h := newHarnessWith(t, hostOptions{NoNativeKeys: true})
+	for _, probe := range []struct {
+		method, path string
+		body         []byte
+	}{
+		{http.MethodGet, "/v1/models", nil},
+		{http.MethodPost, "/v1/chat/completions", chatBody(false)},
+	} {
+		status, _, err := baseline.rawRequest(probe.method, probe.path, probe.body, nil)
+		if err != nil || status != 200 {
+			t.Fatal("anonymous baseline changed", status, err)
+		}
+		status, _, err = h.rawRequest(probe.method, probe.path, probe.body, nil)
+		if err != nil || status != 401 {
+			t.Fatal("SDK boundary changed; review before promising anonymous coexistence", status, err)
+		}
+	}
+	created := h.createKey(t, validSpec())
+	if status, _ := h.infer(t, created.Secret, false); status != 200 {
+		t.Fatal("owned authentication unavailable without native keys")
+	}
+}
+
+// Observer cannot invalidate the host's independent credential of the same
+// plaintext value. This is a deployment boundary, not permission to read the
+// host's secret store or force exclusive authentication.
+func TestDuplicateNativeAndObserverSecretBoundary(t *testing.T) {
+	h := newHarness(t)
+	spec := map[string]any{"label": "duplicate-boundary", "enabled": false, "max_concurrent": 1,
+		"allowed_models": []string{}, "limits": limitsView{}, "secret": clientKey}
+	var created createdKey
+	h.api(t, http.MethodPost, "/keys", spec, 201, &created)
+	for _, deleted := range []bool{false, true} {
+		if deleted {
+			h.api(t, http.MethodPost, "/keys/delete?id="+created.Key.ID, nil, 204, nil)
+		}
+		if status, body := h.infer(t, clientKey, false); status != 200 || jsonContent(body) != fixtureText {
+			t.Fatal("Observer took over the host's independent native credential", status)
+		}
+	}
+	if records := h.page(t, "page_size=100"); len(records.Items) != 0 {
+		t.Fatal("disabled/deleted duplicate entered owned ledger")
+	}
+}

@@ -26,9 +26,10 @@ type keySpec struct {
 }
 type keyView struct {
 	keySpec
-	ID     string     `json:"id"`
-	Used   limitsView `json:"used"`
-	Active int        `json:"active"`
+	ID            string     `json:"id"`
+	Used          limitsView `json:"used"`
+	Active        int        `json:"active"`
+	BlockedReason string     `json:"blocked_reason,omitempty"`
 }
 type createdKey struct {
 	Key    keyView `json:"key"`

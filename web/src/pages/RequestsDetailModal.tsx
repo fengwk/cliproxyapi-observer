@@ -46,12 +46,13 @@ export function RequestsDetailModal({
   };
 
   const record = detail?.record;
+  const complete = record?.accounting_quality === 'complete';
   const keyInfo = record ? resolveKeyDisplay(record.key_id, keysMap) : null;
   const isSuccess = record ? !record.failed : false;
-  const hitRate = record
+  const hitRate = record && complete
     ? calculateCacheHitRate(record.tokens?.cache_read, record.tokens?.input, record.tokens?.cache_write)
     : null;
-  const tps = record
+  const tps = record && complete
     ? calculateTPS(record.tokens?.output, record.latency_ms, record.ttft_ms, record.stream)
     : null;
   const priceSource = record ? formatPriceSource(record.price_source, record.rule_id) : null;
@@ -249,29 +250,29 @@ export function RequestsDetailModal({
                 <div className="requests-detail-section-title">Token 用量分布</div>
                 <div className="requests-tokens-grid">
                   <div className="requests-token-stat">
-                    <span className="requests-token-label">输入 Token</span>
-                    <span className="requests-token-value">{formatNumber(record.tokens?.input)}</span>
+                    <span className="requests-token-label">未缓存输入 Token</span>
+                    <span className="requests-token-value">{formatNumber(complete ? record.tokens?.input : undefined)}</span>
                   </div>
                   <div className="requests-token-stat">
                     <span className="requests-token-label">输出 Token</span>
-                    <span className="requests-token-value">{formatNumber(record.tokens?.output)}</span>
+                    <span className="requests-token-value">{formatNumber(complete ? record.tokens?.output : undefined)}</span>
                   </div>
                   <div className="requests-token-stat">
                     <span className="requests-token-label">思考 Token (输出子集)</span>
                     <span className="requests-token-value">
-                      {formatNumber(record.tokens?.reasoning)}
+                      {formatNumber(complete ? record.tokens?.reasoning : undefined)}
                     </span>
                   </div>
                   <div className="requests-token-stat">
                     <span className="requests-token-label">缓存读取 Token</span>
                     <span className="requests-token-value">
-                      {formatNumber(record.tokens?.cache_read)}
+                      {formatNumber(complete ? record.tokens?.cache_read : undefined)}
                     </span>
                   </div>
                   <div className="requests-token-stat">
                     <span className="requests-token-label">缓存写入 Token</span>
                     <span className="requests-token-value">
-                      {formatNumber(record.tokens?.cache_write)}
+                      {formatNumber(complete ? record.tokens?.cache_write : undefined)}
                     </span>
                   </div>
                   <div className="requests-token-stat requests-token-stat-total">

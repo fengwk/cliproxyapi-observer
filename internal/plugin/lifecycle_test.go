@@ -21,6 +21,7 @@ func TestDefaultModelAccessAndSelectedModels(t *testing.T) {
 		t.Fatal(err)
 	}
 	call(t, m, "frontend_auth.authenticate", pluginapi.FrontendAuthRequest{Method: "POST", Path: "/v1/chat/completions", Query: map[string][]string{"key": {secret}}})
+	defer call(t, m, "request.complete", pluginapi.RequestCompletion{RequestID: "model-test", CompletedAt: time.Now()})
 	req := pluginapi.RequestInterceptRequest{RequestID: "model-test", RequestedModel: "provider/model:variant", Metadata: map[string]any{
 		coreexecutor.CallerScopeMetadataKey: session.CallerScope("observer:" + k.ID),
 		coreexecutor.GenerateMetadataKey:    false,
@@ -42,6 +43,8 @@ func TestDefaultModelAccessAndSelectedModels(t *testing.T) {
 		t.Fatal("unlisted exact model accepted")
 	}
 	req.RequestedModel = "provider/model"
+	req.RequestID = "model-selected"
+	defer call(t, m, "request.complete", pluginapi.RequestCompletion{RequestID: "model-selected", CompletedAt: time.Now()})
 	if before() {
 		t.Fatal("selected exact model rejected")
 	}

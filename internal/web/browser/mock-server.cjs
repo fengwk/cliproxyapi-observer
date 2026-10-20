@@ -51,7 +51,7 @@ const MAX_OUTSTANDING_CAPABILITIES = 32;
 const MAX_CATALOG_MODELS = 100;
 const ASSET_DIR = path.resolve(__dirname, '../dist');
 
-const SECRET_PREFIX = 'observer_sk_';
+const SECRET_PREFIX = 'sk-';
 
 // 回归夹具：9 位纳秒 RFC3339 到期时间；64 位十六进制 Key ID。
 // 二者都必须能在 UI 截断/格式化后保留完整 API 值。
@@ -107,7 +107,6 @@ function clone(value) {
 
 function publicKey(key) {
   const out = clone(key);
-  delete out.revoked;
   delete out.secret_hash;
   delete out.secret_rotated_at;
   return out;
@@ -334,6 +333,8 @@ function createRecords(now) {
 function createSettings() {
   return {
     capture_enabled: false,
+    capture_mode: 'off',
+    capture_retention_seconds: 86400,
     max_body_bytes: 1_048_576,
     max_body_storage_bytes: 268_435_456,
     raw_retention_hours: 24,
@@ -673,7 +674,69 @@ function computeSummary(records, query) {
     bucket.tokens += record.tokens ? record.tokens.total || 0 : 0;
   }
   summary.buckets = Array.from(buckets.values()).sort((a, b) => Date.parse(a.time) - Date.parse(b.time));
+  // Rendering fixtures use the same flat detailed aggregate contract. Billing
+  // semantics themselves are verified against the real engine/native host.
+  function detail(rows) {
+    const out = { detailed_requests: rows.length, complete_requests: 0,
+      input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+      reasoning_tokens: 0, latency_ms: 0, latency_samples: 0, ttft_ms: 0, ttft_samples: 0, unpriced_requests: 0 };
+    for (const row of rows) {
+      if (row.accounting_quality === 'complete') {
+        out.complete_requests++;
+        for (const [field, token] of Object.entries({ input_tokens: 'input', output_tokens: 'output', cache_read_tokens: 'cache_read', cache_write_tokens: 'cache_write', reasoning_tokens: 'reasoning' })) out[field] += row.tokens?.[token] || 0;
+      }
+      if (row.latency_ms > 0) { out.latency_ms += row.latency_ms; out.latency_samples++; }
+      if (row.stream && row.ttft_ms > 0 && row.ttft_ms < row.latency_ms) { out.ttft_ms += row.ttft_ms; out.ttft_samples++; }
+      if (row.price_source === 'unpriced') out.unpriced_requests++;
+    }
+    return out;
+  }
+  Object.assign(summary, detail(records));
+  for (const bucket of summary.buckets) Object.assign(bucket, detail(records.filter(row => Math.floor(Date.parse(row.time) / bucketMs) * bucketMs === Date.parse(bucket.time))));
   return summary;
+}
+
+function requestView(state, url) {
+  const copy = new URL(url);
+  const now = Date.now(), today = iso(now).slice(0, 10);
+  const date = value => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(Date.parse(value)) || iso(Date.parse(value)).slice(0, 10) !== value) throw failure(400, 'invalid_query', 'invalid UTC date');
+    return Date.parse(value + 'T00:00:00Z');
+  };
+  if (copy.searchParams.has('from') || copy.searchParams.has('to')) throw failure(400, 'invalid_query', 'mixed ranges');
+  for (const key of copy.searchParams.keys()) if (copy.searchParams.getAll(key).length !== 1) throw failure(400, 'invalid_query', 'repeated parameter');
+  const from = date(copy.searchParams.get('from_date') || today);
+  const end = date(copy.searchParams.get('to_date') || today);
+  if (end < from) throw failure(400, 'invalid_query', 'reversed dates');
+  const to = Math.min(now, end + 86400000);
+  const view = copy.searchParams.get('view') || 'requests';
+  if (!['requests', 'model', 'key', 'account', 'provider'].includes(view)) throw failure(400, 'invalid_query', 'invalid view');
+  ['from_date', 'to_date', 'view'].forEach(key => copy.searchParams.delete(key));
+  copy.searchParams.set('from', iso(from)); copy.searchParams.set('to', iso(to));
+  const query = parseRequestQuery(copy), rows = filterRecords(state.records, query), summary = computeSummary(rows, query);
+  const { buckets, granularity, ...aggregate } = summary;
+  let selected = rows, groups = [];
+  if (view !== 'requests') {
+    const map = new Map();
+    for (const row of rows) {
+      const id = view === 'model' ? JSON.stringify([row.provider, row.model]) : row[view === 'key' ? 'key_id' : view === 'account' ? 'auth_index' : 'provider'] || 'unknown';
+      if (!map.has(id)) map.set(id, []);
+      map.get(id).push(row);
+    }
+    groups = [...map].map(([id, items]) => {
+      const { buckets, granularity, ...totals } = computeSummary(items, query);
+      const row = items[0];
+      return { ...totals, key: id, label: view === 'key' ? state.keys.find(key => key.id === id)?.label || id : id,
+        model: view === 'model' ? row.model : '', provider: view === 'provider' || view === 'model' ? row.provider : '',
+        key_id: view === 'key' ? row.key_id : '', auth_index: view === 'account' ? row.auth_index : '' };
+    }).sort((a, b) => b.requests - a.requests || a.key.localeCompare(b.key));
+    selected = groups;
+  }
+  const start = (query.page - 1) * query.page_size, page = selected.slice(start, start + query.page_size);
+  return { range: { from: iso(from), to: iso(to), as_of: iso(now), timezone: 'UTC' }, summary: aggregate,
+    series: { granularity, buckets }, records: view === 'requests' ? page : [], groups: view === 'requests' ? [] : page,
+    pagination: { page: query.page, page_size: query.page_size, has_more: start + page.length < selected.length },
+    coverage: { raw_from: iso(now - state.settings.raw_retention_hours * 3600000), daily_from: iso(now - state.settings.daily_retention_days * 86400000), detailed_requests: rows.length, requests: rows.length, backfill_pending: false } };
 }
 
 function pricingSnapshot(state) {
@@ -783,7 +846,7 @@ function validatePricing(pricing) {
   if (pricing === null || typeof pricing !== 'object' || Array.isArray(pricing)) {
     throw failure(400, 'invalid_json', 'pricing must be an object');
   }
-  rejectUnknown(pricing, new Set(['auto', 'prices', 'rules']), 'pricing');
+  rejectUnknown(pricing, new Set(['auto', 'prices', 'rules', 'mappings']), 'pricing');
   if (typeof pricing.auto !== 'boolean') throw failure(400, 'invalid_json', 'pricing.auto must be a boolean');
   if (!Array.isArray(pricing.prices) || !Array.isArray(pricing.rules)) {
     throw failure(400, 'invalid_json', 'pricing.prices and pricing.rules must be arrays');
@@ -810,11 +873,13 @@ function validatePricing(pricing) {
   });
 }
 
-function validateSettings(body) {
+function validateSettings(body, saved) {
   rejectUnknown(
     body,
     new Set([
       'capture_enabled',
+      'capture_mode',
+      'capture_retention_seconds',
       'max_body_bytes',
       'max_body_storage_bytes',
       'raw_retention_hours',
@@ -823,16 +888,28 @@ function validateSettings(body) {
     ]),
     'Settings'
   );
+  const patch = body;
+  body = { ...clone(saved || createSettings()), ...patch, pricing: { ...(saved || createSettings()).pricing, ...(patch.pricing || {}) } };
+  if (patch.capture_mode !== undefined) {
+    if (!['off', 'headers', 'headers_and_body'].includes(patch.capture_mode) ||
+        (patch.capture_enabled !== undefined && patch.capture_enabled !== (patch.capture_mode !== 'off'))) throw failure(400, 'invalid_json', 'capture mode conflicts');
+    body.capture_enabled = patch.capture_mode !== 'off';
+  } else if (patch.capture_enabled !== undefined) {
+    body.capture_mode = patch.capture_enabled ? (body.capture_mode === 'headers' ? 'headers' : 'headers_and_body') : 'off';
+  }
   if (typeof body.capture_enabled !== 'boolean') {
     throw failure(400, 'invalid_json', 'capture_enabled must be a boolean');
   }
-  ensureInteger(body.max_body_bytes, 'max_body_bytes', 0);
-  ensureInteger(body.max_body_storage_bytes, 'max_body_storage_bytes', 0);
+  ensureInteger(body.max_body_bytes, 'max_body_bytes', 1);
+  ensureInteger(body.max_body_storage_bytes, 'max_body_storage_bytes', 1);
+  if (body.max_body_bytes > 8 * 1024 * 1024 || body.max_body_bytes > body.max_body_storage_bytes) throw failure(400, 'invalid_json', 'body budget exceeded');
   if (body.max_body_storage_bytes > MAX_BODY_STORAGE_BYTES) {
     throw failure(400, 'invalid_json', 'max_body_storage_bytes must be <= ' + MAX_BODY_STORAGE_BYTES);
   }
   ensureInteger(body.raw_retention_hours, 'raw_retention_hours', 1);
   if (body.raw_retention_hours > 168) throw failure(400, 'invalid_json', 'raw_retention_hours must be <= 168');
+  ensureInteger(body.capture_retention_seconds, 'capture_retention_seconds', 60);
+  if (body.capture_retention_seconds > body.raw_retention_hours * 3600) throw failure(400, 'invalid_json', 'capture retention exceeds raw retention');
   ensureInteger(body.daily_retention_days, 'daily_retention_days', 1);
   if (body.daily_retention_days > 3650) {
     throw failure(400, 'invalid_json', 'daily_retention_days must be <= 3650');
@@ -842,12 +919,14 @@ function validateSettings(body) {
 }
 
 function newSecret() {
-  return SECRET_PREFIX + crypto.randomBytes(32).toString('hex');
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  return SECRET_PREFIX + Array.from({ length: 48 }, () => alphabet[crypto.randomInt(alphabet.length)]).join('');
 }
 
-function findKey(state, id) {
+function findKey(state, id, includeDeleted = false) {
   const key = state.keys.find((item) => item.id === id);
   if (!key) throw failure(404, 'not_found', 'key not found');
+  if (key.deleted_at && !includeDeleted) throw failure(410, 'deleted', 'key deleted');
   return key;
 }
 
@@ -1220,8 +1299,8 @@ function createServer(options) {
 
       if (suffix === '/keys') {
         if (req.method === 'GET') {
-          rejectAnyQuery(url);
-          sendJson(res, 200, { items: state.keys.map(publicKey) });
+          for (const key of url.searchParams.keys()) if (key !== 'include_deleted' || url.searchParams.getAll(key).length !== 1 || !['true', 'false'].includes(url.searchParams.get(key))) throw failure(400, 'invalid_query', 'invalid include_deleted');
+          sendJson(res, 200, { items: state.keys.filter(key => !key.deleted_at || url.searchParams.get('include_deleted') === 'true').map(publicKey) });
           return;
         }
         if (req.method === 'POST') {
@@ -1289,6 +1368,13 @@ function createServer(options) {
         return;
       }
 
+      if (suffix === '/keys/delete') {
+        requireMethod(req, 'POST');
+        const key = findKey(state, parseQueryID(url, 'delete'), true);
+        if (key.active > 0) throw failure(409, 'busy', 'resource busy');
+        key.deleted_at ||= iso(Date.now()); key.enabled = false; key.revoked = true;
+        state.secrets.delete(key.id); res.writeHead(204); res.end(); return;
+      }
       if (suffix === '/keys/rotate') {
         requireMethod(req, 'POST');
         const id = parseQueryID(url, 'POST /keys/rotate');
@@ -1342,6 +1428,24 @@ function createServer(options) {
         return;
       }
 
+      if (suffix === '/requests/view') {
+        requireMethod(req, 'GET');
+        sendJson(res, 200, requestView(state, url)); return;
+      }
+      if (suffix === '/requests/facets') {
+        requireMethod(req, 'GET');
+        for (const key of url.searchParams.keys()) if (!['field', 'search', 'cursor', 'limit'].includes(key) || url.searchParams.getAll(key).length !== 1) throw failure(400, 'invalid_query', 'invalid facet query');
+        const field = url.searchParams.get('field');
+        if (!['model', 'key_id', 'provider', 'auth_index'].includes(field)) throw failure(400, 'invalid_query', 'invalid facet');
+        const limit = Number(url.searchParams.get('limit') || 25);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw failure(400, 'invalid_query', 'invalid limit');
+        const search = (url.searchParams.get('search') || '').toLowerCase(), cursor = Buffer.from(url.searchParams.get('cursor') || '', 'base64url').toString();
+        const values = new Map(state.records.filter(row => row[field]).map(row => [row[field], row[field]]));
+        if (field === 'key_id') state.keys.forEach(key => values.set(key.id, key.label || key.id));
+        const all = [...values].filter(([value, label]) => value > cursor && (value.toLowerCase().includes(search) || label.toLowerCase().includes(search))).sort(([a], [b]) => a.localeCompare(b));
+        const items = all.slice(0, limit).map(([value, label]) => ({ value, label }));
+        sendJson(res, 200, { items, next_cursor: all.length > limit ? Buffer.from(items[items.length - 1].value).toString('base64url') : undefined }); return;
+      }
       if (suffix === '/requests') {
         requireMethod(req, 'GET');
         const query = parseRequestQuery(url);
@@ -1379,7 +1483,7 @@ function createServer(options) {
         if (req.method === 'PUT') {
           const body = await readJson(req);
           call.request_body = clone(body);
-          state.settings = validateSettings(body);
+          state.settings = validateSettings(body, state.settings);
           sendJson(res, 200, clone(state.settings));
           return;
         }
@@ -1426,6 +1530,14 @@ function createServer(options) {
         return;
       }
 
+      if (suffix === '/captures/cleanup' || suffix === '/captures/purge') {
+        requireMethod(req, 'POST'); rejectAnyQuery(url);
+        if (suffix.endsWith('purge')) {
+          const body = await readJson(req); rejectUnknown(body, new Set(['confirm']), 'purge');
+          if (body.confirm !== true) throw failure(400, 'invalid_json', 'confirm required');
+        } else if ((await readBody(req)).length) throw failure(400, 'invalid_json', 'empty body required');
+        sendJson(res, 200, { removed_records: 0, removed_bytes: 0 }); return;
+      }
       if (suffix === '/compact') {
         requireMethod(req, 'POST');
         state.counters.compactions += 1;

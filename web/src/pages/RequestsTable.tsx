@@ -217,6 +217,7 @@ export function RequestsTable({
                       {/* 5. Input / Output Tokens */}
                       <td>
                         <div className="requests-cell-stacked requests-num-cell">
+                          <span className="requests-subtext">总 {formatNumber(r.tokens?.total)}{!complete ? ' · 细分不完整' : ''}</span>
                           <span>
                             入 {formatNumber(complete ? r.tokens?.input : undefined)} / 出{' '}
                             {formatNumber(complete ? r.tokens?.output : undefined)}
@@ -322,12 +323,13 @@ export function RequestsTable({
                 </tr>
               </thead>
               <tbody>
-                {groups.map((g, idx) => {
+                {groups.map((g) => {
                   const failRate = calculateFailureRate(g.failures, g.requests);
+                  const detail = g.detailed_requests === 0 || g.complete_requests === 0 ? null : g;
                   const hitRate = calculateCacheHitRate(
-                    g.cache_read_tokens,
-                    g.input_tokens,
-                    g.cache_write_tokens
+                    detail?.cache_read_tokens,
+                    detail?.input_tokens,
+                    detail?.cache_write_tokens
                   );
                   const avgLat = formatAvgLatency(g.latency_ms, g.latency_samples);
                   const avgTTFT = formatAvgTTFT(g.ttft_ms, g.ttft_samples);
@@ -386,7 +388,7 @@ export function RequestsTable({
                   }
 
                   return (
-                    <tr key={`${g.key}-${idx}`}>
+                    <tr key={g.key}>
                       {/* 1. Group identity */}
                       <td>{groupLabel}</td>
 
@@ -408,9 +410,10 @@ export function RequestsTable({
                       {/* 4. Input / Output tokens */}
                       <td>
                         <div className="requests-cell-stacked requests-num-cell">
+                          <span className="requests-subtext">总 {formatNumber(g.tokens)} · 完整样本 {g.complete_requests ?? '—'}/{g.requests}</span>
                           <span>
-                            入 {formatNumber(g.detailed_requests === 0 ? undefined : g.input_tokens)} / 出{' '}
-                            {formatNumber(g.detailed_requests === 0 ? undefined : g.output_tokens)}
+                            入 {formatNumber(detail?.input_tokens)} / 出{' '}
+                            {formatNumber(detail?.output_tokens)}
                           </span>
                           {g.reasoning_tokens ? (
                             <span className="requests-reasoning-sub">
@@ -424,8 +427,8 @@ export function RequestsTable({
                       <td>
                         <div className="requests-cell-stacked requests-num-cell">
                           <span>
-                            读 {formatNumber(g.detailed_requests === 0 ? undefined : g.cache_read_tokens)} / 写{' '}
-                            {formatNumber(g.detailed_requests === 0 ? undefined : g.cache_write_tokens)}
+                            读 {formatNumber(detail?.cache_read_tokens)} / 写{' '}
+                            {formatNumber(detail?.cache_write_tokens)}
                           </span>
                         </div>
                       </td>

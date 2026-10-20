@@ -1,4 +1,4 @@
-import type { Rates, Price, Rule, PricingConfig } from '../lib/types';
+import type { Rates, Price, Rule, PricingConfig, CaptureMode } from '../lib/types';
 import { parseUSD, formatUSD } from '../lib/format';
 
 export const MAX_SAFE_MICRO = 9_000_000_000_000_000;
@@ -15,6 +15,8 @@ export const MAX_DAILY_RETENTION_DAYS = 3650; // 10 years
 
 export interface GeneralSettingsDraft {
   capture_enabled: boolean;
+  capture_mode?: CaptureMode;
+  capture_retention_seconds?: number;
   max_body_bytes: number;
   max_body_storage_bytes: number;
   raw_retention_hours: number;
@@ -194,6 +196,10 @@ export function validateGeneralSettings(draft: GeneralSettingsDraft): string | n
   }
   if (draft.daily_retention_days < MIN_DAILY_RETENTION_DAYS || draft.daily_retention_days > MAX_DAILY_RETENTION_DAYS) {
     return `每日汇总保留时间必须在 1 至 3650 天（10 年）之间`;
+  }
+  const ttl = draft.capture_retention_seconds ?? draft.raw_retention_hours * 3600;
+  if (!Number.isSafeInteger(ttl) || ttl < 60 || ttl > draft.raw_retention_hours * 3600) {
+    return '内容保留时间必须为整秒，至少 60 秒且不超过原始日志保留时间';
   }
   return null;
 }
@@ -450,6 +456,8 @@ export function areRatesEqual(a?: Rates | null, b?: Rates | null): boolean {
 export function areGeneralSettingsEqual(a: GeneralSettingsDraft, b: GeneralSettingsDraft): boolean {
   return (
     a.capture_enabled === b.capture_enabled &&
+    (!a.capture_enabled || (a.capture_mode ?? 'headers_and_body') === (b.capture_mode ?? 'headers_and_body')) &&
+    (a.capture_retention_seconds ?? a.raw_retention_hours * 3600) === (b.capture_retention_seconds ?? b.raw_retention_hours * 3600) &&
     a.max_body_bytes === b.max_body_bytes &&
     a.max_body_storage_bytes === b.max_body_storage_bytes &&
     a.raw_retention_hours === b.raw_retention_hours &&

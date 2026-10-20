@@ -149,8 +149,8 @@ func TestAdmissionRotationAndResume(t *testing.T) {
 		t.Fatal("model restriction bypassed")
 	}
 	other.Metadata = map[string]any{coreexecutor.CallerScopeMetadataKey: session.CallerScope(principal), coreexecutor.GenerateMetadataKey: false, coreexecutor.RequestPathMetadataKey: "/v1/chat/completions"}
-	if before(other).Terminate || m.store.Health().ActiveRequests != 1 {
-		t.Fatal("Generate false reserved a slot")
+	if b := before(other); !b.Terminate || b.StatusCode != 429 || m.store.Health().ActiveRequests != 1 {
+		t.Fatal("Generate false bypassed generation concurrency")
 	}
 	out, _ := m.HandleCall("plugin.quiesce", nil)
 	if !strings.Contains(string(out), `"ok":false`) {

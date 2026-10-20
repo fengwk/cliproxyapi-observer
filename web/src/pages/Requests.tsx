@@ -39,6 +39,10 @@ const pollOptions: SelectOption[] = [
 export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: RequestsPageProps) {
   // Preset range selection
   const [preset, setPreset] = useState<PresetRange>('today');
+  const [appliedPreset, setAppliedPreset] = useState<PresetRange>('today');
+  const appliedPresetRef = useRef(appliedPreset);
+  appliedPresetRef.current = appliedPreset;
+  const dirtyRef = useRef(false);
 
   // Filter states: draft vs applied
   const [draftFilters, setDraftFilters] = useState<FilterState>(() => {
@@ -105,6 +109,7 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
 
   // Selection tracking (pause polling when user selects text or reads)
   const [isSelecting, setIsSelecting] = useState<boolean>(false);
+  const [isInteracting, setIsInteracting] = useState(false);
 
   // Refs for race-condition prevention & single-flight aborts
   const seqRef = useRef<number>(0);
@@ -161,6 +166,7 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
   // Dirty state tracking (draft vs applied)
   const isDirty = useMemo(() => {
     return (
+      preset !== appliedPreset ||
       draftFilters.from !== appliedFilters.from ||
       draftFilters.to !== appliedFilters.to ||
       draftFilters.key_id !== appliedFilters.key_id ||
@@ -169,7 +175,8 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
       draftFilters.auth_index !== appliedFilters.auth_index ||
       draftFilters.status !== appliedFilters.status
     );
-  }, [draftFilters, appliedFilters]);
+  }, [draftFilters, appliedFilters, preset, appliedPreset]);
+  dirtyRef.current = isDirty;
 
   useEffect(() => {
     onDirtyChange(isDirty);
@@ -185,6 +192,11 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
   }, [keysList]);
 
   // 1. Initial metadata loading: Keys, Models, Facets
+  useEffect(() => {
+    for (const field of ['model', 'key_id', 'provider', 'auth_index']) void searchFacet(field, '');
+    return () => Object.values(facetControllers.current).forEach(controller => controller.abort());
+  }, [searchFacet]);
+
   useEffect(() => {
     let unmounted = false;
     const controller = new AbortController();
@@ -212,26 +224,6 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
         /* tolerated */
       }
 
-      // Fetch facets for model, key_id, provider, auth_index
-      const facetFields = ['model', 'key_id', 'provider', 'auth_index'] as const;
-      await Promise.all(
-        facetFields.map(async (field) => {
-          try {
-            const pageRes = await api.request<FacetPage>(
-              `/requests/facets?field=${field}`,
-              { signal: controller.signal }
-            );
-            if (!unmounted && pageRes && Array.isArray(pageRes.items)) {
-              if (field === 'model') setFacetModels(pageRes.items);
-              else if (field === 'key_id') setFacetKeys(pageRes.items);
-              else if (field === 'provider') setFacetProviders(pageRes.items);
-              else if (field === 'auth_index') setFacetAccounts(pageRes.items);
-            }
-          } catch {
-            /* tolerated */
-          }
-        })
-      );
     }
 
     loadMetadata();
@@ -248,7 +240,8 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
       targetFilters = appliedFiltersRef.current,
       targetView = viewRef.current,
       targetPage = pageRef.current,
-      _isUserTriggered = false
+      _isUserTriggered = false,
+      targetPreset = appliedPresetRef.current
     ) => {
       if (signal?.aborted) return;
 
@@ -273,8 +266,15 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
       }
 
       try {
+        const filters = targetPreset === 'custom'
+          ? targetFilters
+          : { ...targetFilters, ...getPresetRange(targetPreset) };
+        if (filters.from !== targetFilters.from || filters.to !== targetFilters.to) {
+          setAppliedFilters(filters);
+          if (!dirtyRef.current) setDraftFilters(filters);
+        }
         const queryStr = buildRequestViewParams(
-          targetFilters,
+          filters,
           targetView,
           targetPage,
           25
@@ -314,16 +314,16 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
     [api]
   );
 
-  // 3. Polling via usePoll
+  // 3. One page-local, nonoverlapping timer
   // Dedicated poll interval (0 disables polling repeats, not initial load)
   // Auto-refresh is paused when: page > 1, filters dirty, modal open, historical range, or text selected
-  const isDynamic = isDynamicRange(appliedFilters.to);
+  const isDynamic = appliedPreset !== 'custom' || isDynamicRange(appliedFilters.to);
   const isPollingPaused =
     page !== 1 ||
     isDirty ||
     activeDetailId !== null ||
     !isDynamic ||
-    isSelecting;
+    isSelecting || isInteracting;
 
   // Initial data load is independent of the timer. Resuming a paused timer
   // must not start a second request alongside an explicit Query action.
@@ -420,10 +420,13 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
   }, []);
 
   const handleApplyFilters = useCallback(() => {
-    setAppliedFilters({ ...draftFilters });
+    const filters = preset === 'custom' ? { ...draftFilters } : { ...draftFilters, ...getPresetRange(preset) };
+    setAppliedPreset(preset);
+    setDraftFilters(filters);
+    setAppliedFilters(filters);
     setPage(1);
-    fetchRequestView(undefined, draftFilters, view, 1, true);
-  }, [draftFilters, view, fetchRequestView]);
+    fetchRequestView(undefined, filters, view, 1, true, preset);
+  }, [draftFilters, preset, view, fetchRequestView]);
 
   const handleViewChange = useCallback(
     (nextView: ViewTab) => {
@@ -455,7 +458,8 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
     setAppliedFilters(correctedDraft);
     setPage(1);
     setPreset('custom');
-    fetchRequestView(undefined, correctedDraft, view, 1, true);
+    setAppliedPreset('custom');
+    fetchRequestView(undefined, correctedDraft, view, 1, true, 'custom');
   }, [draftFilters, view, fetchRequestView]);
 
   // Copy Key ID with inline notification
@@ -587,7 +591,9 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
   );
 
   return (
-    <div className="requests-page" data-testid="requests-page">
+    <div className="requests-page" data-testid="requests-page"
+      onFocusCapture={event => setIsInteracting(Boolean((event.target as Element).closest('input,textarea,[role="combobox"],[role="option"]')))}
+      onBlurCapture={event => setIsInteracting(Boolean((event.relatedTarget as Element | null)?.closest?.('input,textarea,[role="combobox"],[role="option"]')))}>
       {/* 1. Header with Title, Polling interval, and Manual refresh */}
       <header className="requests-header">
         <div className="requests-title-group">
@@ -597,11 +603,10 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
               ? `更新于 ${lastUpdated.toTimeString().slice(0, 8)}`
               : '正在加载...'}
           </span>
-          {isRefreshing && (
-            <span className="requests-refreshing-badge" aria-label="后台更新中">
+            <span className="requests-refreshing-badge" aria-label="后台更新中" aria-hidden={!isRefreshing}
+              style={{ visibility: isRefreshing ? 'visible' : 'hidden' }}>
               更新中...
             </span>
-          )}
         </div>
 
         <div className="requests-header-controls">

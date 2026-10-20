@@ -11,7 +11,6 @@ import {
   EmptyState,
 } from '../components/ui';
 import type { PageProps } from '../lib/api';
-import { usePoll } from '../lib/usePoll';
 import type {
   Settings,
   PricingConfig,
@@ -22,6 +21,8 @@ import type {
   PricePreviewItem,
   Health,
   ModelInfo,
+  ModelMapping,
+  CleanupResult,
 } from '../lib/types';
 import { errorMessage } from '../lib/format';
 import {
@@ -84,7 +85,7 @@ const CAPACITY_OPTIONS = [
   { value: 'GB', label: 'GiB (1,073,741,824 字节)' },
 ];
 
-export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirtyChange }) => {
+export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange }) => {
   // ---------------------------------------------------------------------------
   // Lifecycle & concurrency guards
   // ---------------------------------------------------------------------------
@@ -93,6 +94,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   const hasLoadedSuccessfullyRef = useRef(false);
   const isMutatingRef = useRef(false);
   const previewGenRef = useRef(0);
+  const loadControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -117,6 +119,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   // Initial load status
   const [initialLoading, setInitialLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [stateRefreshing, setStateRefreshing] = useState(false);
 
   // ---------------------------------------------------------------------------
   // Section 1: 请求记录 Draft
@@ -146,6 +149,8 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   const [pricingAuto, setPricingAuto] = useState<boolean>(true);
   const [manualDrafts, setManualDrafts] = useState<ManualPriceDraft[]>([]);
   const [ruleDrafts, setRuleDrafts] = useState<RuleDraft[]>([]);
+  const [mappingDrafts, setMappingDrafts] = useState<ModelMapping[]>([]);
+  const [mappingItem, setMappingItem] = useState<PricePreviewItem | null>(null);
   const [pricingSaving, setPricingSaving] = useState(false);
   const [pricingRefreshing, setPricingRefreshing] = useState(false);
   const [pricingStatus, setPricingStatus] = useState<{ tone: 'success' | 'danger'; message: string } | null>(null);
@@ -153,17 +158,19 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   // Preview filtering & pagination
   const [previewFilter, setPreviewFilter] = useState('');
   const [previewPage, setPreviewPage] = useState(1);
-  const PREVIEW_PAGE_SIZE = 10;
+  const PREVIEW_PAGE_SIZE = 25;
+  const [previewStatus, setPreviewStatus] = useState('all');
 
   // ---------------------------------------------------------------------------
   // Section 3: 存储维护
   // ---------------------------------------------------------------------------
   const [compactModalOpen, setCompactModalOpen] = useState(false);
+  const [contentOperation, setContentOperation] = useState<'cleanup' | 'purge' | null>(null);
   const [compacting, setCompacting] = useState(false);
   const [compactStatus, setCompactStatus] = useState<{ tone: 'success' | 'danger'; message: string } | null>(null);
 
   // Global mutation busy guard: mutual exclusion across save, compact, and price refresh
-  const isMutationBusy = generalSaving || pricingSaving || compacting || pricingRefreshing;
+  const isMutationBusy = generalSaving || pricingSaving || compacting || pricingRefreshing || stateRefreshing;
 
   // Ref tracking dirty state to protect drafts from poll overwrite
   const isGeneralDirtyRef = useRef(false);
@@ -178,6 +185,8 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
 
     setGeneralDraft({
       capture_enabled: settings.capture_enabled === true,
+      capture_mode: settings.capture_mode === 'headers' ? 'headers' : 'headers_and_body',
+      capture_retention_seconds: settings.capture_retention_seconds ?? (settings.raw_retention_hours ?? 24) * 3600,
       max_body_bytes: bBytes,
       max_body_storage_bytes: sBytes,
       raw_retention_hours: settings.raw_retention_hours ?? 24,
@@ -200,6 +209,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
 
   const syncPricingFromConfirmed = useCallback((pricing: PricingConfig) => {
     setPricingAuto(pricing.auto !== false);
+    setMappingDrafts(pricing.mappings ?? []);
 
     const manuals: ManualPriceDraft[] = (pricing.prices || []).map((p, index) => {
       const f = ratesToForm(p.rates);
@@ -259,6 +269,8 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
 
     const confirmedGen: GeneralSettingsDraft = {
       capture_enabled: confirmedSettings.capture_enabled === true,
+      capture_mode: confirmedSettings.capture_mode === 'headers' ? 'headers' : 'headers_and_body',
+      capture_retention_seconds: confirmedSettings.capture_retention_seconds,
       max_body_bytes: confirmedSettings.max_body_bytes ?? DEFAULT_MAX_BODY_BYTES,
       max_body_storage_bytes: confirmedSettings.max_body_storage_bytes ?? DEFAULT_MAX_BODY_STORAGE_BYTES,
       raw_retention_hours: confirmedSettings.raw_retention_hours ?? 24,
@@ -268,8 +280,9 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   }, [generalDraft, maxBodyAmount, maxBodyUnit, maxStorageAmount, maxStorageUnit, confirmedSettings]);
 
   const isPricingDirty = useMemo(() => {
-    return !isPricingDraftEqual(pricingAuto, manualDrafts, ruleDrafts, confirmedSettings.pricing);
-  }, [pricingAuto, manualDrafts, ruleDrafts, confirmedSettings.pricing]);
+    return !isPricingDraftEqual(pricingAuto, manualDrafts, ruleDrafts, confirmedSettings.pricing) ||
+      JSON.stringify(mappingDrafts) !== JSON.stringify(confirmedSettings.pricing.mappings ?? []);
+  }, [pricingAuto, manualDrafts, ruleDrafts, mappingDrafts, confirmedSettings.pricing]);
 
   isGeneralDirtyRef.current = isGeneralDirty;
   isPricingDirtyRef.current = isPricingDirty;
@@ -325,10 +338,19 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
   );
 
   // ---------------------------------------------------------------------------
-  // Unified load callback passed to usePoll
+  // Manual/entry load. Reads are cancellable and cannot overwrite a later save;
+  // mutations wait for the current state refresh, and superseded loads abort.
   // ---------------------------------------------------------------------------
   const load = useCallback(
-    async (signal: AbortSignal) => {
+    async (outerSignal: AbortSignal) => {
+      if (outerSignal.aborted || isMutatingRef.current) return;
+      loadControllerRef.current?.abort();
+      const controller = new AbortController();
+      const signal = controller.signal;
+      loadControllerRef.current = controller;
+      const abort = () => controller.abort();
+      outerSignal.addEventListener('abort', abort, { once: true });
+      setStateRefreshing(true);
       try {
         let modelsRes: ModelInfo[] = [];
         let modelsErr: string | null = null;
@@ -361,8 +383,6 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
         }
 
         if (modelsErr) {
-          setAvailableModels([]);
-          setPreviewItems([]);
           setPreviewError(`无法读取可用模型：${modelsErr}`);
         } else {
           setAvailableModels(modelsRes);
@@ -372,32 +392,31 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
         setLoadError(null);
       } catch (err: unknown) {
         if (signal.aborted || !isMountedRef.current) return;
-        if (!hasLoadedSuccessfullyRef.current) {
-          setLoadError(errorMessage(err) || '加载设置失败');
-        }
+        setLoadError(errorMessage(err) || '加载设置失败');
       } finally {
-        if (!signal.aborted && isMountedRef.current) {
-          setInitialLoading(false);
+        outerSignal.removeEventListener('abort', abort);
+        if (loadControllerRef.current === controller) {
+          loadControllerRef.current = null;
+          if (isMountedRef.current) setStateRefreshing(false);
+          if (!signal.aborted && isMountedRef.current) setInitialLoading(false);
         }
       }
     },
     [api, syncGeneralFromConfirmed, syncPricingFromConfirmed, fetchPreview]
   );
 
-  // Stop polling when dirty, when modal is open, or during mutations / refreshing
-  const isPollPaused =
-    isGeneralDirty ||
-    isPricingDirty ||
-    compactModalOpen ||
-    isMutationBusy;
-
-  usePoll(load, refreshInterval ?? 0, isPollPaused);
+  // Settings is a draft editor, not a live dashboard: one entry load only.
+  // No timer or modal/dirty transition may reload or unmount the price table.
+  useEffect(() => {
+    const controller = new AbortController();
+    void load(controller.signal);
+    return () => controller.abort();
+  }, [load]);
 
   const handleRetry = () => {
     setLoadError(null);
-    setInitialLoading(true);
-    const controller = new AbortController();
-    void load(controller.signal);
+    if (!hasLoadedSuccessfullyRef.current) setInitialLoading(true);
+    void load(lifetimeAbortRef.current!.signal);
   };
 
   // ---------------------------------------------------------------------------
@@ -502,6 +521,8 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
     try {
       const payload: Settings = {
         capture_enabled: draftToSave.capture_enabled,
+        capture_mode: draftToSave.capture_enabled ? (draftToSave.capture_mode ?? 'headers_and_body') : 'off',
+        capture_retention_seconds: draftToSave.capture_retention_seconds ?? draftToSave.raw_retention_hours * 3600,
         max_body_bytes: draftToSave.max_body_bytes,
         max_body_storage_bytes: draftToSave.max_body_storage_bytes,
         raw_retention_hours: draftToSave.raw_retention_hours,
@@ -674,11 +695,14 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
         auto: pricingAuto,
         prices: parsedPrices,
         rules: parsedRules,
+        mappings: mappingDrafts,
       };
 
       const payload: Settings = {
         // CRITICAL: Preserve the confirmed server general settings, not unsaved general drafts!
         capture_enabled: confirmedSettings.capture_enabled,
+        capture_mode: confirmedSettings.capture_mode,
+        capture_retention_seconds: confirmedSettings.capture_retention_seconds,
         max_body_bytes: confirmedSettings.max_body_bytes,
         max_body_storage_bytes: confirmedSettings.max_body_storage_bytes,
         raw_retention_hours: confirmedSettings.raw_retention_hours,
@@ -718,12 +742,12 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
 
   // Filtered and paginated preview items
   const filteredPreview = useMemo(() => {
-    if (!previewFilter.trim()) return previewItems;
     const lower = previewFilter.trim().toLowerCase();
     return previewItems.filter(
-      (item) => item.model.toLowerCase().includes(lower) || (item.provider && item.provider.toLowerCase().includes(lower))
+      (item) => (previewStatus === 'all' || (previewStatus === 'matched' ? item.source !== 'unpriced' : previewStatus === 'ambiguous' ? item.reason?.includes('ambiguous') || (item.candidates?.length ?? 0) > 1 : item.source === 'unpriced')) &&
+        (item.model.toLowerCase().includes(lower) || (item.provider && item.provider.toLowerCase().includes(lower)))
     );
-  }, [previewItems, previewFilter]);
+  }, [previewItems, previewFilter, previewStatus]);
 
   const totalPreviewPages = Math.max(1, Math.ceil(filteredPreview.length / PREVIEW_PAGE_SIZE));
   const currentPreviewPageItems = useMemo(() => {
@@ -763,6 +787,29 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
     }
   };
 
+  const handleContentConfirm = async () => {
+    if (!contentOperation || isMutatingRef.current || isMutationBusy) return;
+    isMutatingRef.current = true;
+    setCompacting(true);
+    setCompactStatus(null);
+    try {
+      const result = await api.request<CleanupResult>(`/captures/${contentOperation}`, {
+        method: 'POST', body: contentOperation === 'purge' ? { confirm: true } : undefined,
+        signal: lifetimeAbortRef.current?.signal,
+      });
+      if (!isMountedRef.current) return;
+      setCompactStatus({ tone: 'success', message: `已移除 ${result.removed_records} 条内容，释放逻辑空间 ${formatBytes(result.removed_bytes)}；物理文件需要另外整理。额度与费用未改变。` });
+      setContentOperation(null);
+      const next = await api.request<Health>('/health', { signal: lifetimeAbortRef.current?.signal });
+      if (isMountedRef.current) setHealth(next);
+    } catch (err) {
+      if (isMountedRef.current) setCompactStatus({ tone: 'danger', message: errorMessage(err) || '维护失败，请稍后重试' });
+    } finally {
+      isMutatingRef.current = false;
+      if (isMountedRef.current) setCompacting(false);
+    }
+  };
+
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
@@ -774,7 +821,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
     );
   }
 
-  if (loadError) {
+  if (loadError && !hasLoadedSuccessfullyRef.current) {
     return (
       <div className="settings-page" data-testid="settings-error">
         <Notice tone="danger">{loadError}</Notice>
@@ -787,11 +834,21 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
     );
   }
 
-  const hasFault = Boolean(health.last_error || health.dropped_captures > 0 || health.pending_usage > 0);
+  const hasFault = Boolean(health.last_error || health.maintenance_error || health.pending_usage > 0);
   const isLastSyncValid = Boolean(snapshot.last_sync && !snapshot.last_sync.startsWith('0001'));
 
   return (
     <div className="settings-page" data-testid="observer-settings">
+      <header className="settings-row">
+        <h1 style={{ margin: 0, fontSize: 20 }}>设置</h1>
+        <Button variant="secondary" disabled={isMutationBusy} onClick={handleRetry}>刷新状态</Button>
+      </header>
+      {loadError && <Notice tone="danger">{loadError}（保留上次成功状态，草稿未覆盖）</Notice>}
+      <nav className="settings-actions" aria-label="设置页内导航">
+        <a href="#settings-general-heading">内容与保留</a>
+        <a href="#settings-pricing-heading">模型价格</a>
+        <a href="#settings-health-heading">存储维护</a>
+      </nav>
       {/* =================================================================== */}
       {/* Section 1: 请求记录 */}
       {/* =================================================================== */}
@@ -828,6 +885,19 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
           </div>
 
           <div className="settings-grid" style={{ marginTop: 12 }}>
+            <Field label="采集内容" htmlFor="settings-capture-mode" hint="仅安全白名单请求头及 JSON；不保存响应或上游密钥。关闭不是删除。">
+              <Select id="settings-capture-mode" aria-label="采集内容"
+                value={generalDraft.capture_mode ?? 'headers_and_body'}
+                disabled={isMutationBusy || !generalDraft.capture_enabled}
+                options={[{ value: 'headers', label: '仅安全请求头' }, { value: 'headers_and_body', label: '安全请求头与 JSON 正文' }]}
+                onChange={(value) => setGeneralDraft(prev => ({ ...prev, capture_mode: value as 'headers' | 'headers_and_body' }))} />
+            </Field>
+            <Field label="内容保留时间（秒）" htmlFor="settings-capture-retention" hint="至少 60 秒，且不能超过原始日志保留。过期内容不会因延长策略恢复。">
+              <Input id="settings-capture-retention" aria-label="内容保留时间（秒）" type="number" min="60"
+                max={generalDraft.raw_retention_hours * 3600} step="1" disabled={isMutationBusy}
+                value={generalDraft.capture_retention_seconds ?? generalDraft.raw_retention_hours * 3600}
+                onChange={e => setGeneralDraft(prev => ({ ...prev, capture_retention_seconds: Number(e.target.value) }))} />
+            </Field>
             <Field label="原始日志保留" hint="超过保留期的明细记录将被清理" htmlFor="settings-raw-retention-select">
               <Select
                 id="settings-raw-retention-select"
@@ -900,8 +970,8 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
           </div>
 
           {/* 更多存储限制 (Collapsed Details) */}
-          <details className="settings-details">
-            <summary>更多存储限制（单条与总量上限）</summary>
+          <div className="settings-details">
+            <h3 style={{ fontSize: 14 }}>存储限制</h3>
             <p className="settings-note" style={{ marginBottom: 12 }}>
               超出限制时系统将丢弃过大的请求体，但不阻断推理。
             </p>
@@ -956,7 +1026,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                 </div>
               </Field>
             </div>
-          </details>
+          </div>
 
           <div className="settings-actions">
             <Button
@@ -1061,6 +1131,9 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
           </div>
 
           <div className="settings-table-filter-bar">
+            <Select aria-label="价格匹配状态" value={previewStatus}
+              options={[{ value: 'all', label: '全部状态' }, { value: 'matched', label: '已匹配' }, { value: 'ambiguous', label: '存在候选 / 歧义' }, { value: 'unpriced', label: '未定价' }]}
+              onChange={value => { setPreviewStatus(value); setPreviewPage(1); }} />
             <div className="settings-search-input">
               <Input
                 placeholder="搜索模型名称…"
@@ -1078,11 +1151,10 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
             </div>
           </div>
 
-          {previewError ? (
-            <Notice tone="danger">{previewError}</Notice>
-          ) : previewLoading ? (
-            <Notice tone="info">正在获取价格预检…</Notice>
-          ) : currentPreviewPageItems.length === 0 ? (
+          {previewError && <Notice tone="danger">{previewError}（保留上次成功数据）</Notice>}
+          {previewLoading && <Notice tone="info">正在获取价格预检…</Notice>}
+          {currentPreviewPageItems.length === 0 ? (
+            previewError || previewLoading ? null :
             <EmptyState
               title={previewFilter ? '未找到匹配的模型' : '暂无可用模型'}
               description={previewFilter ? '请尝试不同的搜索关键词' : 'CPA 尚未发现可用模型或未登录'}
@@ -1114,10 +1186,10 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                             </span>
                           )}
                         </td>
-                        <td>{formatRateDisplay(item.rates.input)}</td>
-                        <td>{formatRateDisplay(item.rates.output)}</td>
+                        <td>{isUnpriced || item.missing_rates?.includes('input') ? '—' : formatRateDisplay(item.rates.input)}</td>
+                        <td>{isUnpriced || item.missing_rates?.includes('output') ? '—' : formatRateDisplay(item.rates.output)}</td>
                         <td>
-                          {formatRateDisplay(item.rates.cache_read)} / {formatRateDisplay(item.rates.cache_write)}
+                          {isUnpriced || item.missing_rates?.includes('cache_read') ? '—' : formatRateDisplay(item.rates.cache_read)} / {isUnpriced || item.missing_rates?.includes('cache_write') ? '—' : formatRateDisplay(item.rates.cache_write)}
                         </td>
                         <td>{item.rates.reasoning !== undefined && item.rates.reasoning !== null ? formatRateDisplay(item.rates.reasoning) : '—'}</td>
                         <td>
@@ -1131,8 +1203,11 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
                             )}
                             {item.has_rules && <Badge tone="neutral">含条件规则</Badge>}
                           </div>
+                          <div className="settings-note">{item.reason || item.match || '—'}</div>
+                          {item.catalog_provider && <div className="settings-note">{item.catalog_provider} / {item.catalog_model}</div>}
                         </td>
                         <td>
+                          {Boolean(item.candidates?.length) && <Button variant="secondary" disabled={isMutationBusy} onClick={() => setMappingItem(item)} aria-label={`为 ${item.model} 选择价格来源`}>选择来源</Button>}
                           <Button
                             variant="ghost"
                             disabled={isMutationBusy}
@@ -1176,6 +1251,24 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
             </div>
           )}
         </div>
+
+        {mappingDrafts.length > 0 && <div className="settings-details">
+          <h3 style={{ fontSize: 14 }}>显式价格来源（仅计费，不改变模型路由）</h3>
+          {mappingDrafts.map(mapping => <div key={mapping.model} className="settings-row">
+            <span>{mapping.model} → {mapping.provider} / {mapping.catalog_model}</span>
+            <Button variant="ghost" disabled={isMutationBusy} onClick={() => setMappingDrafts(prev => prev.filter(v => v.model !== mapping.model))}>移除映射</Button>
+          </div>)}
+        </div>}
+        {mappingItem && <Modal title={`选择价格来源：${mappingItem.model}`} size="lg" onClose={() => setMappingItem(null)}>
+          <p className="settings-note">这是显式计费映射，不修改 CPA 路由。加入草稿后需点击“保存价格设置”，只影响后续请求。</p>
+          {(mappingItem.candidates ?? []).map(candidate => <div className="settings-row" key={`${candidate.provider}/${candidate.model}`}>
+            <div><strong>{candidate.provider} / {candidate.model}</strong><div className="settings-note">输入 {candidate.missing_rates?.includes('input') ? '—' : formatRateDisplay(candidate.rates?.input)} · 输出 {candidate.missing_rates?.includes('output') ? '—' : formatRateDisplay(candidate.rates?.output)}</div></div>
+            <Button disabled={isMutationBusy} onClick={() => {
+              setMappingDrafts(prev => [...prev.filter(v => v.model !== mappingItem.model), { model: mappingItem.model, provider: candidate.provider, catalog_model: candidate.model }]);
+              setMappingItem(null);
+            }}>加入草稿</Button>
+          </div>)}
+        </Modal>}
 
         {/* Manual Overrides */}
         <div style={{ marginTop: 20 }}>
@@ -1500,6 +1593,25 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
         </p>
 
         {compactStatus && <Notice tone={compactStatus.tone}>{compactStatus.message}</Notice>}
+        {health.maintenance_error && <Notice tone="danger">最近维护错误：{health.maintenance_error}</Notice>}
+        <div className="settings-diagnostic-grid">
+          <div>采集压缩数据 / 预算：{formatBytes(health.capture_bytes ?? 0)} / {formatBytes(health.capture_limit_bytes ?? confirmedSettings.max_body_storage_bytes)}</div>
+          <div>可回收物理空闲空间：{formatBytes(health.reclaimable_bytes ?? 0)}</div>
+          <div>上次内容清理：{health.last_cleanup_at ? new Date(health.last_cleanup_at).toLocaleString() : '暂无'} · {health.last_cleanup_records ?? 0} 条</div>
+          <div>上次整理前 / 后：{formatBytes(health.last_compact_before_bytes ?? 0)} / {formatBytes(health.last_compact_after_bytes ?? 0)}</div>
+        </div>
+        <div className="settings-actions">
+          <Button variant="secondary" disabled={isMutationBusy} onClick={() => setContentOperation('cleanup')}>清理过期内容</Button>
+          <Button variant="danger" disabled={isMutationBusy} onClick={() => setContentOperation('purge')}>立即清空全部内容</Button>
+        </div>
+        {health.dropped_captures > 0 && <Notice tone="warning">
+          本次运行自 {health.counters_since ? new Date(health.counters_since).toLocaleString() : '启动'} 累计丢弃 {health.dropped_captures} 条诊断采集，不代表计费丢失或仍有故障。
+          {Object.entries(health.capture_drops ?? {}).map(([reason, count]) => <span key={reason}> {reason}: {count}；</span>)}
+        </Notice>}
+        {contentOperation && <Modal title={contentOperation === 'purge' ? '清空全部内容' : '清理过期内容'} onClose={() => { if (!compacting) setContentOperation(null); }}
+          footer={<><Button variant="secondary" disabled={compacting} onClick={() => setContentOperation(null)}>取消</Button><Button variant={contentOperation === 'purge' ? 'danger' : 'primary'} loading={compacting} onClick={handleContentConfirm}>确认执行</Button></>}>
+          <p>仅删除{contentOperation === 'purge' ? '全部已保存的请求头和正文，且不可恢复' : '已过期请求头和正文'}。不删除请求元数据、汇总，不重置额度或重算费用。物理文件空间需另外整理。</p>
+        </Modal>}
 
         {/* Fault warning always visible outside */}
         {hasFault && (
@@ -1507,11 +1619,6 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
             {health.last_error && <Notice tone="danger">最近系统错误：{health.last_error}</Notice>}
             {health.pending_usage > 0 && (
               <Notice tone="warning">待重试计费队列存在 {health.pending_usage} 条事件正在排队写入。</Notice>
-            )}
-            {health.dropped_captures > 0 && (
-              <Notice tone="warning">
-                因超出存储上限，已累计丢弃 {health.dropped_captures} 条请求体捕获。
-              </Notice>
             )}
           </div>
         )}
@@ -1595,7 +1702,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, refreshInterval, onDirt
               确定要执行数据库空间整理吗？当前数据库占用 <strong>{formatBytes(health.database_bytes)}</strong>。
             </p>
             <p className="settings-note" style={{ marginTop: 8 }}>
-              整理期间将重建数据文件以回收已释放的磁盘空间，需要少量临时磁盘配额。整理过程不会丢失已用额度或计费日志；失败时保留原文件，不会自动重试。
+              仅在无活跃请求、无待写计费时整理，忙时请稍后重试。整理期间新受管请求可能收到可重试的 503，不影响已接受请求或 CPA 原生 Key。需要临时磁盘空间；复制或替换前失败保留原文件，替换后同步错误会如实报告。
             </p>
           </Modal>
         )}

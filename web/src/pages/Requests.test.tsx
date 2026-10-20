@@ -831,12 +831,9 @@ describe('RequestsPage and RequestsHelpers', () => {
     });
   });
 
-  /**
-   * Why covered:
-   * Proves dedicated poll interval selection (0, 5, 10, 30) and pause conditions:
-   * pauses when dirty, when page > 1, when modal open, or when historical range.
-   */
-  it('polling controls & pause: dedicated poll selector, pauses on dirty/page>1/modal/historical', async () => {
+  // The interval menu is an actual Radix control rather than a hidden timer
+  // configuration. Timer/pause behavior is independently exercised below.
+  it('polling controls: dedicated interval selector', async () => {
     const api = createMockApiClient();
     render(<RequestsPage api={api} refreshInterval={5} onDirtyChange={vi.fn()} />);
 
@@ -852,6 +849,147 @@ describe('RequestsPage and RequestsHelpers', () => {
 
     // Verify polling selector value updated
     expect(screen.getByText('每 10 秒刷新')).toBeInTheDocument();
+  });
+
+  // Advance real component timers, not just pause-hint text: control focus,
+  // draft changes, details, paging, visibility and history must stop requests.
+  it('polling pauses for interaction, draft, detail, paging, hidden documents and historical ranges', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(FIXED_NOW);
+    const base = createMockApiClient();
+    const api = createMockApiClient({ request: vi.fn(async (path, options) => {
+      const value = await base.request(path, options);
+      if (path.startsWith('/requests/view')) (value as RequestView).pagination.has_more = true;
+      return value;
+    }) as ApiClient['request'] });
+    const mounted = render(<RequestsPage api={api} onDirtyChange={vi.fn()} />);
+    const reads = () => vi.mocked(api.request).mock.calls.filter(([path]) => path.startsWith('/requests/view')).length;
+    const advance = async (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+    try {
+      await act(async () => {});
+      expect(reads()).toBe(1);
+      await advance(5000);
+      expect(reads()).toBe(2);
+      fireEvent.focus(screen.getByLabelText('开始日期'));
+      await advance(10000);
+      expect(reads()).toBe(2);
+      fireEvent.blur(screen.getByLabelText('开始日期'));
+      fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2026-10-01' } });
+      await advance(10000);
+      expect(reads()).toBe(2);
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '查询' })); });
+      expect(reads()).toBe(3);
+      await advance(5000);
+      expect(reads()).toBe(4); // resuming did not start a duplicate immediate fetch
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '查看请求详情 req-001' })); });
+      await advance(10000);
+      expect(reads()).toBe(4);
+      fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '下一页' })); });
+      expect(reads()).toBe(5);
+      await advance(10000);
+      expect(reads()).toBe(5);
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '上一页' })); });
+      expect(reads()).toBe(6);
+      const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+      await advance(10000);
+      expect(reads()).toBe(6);
+      hidden.mockRestore();
+      await advance(5000);
+      expect(reads()).toBe(7);
+      fireEvent.change(screen.getByLabelText('结束日期'), { target: { value: '2026-10-19' } });
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '查询' })); });
+      expect(reads()).toBe(8);
+      await advance(60000);
+      expect(reads()).toBe(8);
+    } finally {
+      mounted.unmount();
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    }
+  });
+
+  // Rolling presets follow the UTC calendar, including leap day, while a
+  // user-applied historical date remains fixed across later midnight changes.
+  it('rolling today advances across UTC leap day without moving a custom historical range', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2024-02-28T23:59:58Z'));
+    const api = createMockApiClient();
+    const mounted = render(<RequestsPage api={api} onDirtyChange={vi.fn()} />);
+    const viewCalls = () => vi.mocked(api.request).mock.calls.filter(([path]) => path.startsWith('/requests/view'));
+    try {
+      await act(async () => {});
+      expect(viewCalls()[0][0]).toContain('to_date=2024-02-28');
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(viewCalls()).toHaveLength(2);
+      expect(viewCalls()[1][0]).toContain('from_date=2024-02-29&to_date=2024-02-29');
+      expect(screen.getByLabelText('开始日期')).toHaveValue('2024-02-29');
+      expect(screen.getByLabelText('结束日期')).toHaveValue('2024-02-29');
+      fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2024-02-27' } });
+      fireEvent.change(screen.getByLabelText('结束日期'), { target: { value: '2024-02-27' } });
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '查询' })); });
+      const count = viewCalls().length;
+      vi.setSystemTime(new Date('2024-03-01T00:00:00Z'));
+      await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+      expect(viewCalls()).toHaveLength(count);
+      expect(screen.getByLabelText('结束日期')).toHaveValue('2024-02-27');
+    } finally {
+      mounted.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  // A slow response must not create an overlapping poll; a newer explicit
+  // refresh wins even if the old server ignores abort. Failures back off and
+  // preserve the exact existing row node rather than flashing a loading table.
+  it('polling is single-flight, ignores aborted late responses and backs off after errors', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(FIXED_NOW);
+    const base = createMockApiClient();
+    let count = 0;
+    let stale!: (value: RequestView) => void;
+    let staleSignal: AbortSignal | undefined;
+    const api = createMockApiClient({ request: vi.fn((path, options) => {
+      if (!path.startsWith('/requests/view')) return base.request(path, options);
+      count++;
+      if (count === 2) {
+        staleSignal = options?.signal;
+        return new Promise<RequestView>(resolve => { stale = resolve; });
+      }
+      if (count === 4) return Promise.reject(new Error('offline'));
+      const value = createSampleRequestView();
+      value.summary.requests = 99;
+      return Promise.resolve(value);
+    }) as ApiClient['request'] });
+    const mounted = render(<RequestsPage api={api} onDirtyChange={vi.fn()} />);
+    const advance = async (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+    try {
+      await act(async () => {});
+      const row = screen.getByRole('button', { name: '查看请求详情 req-001' }).closest('tr');
+      await advance(5000);
+      expect(count).toBe(2);
+      await advance(60000);
+      expect(count).toBe(2);
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '刷新' })); });
+      expect(staleSignal?.aborted).toBe(true);
+      expect(count).toBe(3);
+      const old = createSampleRequestView();
+      old.summary.requests = 1000;
+      await act(async () => { stale(old); });
+      expect(screen.getByTestId('metric-requests')).toHaveTextContent('99');
+      await advance(5000); // the next timer fails
+      expect(count).toBe(4);
+      expect(screen.getByText('offline')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '查看请求详情 req-001' }).closest('tr')).toBe(row);
+      await advance(5000);
+      expect(count).toBe(4); // backoff to ten seconds
+      await advance(5000);
+      expect(count).toBe(5);
+      expect(screen.queryByText('offline')).not.toBeInTheDocument();
+    } finally {
+      mounted.unmount();
+      vi.useRealTimers();
+    }
   });
 
   /**

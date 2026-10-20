@@ -10,7 +10,7 @@ export interface ApiClient {
 
 export interface PageProps {
   api: ApiClient;
-  refreshInterval: number; // seconds; zero disables repeated polling, not initial loading
+  refreshInterval?: number; // Requests only: seconds; zero disables its timer.
   onDirtyChange: (dirty: boolean) => void;
 }
 

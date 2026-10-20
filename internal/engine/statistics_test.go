@@ -123,6 +123,24 @@ func TestDetailedAggregatesAndRequestViews(t *testing.T) {
 	}
 }
 
+// Cache/input denominators must use the same complete sample set. An unknown
+// provider's raw buckets remain visible on the record, not blended into a
+// misleading aggregate hit rate; authoritative totals/cost still count it.
+func TestMixedAccountingCoverageKeepsOneTokenSampleSet(t *testing.T) {
+	s, now, _ := fixture(t)
+	k, _ := key(t, s, KeySpec{Enabled: true})
+	must(t, s.RecordUsage(event(k, "complete", now.Add(-time.Hour))))
+	unknown := event(k, "unknown", now.Add(-time.Hour))
+	unknown.Provider = "unknown-provider"
+	must(t, s.RecordUsage(unknown))
+	v, err := s.RequestView(ViewQuery{})
+	must(t, err)
+	if v.Summary.Requests != 2 || v.Summary.DetailedRequests != 2 || v.Summary.CompleteRequests != 1 ||
+		v.Summary.Tokens != 20 || v.Summary.InputTokens != 8 || v.Summary.OutputTokens != 2 || v.Summary.CostMicroUSD != 14 {
+		t.Fatal("incomplete raw buckets contaminated the complete sample set", v.Summary)
+	}
+}
+
 // Date inputs are inclusive UTC dates, today clamps to the query instant, and
 // invalid or over-large paging is rejected.
 func TestRequestViewDateAndPagingBounds(t *testing.T) {
@@ -215,6 +233,23 @@ func TestFacetsSearchCursorAndDeletedKey(t *testing.T) {
 		if _, e := s.Facets(q); !errors.Is(e, ErrInvalid) {
 			t.Fatal("invalid facet accepted", q, e)
 		}
+	}
+}
+
+// Read-time retention applies to facet dimensions even when the maintenance
+// worker has not physically removed the old rollups.
+func TestFacetsIgnoreExpiredRollupsBeforeCleanup(t *testing.T) {
+	s, now, _ := fixture(t)
+	k, _ := key(t, s, KeySpec{Enabled: true})
+	must(t, s.RecordUsage(event(k, "old", *now)))
+	*now = now.AddDate(2, 0, 0)
+	v := event(k, "current", *now)
+	v.Model = "current-model"
+	must(t, s.RecordUsage(v))
+	out, err := s.Facets(FacetQuery{Field: facetModel})
+	must(t, err)
+	if len(out.Items) != 1 || out.Items[0].Value != "current-model" {
+		t.Fatal("expired dimensions survived read retention", out)
 	}
 }
 

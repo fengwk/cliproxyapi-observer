@@ -1,7 +1,11 @@
-# Observer v0.6.0: implementation and integration contract
+# Observer: core implementation and integration contract
 
-This clean-slate release replaces the former observation-only backend. No old
-database, key, compatibility fields or migration. Default database:
+The v0.6.0 baseline replaced the former observation-only backend. No migration
+from pre-v0.6 databases or credentials. Subsequent schema2 releases preserve
+their own databases, keys and fixed costs. Current additions and superseding
+auth/UI/API contracts: [reconstruction guide](docs/reconstruction.md) and
+[requirements](docs/REFACTOR-next.md). Code examples below describe the original
+core shape; additive fields are documented in the current guide. Default database:
 `data/cliproxyapi-observer-v2.db`. Reject nonempty databases without this schema
 marker without changing them. CPA core, upstream selection, routing, retries and
 session affinity remain untouched. SDK baseline v8.0.30, schema 6 minimum.
@@ -260,15 +264,18 @@ page (default1)/page_size(default25,max100). Reject malformed/unknown inputs.
 Default from UTC today midnight, to now. Reject unsupported methods.
 Input JSON limited 1MiB, reject trailing values/unknown fields. No CORS.
 Cache-Control:no-store; body/header details only fetched on row click.
-Management key stays in sessionStorage once; don't require a second field or
-client Key for manager. Resource shell may be public, but all data authenticated.
+Management login uses Observer localStorage only with explicit remember-login
+consent, otherwise sessionStorage/in-memory. Logout/definite structured 401 clears
+both; never read host credentials. Don't require a second client Key for manager.
+Resource shell may be public, but all data authenticated.
 
 Plugin frontend auth extracts bearer/x-api-key/x-goog-api-key and supported
-query key/auth_token, disallows conflicting material. While the host retains the
-registered capability, always declares exclusive frontend auth even when
-internally disabled/quiesced to prevent unmanaged fallback. Host-level disabling,
-unloading or removing the plugin removes that protection; an unloaded plugin
-cannot enforce authentication or prevent the host restoring its own providers.
+query key/auth_token, disallows conflicting material. Authentication is
+nonexclusive and only recognizes finite supported operations. Unknown/native
+scopes are unchanged. Once authenticated as owned generation, admission fails
+closed across reconfiguration/store failures. Anonymous/no-native-provider and
+duplicate/mixed-key limitations are explicit in the reconstruction guide.
+An unloaded plugin cannot enforce its own authentication or admission.
 Before-interceptor validates principal metadata, makes admission once;
 after-interceptor no-op. Complete releases by RequestID. Do not mutate or
 return incoming headers/body. Correct lifecycle fence/failed-reconfigure restore.
@@ -277,14 +284,16 @@ Refuse unsafe schema<6 rather than silently downgrading security.
 ## UI and reusable acceptance
 
 Only 请求日志 / Key 管理 / 设置. White/light/dark/auto neutral CPA colors and
-typography; no colored card top borders. Top bar: management login, theme, one
-refresh control, auto-refresh off/5(default)/15/30/60s. Avoid overlapping fetches;
-visibility-aware, stop on 401. One filter query button. Request/failure trend
+typography; no colored card top borders. Full available iframe width. Only the
+Requests page owns refresh (off/5(default)/10/30s); Keys/Settings never poll.
+Avoid overlapping fetches; pause during reading/editing and on hidden pages;
+stop on 401. One explicit filter query button. Request/failure trend
 SVG plus readable table, currency `used/limit$`, expiry, concurrency, model limits,
 cycle reset timestamps. Safe text-only JSON/header rendering, native dialogs,
 fully formatted JSON. Rule/manual rates editors use USD per million display,
-persist integers, missing price visibly zero. Settings: capture, retention,
-price refresh, physical compaction plus confirmations. No old lookup page.
+persist integers; unknown rates show em-dash, known free rates show zero.
+Settings: capture modes/independent TTL, explainable pricing and mappings,
+expired cleanup, confirmed content purge and physical compaction. No fourth page.
 
 Node unit tests and real Chrome automation, with persistent screenshot reports
 outside worktree before workspace release. Desktop1280 and mobile390, light/dark

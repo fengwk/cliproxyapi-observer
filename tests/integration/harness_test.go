@@ -200,7 +200,9 @@ type harness struct {
 type hostOptions struct {
 	// Baseline only: start CPA without the plugin to measure normal routing.
 	PluginDisabled bool
-	TwoUpstreams   bool
+	// SDK compatibility probe: the native provider is absent, not a bypass.
+	NoNativeKeys bool
+	TwoUpstreams bool
 	// GeminiURL adds a standard api-keys.gemini upstream at this local URL.
 	GeminiURL string
 }
@@ -330,6 +332,10 @@ func installPlugin(pluginsDir string) error {
 // with OpenAI subset token semantics (cached tokens are a subset of the prompt),
 // matching the accounting the mock fixture exercises.
 func hostConfig(port int, authDir, pluginsDir, mockURL string, opts hostOptions) []byte {
+	nativeKeys := fmt.Sprintf("  api-keys:\n    - %q\n    - %q", clientKey, clientKeyTwo)
+	if opts.NoNativeKeys {
+		nativeKeys = "  api-keys: []"
+	}
 	extraKey := ""
 	if opts.TwoUpstreams {
 		extraKey = "\n      - api-key: \"fake-upstream-key-two\""
@@ -359,9 +365,7 @@ management:
   disable-control-panel: true
   disable-auto-update-panel: true
 access:
-  api-keys:
-    - %q
-    - %q
+%s
 oauth:
   auth-dir: %q
 routing:
@@ -386,7 +390,7 @@ plugins:
   configs:
     %s:
       enabled: true
-`, port, mgmtKey, clientKey, clientKeyTwo, authDir, compatProviderName, mockURL+"/v1", upstreamKey, extraKey, upstreamModel, modelName, upstreamModelTwo, modelNameTwo, geminiSection, !opts.PluginDisabled, pluginsDir, pluginID))
+`, port, mgmtKey, nativeKeys, authDir, compatProviderName, mockURL+"/v1", upstreamKey, extraKey, upstreamModel, modelName, upstreamModelTwo, modelNameTwo, geminiSection, !opts.PluginDisabled, pluginsDir, pluginID))
 }
 
 // hostEnv builds a minimal environment that cannot inherit production CPA

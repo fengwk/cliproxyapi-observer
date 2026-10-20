@@ -13,7 +13,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-var buckets = []string{"meta", "keys", "hashes", "records", "dedup", "daily", "hourly", "captures", "capture_state", "capture_fifo", "timeline", "correlations"}
+var buckets = []string{"meta", "keys", "hashes", "records", "dedup", "daily", "hourly", "captures", "capture_state", "capture_fifo", "capture_expiry", "timeline", "correlations"}
 
 type storedKey struct {
 	Key

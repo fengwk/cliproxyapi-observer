@@ -6,6 +6,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const os = require('node:os');
 const { chromium } = require('../../../web/node_modules/playwright');
 const mock = require('./mock-server.cjs');
 const { ensureManagementHTML } = require('./shell-helper.cjs');
@@ -81,8 +82,8 @@ function readonlyAllowed(request, origin) {
   } catch { return false; }
 }
 
-async function openShell(browser, origin, shell, size, theme, server) {
-  const context = await browser.newContext({
+async function openShell(browser, origin, shell, size, theme, server, suppliedContext) {
+  const context = suppliedContext || await browser.newContext({
     viewport: size, colorScheme: theme === 'auto' || theme === 'dark' ? 'dark' : 'light',
     reducedMotion: 'reduce',
   });
@@ -145,7 +146,7 @@ async function openShell(browser, origin, shell, size, theme, server) {
   }
   const element = await page.$('iframe[title="Observer"]');
   const frame = await element.contentFrame();
-  await frame.locator('#login-key').waitFor();
+  await frame.locator('#login-key, [data-testid="requests-filters"]').first().waitFor();
   return { context, page, frame, diagnostics, server, expectedDiagnosticIndices: new Set() };
 }
 
@@ -194,7 +195,7 @@ async function verifySafeRects(env, name, dialog = false) {
 async function loginObserver(frame) {
   await frame.locator('#login-key').fill(managementKey);
   await frame.getByRole('button', { name: '登录', exact: true }).click();
-  await frame.locator('#filters').waitFor();
+  await frame.getByTestId('requests-filters').waitFor();
   await frame.locator('.requests-table tbody tr').first().waitFor();
 }
 async function selectOption(frame, label, choice) {
@@ -209,12 +210,33 @@ async function closeModal(frame) {
 async function readonlyPages(env, name) {
   const { page, frame, server } = env;
   await verifySafeRects(env, name);
+  await shot(page, name + '-requests');
+  const width = await frame.evaluate(() => {
+    const page = document.querySelector('.requests-page').getBoundingClientRect();
+    return { actual: page.width, viewport: innerWidth };
+  });
+  check(name + ': request page uses full available width', width.actual >= width.viewport - 70, JSON.stringify(width));
+  const railToggle = page.locator('.sidebar-toggle-floating');
+  if (await railToggle.isVisible()) {
+    await railToggle.click();
+    await delay(300);
+    await verifySafeRects(env, name + '-collapsed-sidebar');
+    const available = await frame.evaluate(() => ({
+      page: document.querySelector('.requests-page').getBoundingClientRect().width, viewport: innerWidth,
+    }));
+    check(name + ': full width follows collapsed sidebar', available.page >= available.viewport - 70, JSON.stringify(available));
+    await railToggle.click();
+    await delay(300);
+  }
+  await frame.getByTestId('requests-table-section').scrollIntoViewIfNeeded();
+  await shot(page, name + '-request-table');
+  await frame.locator('.cpa-app-layout').evaluate(el => { el.scrollTop = 0; });
   // Details must be fetched on demand, safely rendered as text and never turn
   // malicious model/header/JSON strings into DOM or script.
   if (server) check(name + ': details initially lazy', server.counters.detailReads === 0);
   const detailButton = server
-    ? frame.locator('.requests-model-btn').filter({ hasText: 'gpt-5-codex' }).first()
-    : frame.locator('.requests-model-btn').first();
+    ? frame.locator('.requests-model-link').filter({ hasText: 'gpt-5-codex' }).first()
+    : frame.locator('.requests-model-link').first();
   await detailButton.click();
   await frame.getByRole('dialog').waitFor();
   await frame.getByRole('tab', { name: '请求头', exact: true }).click();
@@ -227,12 +249,15 @@ async function readonlyPages(env, name) {
   await frame.getByRole('tab', { name: '请求体 (JSON)', exact: true }).click();
   await frame.locator('.requests-json-body').waitFor();
   const body = await frame.locator('.requests-json-body').innerText();
+  check(name + ': detail tab selection agrees with the displayed pane',
+    await frame.getByRole('tab', { name: '请求体 (JSON)', exact: true }).getAttribute('aria-selected') === 'true');
   check(name + ': formatted JSON', body.includes('\n  "') && JSON.parse(body));
+  await delay(200); // allow active-tab border transition to settle for visual review
   await verifySafeRects(env, name + '-detail', true);
   await shot(page, name + '-request-detail-host');
   await closeModal(frame);
   if (server) {
-    await frame.locator('.requests-model-btn').filter({ hasText: mock.XSS.model }).click();
+    await frame.locator('.requests-model-link').filter({ hasText: mock.XSS.model }).click();
     await frame.getByRole('tab', { name: '请求头', exact: true }).click();
     await frame.locator('.requests-headers-table').waitFor();
     check(name + ': malicious header remains literal', (await frame.locator('.requests-headers-table').innerText()).includes(mock.XSS.headerValue));
@@ -256,6 +281,8 @@ async function readonlyPages(env, name) {
   await frame.getByTestId('observer-settings').waitFor();
   await frame.locator('.settings-table tbody tr').first().waitFor();
   await verifySafeRects(env, name + '-settings');
+  const capacity = await frame.locator('#settings-max-body-amount').boundingBox();
+  check(name + ': capacity input has readable width', capacity && capacity.width >= (name.startsWith('390') ? 75 : 100), JSON.stringify(capacity));
   await frame.locator('.cpa-app-layout').evaluate(el => { el.scrollTop = 400; });
   // Scroll safe viewport retains the top gutter; page controls cannot slide
   // underneath host actions even though the child document is scrollable.
@@ -269,6 +296,40 @@ async function readonlyPages(env, name) {
 
 async function interactions(env) {
   const { page, frame, server } = env;
+  await requestsTab(frame).click();
+  await frame.locator('.requests-table tbody tr').first().waitFor();
+  const viewReads = () => server.calls.filter(call => call.path === mock.MANAGEMENT_BASE + '/requests/view').length;
+  const readsBefore = viewReads();
+  await frame.locator('.requests-table tbody tr').first().evaluate(el => { el.dataset.stableNode = 'retained'; });
+  await frame.locator('.table-wrap').evaluate(el => { el.scrollLeft = 100; });
+  await frame.getByRole('button', { name: '刷新', exact: true }).focus();
+  const stableLayout = () => frame.evaluate(() => {
+    const boxes = ['.requests-header', '[data-testid="requests-filters"]', '.requests-metrics-section',
+      '.requests-trend-container', '.requests-table thead'].flatMap(selector => {
+        const rect = document.querySelector(selector).getBoundingClientRect();
+        return [rect.x, rect.y, rect.width, rect.height];
+      });
+    return { boxes, scroll: document.querySelector('.table-wrap').scrollLeft,
+      focused: document.activeElement?.textContent };
+  });
+  const beforeLayout = await stableLayout();
+  let maxDrift = 0, stableFocusAndScroll = true;
+  // Twelve actual five-second timer cycles, not artificial manual refreshes.
+  for (let round = 0; round < 12; round++) {
+    await delay(5200);
+    const after = await stableLayout();
+    maxDrift = Math.max(maxDrift, ...after.boxes.map((value, index) => Math.abs(value - beforeLayout.boxes[index])));
+    stableFocusAndScroll &&= after.scroll === beforeLayout.scroll && after.focused === beforeLayout.focused;
+  }
+  check('12 request-only timer cycles retain rows, geometry, focus and local scrolling',
+    viewReads() >= readsBefore + 12 && maxDrift <= 1 && stableFocusAndScroll &&
+    await frame.locator('.requests-table tbody tr').first().getAttribute('data-stable-node') === 'retained',
+    JSON.stringify({ cycles: viewReads() - readsBefore, maxDrift, stableFocusAndScroll }));
+  // Management login may persist only by explicit Observer preference; client
+  // credentials are still never retained. Verify a real document reload.
+  await frame.goto(frame.url());
+  await frame.locator('.requests-table tbody tr').first().waitFor();
+  check('remembered management login survives reload', await frame.locator('#login-key').count() === 0);
   await keyTab(frame).click();
   await frame.getByRole('button', { name: '+ 新建 Key', exact: true }).click();
   await frame.getByLabel('Key 名称', { exact: true }).fill('browser-custom');
@@ -321,6 +382,12 @@ async function interactions(env) {
   await frame.getByRole('button', { name: '确认启用', exact: true }).click();
   await row.getByRole('button', { name: '禁用', exact: true }).waitFor();
   check('enable reuses the same credential without rotation', created.enabled && server.state.secrets.get(created.id) === retainedHash);
+  await row.getByRole('button', { name: '删除', exact: true }).click();
+  await frame.getByRole('button', { name: '确认永久删除', exact: true }).click();
+  await row.waitFor({ state: 'detached' });
+  check('terminal deletion removes authentication but preserves accounting identity',
+    Boolean(created.deleted_at) && !created.enabled && !server.state.secrets.has(created.id) &&
+    server.state.keys.some(key => key.id === created.id));
   // Editing the name must not truncate an unchanged nanosecond expiry.
   const nano = frame.getByRole('row').filter({ hasText: '纳秒到期 Key' });
   await nano.getByRole('button', { name: '编辑', exact: true }).click();
@@ -328,7 +395,7 @@ async function interactions(env) {
   const keyReads = () => server.calls.filter(call => call.path === mock.MANAGEMENT_BASE + '/keys' && call.method === 'GET').length;
   const readsDuringDraft = keyReads();
   await delay(5500);
-  check('polling pauses with an open dirty editor', keyReads() === readsDuringDraft);
+  check('Key editor does not trigger periodic list reloads', keyReads() === readsDuringDraft);
   assert.equal(await frame.getByLabel('Key 名称', { exact: true }).inputValue(), '纳秒到期 Key updated');
   await frame.getByRole('button', { name: '保存修改', exact: true }).click();
   await frame.getByRole('dialog').waitFor({ state: 'detached' });
@@ -360,7 +427,7 @@ async function interactions(env) {
   await frame.locator('table[aria-label="Key 列表"] tbody tr').first().waitFor();
   const readsWithoutDraft = keyReads();
   await delay(5500);
-  check('polling resumes without a draft', keyReads() > readsWithoutDraft);
+  check('Key page has no periodic reloads when clean either', keyReads() === readsWithoutDraft);
 
   // A deliberately injected, single 401 is the only accepted negative HTTP
   // diagnostic. The exact response and its browser console message remain in
@@ -381,7 +448,7 @@ async function interactions(env) {
   const readsAfter401 = server.calls.length;
   await delay(5500);
   check('401 returns to login and stops polling', server.calls.length === readsAfter401 &&
-    !await frame.evaluate(key => JSON.stringify({ ...sessionStorage }).includes(key), managementKey));
+    !await frame.evaluate(key => JSON.stringify({ ...sessionStorage, ...localStorage }).includes(key), managementKey));
   const negative = env.diagnostics.slice(start);
   const expectedHTTP = 'HTTP 401 ' + mock.MANAGEMENT_BASE + '/keys';
   assert.equal(negative.filter(message => message === expectedHTTP).length, 1);
@@ -392,6 +459,48 @@ async function interactions(env) {
     env.expectedDiagnosticIndices.add(start + offset);
     report.expected_diagnostics.push({ action: 'deliberate-session-expiry', message });
   });
+}
+
+async function persistentLoginAndNativeZoom(origin, shell, server) {
+  // Use a disposable Chrome profile owned only by this test. Never inspect a
+  // host/user profile, credential file or management-center auth storage.
+  const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'observer-browser-profile-'));
+  let context;
+  const launch = () => chromium.launchPersistentContext(profile, {
+    executablePath: args.chrome, headless: true, viewport: { width: 1280, height: 900 },
+    reducedMotion: 'reduce', args: ['--no-sandbox'],
+  });
+  try {
+    server.resetState();
+    context = await launch();
+    const first = await context.newPage();
+    await first.goto(server.resourceURL);
+    await loginObserver(first);
+    await context.close();
+    context = await launch(); // a new browser process, not storageState injection
+    const reopened = await context.newPage();
+    await reopened.goto(server.resourceURL);
+    await reopened.locator('.requests-table tbody tr').first().waitFor();
+    check('remembered login survives complete Chrome profile restart', await reopened.locator('#login-key').count() === 0);
+    await shot(reopened, 'remember-reopened-browser');
+    // Chrome's own setting changes real browser zoom, not CSS zoom or emulated
+    // viewport scale. This preference is confined to the disposable profile.
+    const preferences = await context.newPage();
+    await preferences.goto('chrome://settings');
+    await preferences.evaluate(() => new Promise(resolve => chrome.settingsPrivate.setDefaultZoom(2, resolve)));
+    const zoom = await preferences.evaluate(() => new Promise(resolve => chrome.settingsPrivate.getDefaultZoom(resolve)));
+    await preferences.close();
+    const env = await openShell(null, origin, shell, { width: 1280, height: 900 }, 'light', server, context);
+    await env.frame.locator('.requests-table tbody tr').first().waitFor();
+    const actual = await env.page.evaluate(() => ({ ratio: devicePixelRatio, width: innerWidth, outer: outerWidth }));
+    check('official CPA shell uses native 200% Chrome zoom', zoom === 2 && actual.ratio === 2 && actual.width === 640, JSON.stringify(actual));
+    await readonlyPages(env, 'native-zoom-200');
+    check('native 200% zoom has no console/page/CSP errors', env.diagnostics.length === 0, env.diagnostics.join('\n'));
+    report.console_errors.push(...env.diagnostics);
+  } finally {
+    await context?.close();
+    await fs.rm(profile, { recursive: true, force: true });
+  }
 }
 
 async function main() {
@@ -406,7 +515,8 @@ async function main() {
     browser = await chromium.launch({ executablePath: args.chrome, headless: true, args: ['--no-sandbox'] });
     const cases = real
       ? [{ width: 1280, height: 900, theme: 'dark' }, { width: 390, height: 844, theme: 'white' }]
-      : [1280, 390].flatMap(width => ['light', 'white', 'dark', 'auto'].map(theme => ({ width, height: width === 390 ? 844 : 900, theme })));
+      : [1280, 390].flatMap(width => ['light', 'white', 'dark', 'auto'].map(theme => ({ width, height: width === 390 ? 844 : 900, theme })))
+        .concat([640, 768, 1440, 1920, 2560].map(width => ({ width, height: 900, theme: 'light' })));
     for (const item of cases) {
       if (server) server.resetState();
       const name = `${real ? 'realhost-' : ''}${item.width}-${item.theme}`;
@@ -426,6 +536,7 @@ async function main() {
         report.console_errors.push(...unexpected);
       } finally { await env.context.close(); }
     }
+    if (!real) await persistentLoginAndNativeZoom(origin, shell, server);
     report.outcome = report.results.every(result => result.ok) ? 'completed' : 'failed';
   } catch (error) {
     report.fatal = sanitize(error.stack || error);

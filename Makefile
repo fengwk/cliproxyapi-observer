@@ -24,7 +24,7 @@ LIB := $(DIST_DIR)/$(PLUGIN_ID).$(LIB_EXT)
 VERSION_VAR := github.com/fengwk/cliproxyapi-observer/internal/plugin.Version
 LDFLAGS := -s -w -X $(VERSION_VAR)=$(VERSION)
 
-.PHONY: help build frontend test vet race browser integration package clean
+.PHONY: help build frontend test vet race load browser integration package clean
 
 help:
 	@echo "cliproxyapi-observer"
@@ -33,6 +33,7 @@ help:
 	@echo "  make frontend     rebuild embedded UI (npm ci --prefix web first)"
 	@echo "  make test         canonical Go + frontend + mock API suite"
 	@echo "  make race         go test -race across all packages"
+	@echo "  make load         isolated 10k/100k metadata + capture budget acceptance"
 	@echo "  make browser      real Chrome acceptance via $(OBSERVER_BROWSER)"
 	@echo "  make integration  real-host tests (requires CPA_BINARY=/abs/path/cli-proxy-api)"
 	@echo "  make package      zip the built plugin for the current GOOS/GOARCH"
@@ -63,6 +64,9 @@ test: vet
 
 race:
 	go test -race ./...
+
+load:
+	go test -tags=load ./internal/engine -run '^TestQueryAdmissionAndCaptureLoad$$' -v -count=1 -timeout=180s
 
 browser:
 	@if [ ! -x "$(CHROME_BIN)" ]; then \

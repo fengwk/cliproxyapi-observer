@@ -239,7 +239,7 @@ test('keys: fixed query-ID create/update/rotate/reset/recover/revoke with hashed
       }
     });
     assert.equal(created.res.status, 201);
-    assert.match(created.body.secret, /^observer_sk_[0-9a-f]{64}$/);
+    assert.match(created.body.secret, /^sk-[A-Za-z0-9]{48}$/);
     assert.equal(created.body.key.label, '合约测试 Key');
     assert.equal(created.body.key.secret, undefined);
     const id = created.body.key.id;
@@ -264,7 +264,7 @@ test('keys: fixed query-ID create/update/rotate/reset/recover/revoke with hashed
 
     const rotated = await json(server, '/keys/rotate?id=' + encodeURIComponent(id), { method: 'POST' });
     assert.equal(rotated.res.status, 200);
-    assert.match(rotated.body.secret, /^observer_sk_[0-9a-f]{64}$/);
+    assert.match(rotated.body.secret, /^sk-[A-Za-z0-9]{48}$/);
     assert.notEqual(rotated.body.secret, created.body.secret);
 
     const reset = await json(server, '/keys/reset?id=' + encodeURIComponent(id), {
@@ -532,6 +532,7 @@ test('settings/prices/compact: round-trip, refresh and method rejection', async 
     );
 
     settings.body.capture_enabled = true;
+    settings.body.capture_mode = 'headers_and_body';
     settings.body.raw_retention_hours = 48;
     const saved = await json(server, '/settings', { method: 'PUT', body: settings.body });
     assert.equal(saved.res.status, 200);

@@ -2,7 +2,6 @@ import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import type { PageProps } from '../lib/api';
 import type { Key } from '../lib/types';
 import { formatUSD, formatDateTime, errorMessage } from '../lib/format';
-import { usePoll } from '../lib/usePoll';
 import { Button, Input, Select, Badge, Notice, EmptyState } from '../components/ui';
 import { copyToClipboard, maskId } from './KeysHelpers';
 import { KeyEditor, type RevealedSecretState } from './KeysEditor';
@@ -40,7 +39,7 @@ export type KeyStatusFilter =
   | 'expired'
   | 'all';
 
-export function KeysPage({ api, refreshInterval = 0, onDirtyChange }: KeysPageProps) {
+export function KeysPage({ api, onDirtyChange }: KeysPageProps) {
   const [keys, setKeys] = useState<Key[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [pageError, setPageError] = useState<string>('');
@@ -122,7 +121,7 @@ export function KeysPage({ api, refreshInterval = 0, onDirtyChange }: KeysPagePr
   // When status filter switches between requiring deleted items and not, reload
   useEffect(() => {
     loadKeys(undefined, needIncludeDeleted);
-  }, [statusFilter, loadKeys, needIncludeDeleted]);
+  }, [loadKeys, needIncludeDeleted]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -138,9 +137,8 @@ export function KeysPage({ api, refreshInterval = 0, onDirtyChange }: KeysPagePr
     };
   }, [loadKeys]);
 
-  // Keys page does not poll permanently when refreshInterval=0 (default)
-  const isPaused = activeModal !== null;
-  usePoll(loadKeys, refreshInterval, isPaused);
+  // No periodic loads: entry, deleted-history scope changes, explicit refresh
+  // and successful mutations are the only list reload triggers.
 
   // Robust clipboard copy with timer cleanup and visible failure
   const handleCopy = async (text: string, id: string) => {
