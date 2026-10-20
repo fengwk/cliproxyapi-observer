@@ -302,38 +302,50 @@ func TestGeminiCountTokensBypassesExhaustedQuotaAndConcurrency(t *testing.T) {
 	gemini.requireClean(t)
 }
 
-// Native CPA access keys stay authorized on the Gemini wildcard route. Observer
-// owns only its authenticated count/generation scopes and must not turn a native
-// key into an unauthorized response just because the host's FullPath template
-// cannot reveal the action. The plugin-disabled host is the exact baseline.
-func TestGeminiCountTokensAcceptsNativeHostKey(t *testing.T) {
+// Native CPA access keys stay host-authenticated on the Gemini wildcard route,
+// but model execution requires an Observer-owned scope. A native count or
+// generation must be rejected before dispatch instead of becoming an
+// unauthorized native execution that the FullPath template cannot distinguish.
+// The plugin-disabled host proves the baseline native count still works.
+func TestGeminiNativeHostKeyRejectedForModelExecution(t *testing.T) {
 	gemini := newGeminiMockUpstream(t)
 	baseline := newHarnessWith(t, hostOptions{PluginDisabled: true, GeminiURL: gemini.baseURL()})
 	h := newHarnessWith(t, hostOptions{GeminiURL: gemini.baseURL()})
 
 	controlStatus, controlBody := geminiCount(t, baseline, clientKey)
 	requireGeminiCount(t, controlStatus, controlBody)
+
 	status, body := geminiCount(t, h, clientKey)
-	requireGeminiCount(t, status, body)
-	var control, observed struct {
-		TotalTokens int `json:"totalTokens"`
+	requireObserverKeyRequired(t, status, body)
+	status, body = geminiCount(t, h, clientKey)
+	requireObserverKeyRequired(t, status, body)
+
+	// A valid Gemini generation action is denied by the same wildcard guard.
+	before := gemini.callCount()
+	status, body, err := h.rawRequest(
+		http.MethodPost,
+		"/v1beta/models/"+geminiModelName+":generateContent",
+		[]byte(`{"contents":[{"role":"user","parts":[{"text":"observer"}]}]}`),
+		map[string]string{"x-goog-api-key": clientKey},
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if json.Unmarshal(controlBody, &control) != nil || json.Unmarshal(body, &observed) != nil || control != observed {
-		t.Fatalf("native Gemini count baseline=%s observer=%s", truncate(controlBody, 300), truncate(body, 300))
+	requireObserverKeyRequired(t, status, body)
+	if gemini.callCount() != before {
+		t.Fatal("denied native Gemini generation reached the upstream")
 	}
 
-	// Repeat on the plugin-enabled host: native keys remain ordinary host
-	// credentials, not a one-shot Observer capability.
-	status, body = geminiCount(t, h, clientKey)
-	requireGeminiCount(t, status, body)
-	if calls := gemini.callCount(); calls != 3 {
-		t.Fatalf("Gemini upstream calls = %d, want baseline plus two native host counts", calls)
+	// Only the plugin-disabled baseline count reached the Gemini upstream; the
+	// guarded host created no Observer Key or execution.
+	if calls := gemini.callCount(); calls != 1 {
+		t.Fatalf("Gemini upstream calls = %d, want only the baseline count", calls)
 	}
 	if keys := h.keys(t); len(keys) != 0 {
-		t.Fatalf("native Gemini count created Observer keys: %+v", keys)
+		t.Fatalf("native Gemini traffic created Observer keys: %+v", keys)
 	}
 	if records := h.page(t, "page_size=100"); len(records.Items) != 0 {
-		t.Fatalf("native Gemini count entered Observer accounting: %+v", records.Items)
+		t.Fatalf("native Gemini traffic entered Observer accounting: %+v", records.Items)
 	}
 	gemini.requireClean(t)
 }

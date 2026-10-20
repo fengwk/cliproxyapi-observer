@@ -35,6 +35,15 @@ func nativeRequest(t *testing.T, h *harness, tc nativeScopeCase) (int, []byte) {
 	return status, body
 }
 
+// requireObserverKeyRequired asserts the deliberate model-execution boundary:
+// native or missing identities are rejected before any upstream dispatch.
+func requireObserverKeyRequired(t *testing.T, status int, body []byte) {
+	t.Helper()
+	if status != http.StatusForbidden || !bytes.Contains(body, []byte("observer_key_required")) {
+		t.Fatalf("model execution status=%d body=%s, want 403 observer_key_required", status, truncate(body, 300))
+	}
+}
+
 func nativeJSONEqual(t *testing.T, control, observed []byte) {
 	t.Helper()
 	if len(bytes.TrimSpace(control)) == 0 || len(bytes.TrimSpace(observed)) == 0 {
@@ -135,21 +144,22 @@ func nativeModelDetailEqual(t *testing.T, control, observed []byte) {
 	}
 }
 
-// Native CPA keys must retain exactly the host's original authentication and
-// response behavior on every supported surface while Observer is enabled. The
-// same host without the plugin supplies the authoritative baseline.
+// Native CPA keys keep their host authentication and directory/health behavior,
+// while model execution now deliberately requires an Observer-owned scope. The
+// same host without the plugin proves the non-model baseline is unchanged, and
+// a host with zero Observer Keys proves native model execution is blocked
+// before any upstream dispatch or accounting.
 func TestNativeAuthenticationScopeCoexistence(t *testing.T) {
 	baseline := newHarnessWith(t, hostOptions{PluginDisabled: true})
 	h := newHarness(t)
 
+	// Non-model surfaces keep exact native behavior.
 	cases := []nativeScopeCase{
 		{name: "health", method: http.MethodGet, path: "/healthz", compare: nativeJSONEqual},
 		{name: "models list", method: http.MethodGet, path: "/v1/models", withKey: true, compare: nativeOpenAIModelCatalogEqual},
 		{name: "model detail", method: http.MethodGet, path: "/v1/models/" + modelName, withKey: true, compare: nativeModelDetailEqual},
 		{name: "Gemini models list", method: http.MethodGet, path: "/v1beta/models", withKey: true, compare: nativeGeminiModelCatalogEqual},
 		{name: "Gemini model detail", method: http.MethodGet, path: "/v1beta/models/" + modelName, withKey: true, compare: nativeJSONEqual},
-		{name: "token count", method: http.MethodPost, path: "/v1/messages/count_tokens", body: chatBody(false), withKey: true, compare: nativeJSONEqual},
-		{name: "generation", method: http.MethodPost, path: "/v1/chat/completions", body: chatBody(false), withKey: true, compare: nativeJSONEqual},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -165,8 +175,37 @@ func TestNativeAuthenticationScopeCoexistence(t *testing.T) {
 		})
 	}
 
-	// Native traffic must not create Observer Keys, executions, active slots or
-	// pending accounting events.
+	// Model execution is the one deliberate policy change: a native Key has no
+	// Observer-owned operation, so it is rejected before routing.
+	for _, tc := range []nativeScopeCase{
+		{name: "token count", method: http.MethodPost, path: "/v1/messages/count_tokens", body: chatBody(false), withKey: true},
+		{name: "generation", method: http.MethodPost, path: "/v1/chat/completions", body: chatBody(false), withKey: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			controlStatus, _ := nativeRequest(t, baseline, tc)
+			if controlStatus != http.StatusOK {
+				t.Fatalf("baseline native %s status=%d, want 200", tc.name, controlStatus)
+			}
+			status, body := nativeRequest(t, h, tc)
+			requireObserverKeyRequired(t, status, body)
+		})
+	}
+
+	// The Codex direct Responses route shares the same model-execution policy.
+	// The limited fixture cannot produce a baseline success for this protocol,
+	// but the guarded host must still deny before provider dispatch.
+	beforeCodex := h.mock.callCount()
+	status, body := nativeRequest(t, h, nativeScopeCase{
+		name: "codex responses", method: http.MethodPost, path: "/backend-api/codex/responses",
+		body: []byte(`{"model":"` + modelName + `","input":"observer","stream":false}`), withKey: true,
+	})
+	requireObserverKeyRequired(t, status, body)
+	if h.mock.callCount() != beforeCodex {
+		t.Fatal("native Codex Responses execution reached the upstream")
+	}
+
+	// Native traffic and rejected model attempts must not create Observer Keys,
+	// executions, active slots or pending accounting events.
 	h.await(t, "native traffic creates no Observer accounting", func() bool {
 		var health acceptanceHealth
 		h.api(t, http.MethodGet, "/health", nil, http.StatusOK, &health)
@@ -174,19 +213,12 @@ func TestNativeAuthenticationScopeCoexistence(t *testing.T) {
 			health.ActiveRequests == 0 && health.PendingUsage == 0
 	})
 
-	// Only the native generation reaches an upstream. Its bytes and headers must
-	// be identical to the uninstrumented CPA baseline.
+	// Only the plugin-disabled baseline reached the upstream. The guarded host
+	// never dispatched native model execution.
 	controlCalls := baseline.mock.callsSnapshot()
 	observedCalls := h.mock.callsSnapshot()
-	if len(controlCalls) != 1 || len(observedCalls) != 1 {
-		t.Fatalf("native upstream attempts baseline=%d observer=%d, want one each", len(controlCalls), len(observedCalls))
-	}
-	control, observed := controlCalls[0], observedCalls[0]
-	if !bytes.Equal(control.Body, observed.Body) {
-		t.Fatalf("Observer altered native upstream bytes\nbaseline %s\nobserver %s", control.Body, observed.Body)
-	}
-	if !reflect.DeepEqual(control.Header, observed.Header) {
-		t.Fatalf("Observer altered native upstream headers\nbaseline %v\nobserver %v", control.Header, observed.Header)
+	if len(controlCalls) != 1 || len(observedCalls) != 0 {
+		t.Fatalf("native upstream attempts baseline=%d observer=%d, want baseline one and observer zero", len(controlCalls), len(observedCalls))
 	}
 	h.mock.requireClean(t)
 	baseline.mock.requireClean(t)
@@ -235,7 +267,6 @@ func TestNativeAuthenticationScopeCoexistence(t *testing.T) {
 			{name: "nested detail", method: http.MethodGet, path: "/v1/models/" + modelName + "/extra", withKey: true},
 			{name: "wrong method on catalog", method: http.MethodPost, path: "/v1/models", withKey: true},
 			{name: "missing Gemini action", method: http.MethodPost, path: "/v1beta/models/foo", withKey: true},
-			{name: "unknown Gemini model count", method: http.MethodPost, path: "/v1beta/models/foo:countTokens", body: geminiCountBody(), withKey: true},
 			{name: "GET on Gemini action", method: http.MethodGet, path: "/v1beta/models/foo:countTokens", withKey: true},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
@@ -249,6 +280,21 @@ func TestNativeAuthenticationScopeCoexistence(t *testing.T) {
 				}
 				nativeJSONEqual(t, controlBody, body)
 			})
+		}
+	})
+
+	// Missing or invalid credentials still fail at host authentication with 401,
+	// while a valid native key reaches the deliberate 403 model boundary.
+	t.Run("credential status boundaries", func(t *testing.T) {
+		before := h.mock.callCount()
+		for _, headers := range []map[string]string{nil, {"Authorization": "Bearer invalid-native-key"}} {
+			status, _, err := h.rawRequest(http.MethodPost, "/v1/chat/completions", chatBody(false), headers)
+			if err != nil || status != http.StatusUnauthorized {
+				t.Fatalf("invalid/missing credentials status=%d err=%v, want 401", status, err)
+			}
+		}
+		if h.mock.callCount() != before {
+			t.Fatal("unauthenticated model request reached the upstream")
 		}
 	})
 }
@@ -281,24 +327,35 @@ func TestSDKAnonymousAuthenticationBoundary(t *testing.T) {
 	}
 }
 
-// Observer cannot invalidate the host's independent credential of the same
-// plaintext value. This is a deployment boundary, not permission to read the
-// host's secret store or force exclusive authentication.
+// A native and an Observer credential may share the same plaintext. The real
+// host's native provider wins that identity, so a native-winning scope has no
+// Observer operation; disabling or deleting the Observer Key must not turn the
+// duplicate into native success either. The deliberate boundary denies every
+// case instead of pretending duplicate plaintext is a supported path.
 func TestDuplicateNativeAndObserverSecretBoundary(t *testing.T) {
 	h := newHarness(t)
-	spec := map[string]any{"label": "duplicate-boundary", "enabled": false, "max_concurrent": 1,
+	spec := map[string]any{"label": "duplicate-boundary", "enabled": true, "max_concurrent": 1,
 		"allowed_models": []string{}, "limits": limitsView{}, "secret": clientKey}
 	var created createdKey
 	h.api(t, http.MethodPost, "/keys", spec, 201, &created)
-	for _, deleted := range []bool{false, true} {
-		if deleted {
-			h.api(t, http.MethodPost, "/keys/delete?id="+created.Key.ID, nil, 204, nil)
-		}
-		if status, body := h.infer(t, clientKey, false); status != 200 || jsonContent(body) != fixtureText {
-			t.Fatal("Observer took over the host's independent native credential", status)
+
+	deny := func(state string) {
+		t.Helper()
+		before := h.mock.callCount()
+		status, body := h.infer(t, clientKey, false)
+		requireObserverKeyRequired(t, status, body)
+		if h.mock.callCount() != before {
+			t.Fatalf("%s duplicate-identity model execution reached the upstream", state)
 		}
 	}
+
+	deny("enabled")
+	update := keySpec{Label: "duplicate-boundary", Enabled: false, MaxConcurrent: 1, AllowedModels: []string{}, Limits: limitsView{}}
+	h.api(t, http.MethodPut, "/keys?id="+created.Key.ID, update, 200, nil)
+	deny("disabled")
+	h.api(t, http.MethodPost, "/keys/delete?id="+created.Key.ID, nil, 204, nil)
+	deny("deleted")
 	if records := h.page(t, "page_size=100"); len(records.Items) != 0 {
-		t.Fatal("disabled/deleted duplicate entered owned ledger")
+		t.Fatal("duplicate identity entered owned ledger")
 	}
 }

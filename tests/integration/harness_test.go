@@ -205,6 +205,9 @@ type hostOptions struct {
 	TwoUpstreams bool
 	// GeminiURL adds a standard api-keys.gemini upstream at this local URL.
 	GeminiURL string
+	// UnsupportedModels adds routable image/speech/video models so guard tests
+	// reach request.intercept_before instead of failing provider selection.
+	UnsupportedModels bool
 }
 
 func defaultHostOptions() hostOptions { return hostOptions{} }
@@ -340,6 +343,17 @@ func hostConfig(port int, authDir, pluginsDir, mockURL string, opts hostOptions)
 	if opts.TwoUpstreams {
 		extraKey = "\n      - api-key: \"fake-upstream-key-two\""
 	}
+	extraModels := ""
+	if opts.UnsupportedModels {
+		extraModels = `
+      - name: "gpt-image-1.5"
+        alias: "gpt-image-1.5"
+        image: true
+      - name: "grok-tts"
+        alias: "grok-tts"
+      - name: "grok-imagine-video"
+        alias: "grok-imagine-video"`
+	}
 	geminiSection := ""
 	if opts.GeminiURL != "" {
 		// The v8 Gemini group keeps endpoint settings on the group and the
@@ -383,14 +397,14 @@ api-keys:
       - name: %q
         alias: %q
       - name: %q
-        alias: %q%s
+        alias: %q%s%s
 plugins:
   enabled: %t
   dir: %q
   configs:
     %s:
       enabled: true
-`, port, mgmtKey, nativeKeys, authDir, compatProviderName, mockURL+"/v1", upstreamKey, extraKey, upstreamModel, modelName, upstreamModelTwo, modelNameTwo, geminiSection, !opts.PluginDisabled, pluginsDir, pluginID))
+`, port, mgmtKey, nativeKeys, authDir, compatProviderName, mockURL+"/v1", upstreamKey, extraKey, upstreamModel, modelName, upstreamModelTwo, modelNameTwo, extraModels, geminiSection, !opts.PluginDisabled, pluginsDir, pluginID))
 }
 
 // hostEnv builds a minimal environment that cannot inherit production CPA

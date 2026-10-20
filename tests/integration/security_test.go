@@ -33,12 +33,15 @@ func TestKeyAuthenticationCoexistenceAndInvalidation(t *testing.T) {
 	h := newHarness(t)
 	created := h.createKey(t, validSpec())
 
-	// Native host keys stay usable with the plugin enabled and never enter the
-	// Observer ledger or create Observer Keys.
+	// Native host keys keep host authentication but model execution now requires
+	// an Observer-owned scope. They never enter the Observer ledger or create
+	// Observer Keys.
 	for _, secret := range []string{clientKey, clientKeyTwo} {
+		before := h.mock.callCount()
 		status, body := h.infer(t, secret, false)
-		if status != http.StatusOK || jsonContent(body) != fixtureText {
-			t.Fatalf("native key inference status=%d body=%s", status, truncate(body, 300))
+		requireObserverKeyRequired(t, status, body)
+		if h.mock.callCount() != before {
+			t.Fatal("native key model execution reached the upstream")
 		}
 	}
 	if keys := h.keys(t); len(keys) != 1 || keys[0].ID != created.Key.ID {
@@ -78,10 +81,10 @@ func TestKeyAuthenticationCoexistenceAndInvalidation(t *testing.T) {
 		t.Fatal("conflicting Observer credentials were admitted")
 	}
 
-	// A native credential in a second source is a real coexistence case, not a
-	// cross-provider rejection: Observer refuses the conflicting credential set,
-	// then CPA's native provider resolves the request. Record the observed host
-	// behavior and prove Observer does not bill this native execution.
+	// A native credential in a second source is a real coexistence case: Observer
+	// refuses the conflicting credential set, then CPA's native provider resolves
+	// the request. That native-winning scope is still denied at the model
+	// boundary and is never accounted by Observer.
 	for _, variant := range []struct {
 		name    string
 		path    string
@@ -91,9 +94,14 @@ func TestKeyAuthenticationCoexistenceAndInvalidation(t *testing.T) {
 		{"native query plus observer header", "/v1/chat/completions?key=" + url.QueryEscape(clientKey), map[string]string{"Authorization": "Bearer " + created.Secret}},
 	} {
 		beforeRecords := len(h.page(t, "page_size=100").Items)
+		beforeCalls := h.mock.callCount()
 		status, body, err := h.rawRequest("POST", variant.path, chatBody(false), variant.headers)
-		if err != nil || status != 200 || jsonContent(body) != fixtureText {
-			t.Fatalf("%s status=%d err=%v", variant.name, status, err)
+		if err != nil {
+			t.Fatalf("%s: %v", variant.name, err)
+		}
+		requireObserverKeyRequired(t, status, body)
+		if got := h.mock.callCount(); got != beforeCalls {
+			t.Fatalf("%s reached the upstream: %d -> %d", variant.name, beforeCalls, got)
 		}
 		if got := len(h.page(t, "page_size=100").Items); got != beforeRecords {
 			t.Fatalf("%s entered Observer accounting: %d -> %d records", variant.name, beforeRecords, got)
@@ -136,9 +144,16 @@ func TestKeyAuthenticationCoexistenceAndInvalidation(t *testing.T) {
 	}
 	h.api(t, "DELETE", "/keys?id="+url.QueryEscape(created.Key.ID), nil, 204, nil)
 	denyInference(t, h, rotated.Secret)
-	// Revoking an Observer Key must not revoke the independent native provider.
-	if status, body := h.infer(t, clientKey, false); status != 200 || jsonContent(body) != fixtureText {
-		t.Fatalf("native key lost after Observer revocation status=%d body=%s", status, truncate(body, 300))
+	// Revoking an Observer Key must not revoke host authentication: the native
+	// key still reaches the host, but model execution remains Observer-only.
+	beforeCalls := h.mock.callCount()
+	status, body = h.infer(t, clientKey, false)
+	requireObserverKeyRequired(t, status, body)
+	if h.mock.callCount() != beforeCalls {
+		t.Fatal("native key after Observer revocation reached the upstream")
+	}
+	if status, raw, err := h.rawRequest("GET", "/v1/models", nil, map[string]string{"Authorization": "Bearer " + clientKey}); err != nil || status != http.StatusOK {
+		t.Fatalf("native catalog after Observer revocation status=%d err=%v body=%s", status, err, truncate(raw, 300))
 	}
 	for _, path := range []string{"/keys", "/health", "/requests?page_size=100", "/summary"} {
 		raw := h.api(t, "GET", path, nil, 200, nil)

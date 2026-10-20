@@ -74,6 +74,80 @@ func TestOperationWhitelist(t *testing.T) {
 	}
 }
 
+// The model-surface classifier is finite and exact. Supported generation and
+// count routes, the Gemini wildcard, and known unsupported model routes are
+// owned; everything else, including malformed model paths, stays native.
+// Classification is not hook coverage: alpha-search/live/realtime are listed
+// defensively but their v8.0.30 host entrypoints never call request.before.
+func TestModelSurfaceClassifier(t *testing.T) {
+	for _, path := range []string{
+		"/v1/chat/completions",
+		"/v1/completions",
+		"/v1/messages",
+		"/v1/responses",
+		"/backend-api/codex/responses",
+		"/v1beta/models/model:generateContent",
+		"/v1beta/models/model:streamGenerateContent",
+	} {
+		if got := surfaceFor(path); got != surfaceGeneration {
+			t.Fatalf("%s: %v", path, got)
+		}
+	}
+	for _, path := range []string{"/v1/messages/count_tokens", "/v1beta/models/model:countTokens"} {
+		if got := surfaceFor(path); got != surfaceCount {
+			t.Fatalf("%s: %v", path, got)
+		}
+	}
+	if got := surfaceFor(geminiActionPathTemplate); got != surfaceGeminiWildcard {
+		t.Fatalf("Gemini template: %v", got)
+	}
+	for _, path := range []string{
+		"/v1/images/generations",
+		"/v1/images/edits",
+		"/v1/videos",
+		"/v1/videos/generations",
+		"/v1/videos/edits",
+		"/v1/videos/extensions",
+		"/openai/v1/videos",
+		"/v1/audio/speech",
+		"/v1/tts",
+		"/v1/responses/compact",
+		"/backend-api/codex/responses/compact",
+		"/v1/alpha/search",
+		"/backend-api/codex/alpha/search",
+		"/v1beta/interactions",
+		"/v1/live",
+		"/v1/live/:call_id",
+		"/v1/realtime",
+		"/v1/realtime/calls",
+		"/v1/realtime/calls/:call_id",
+		"/v1/realtime/translations",
+	} {
+		if got := surfaceFor(path); got != surfaceUnsupported {
+			t.Fatalf("%s: %v", path, got)
+		}
+	}
+	for _, path := range []string{
+		"",
+		"/healthz",
+		"/v1/models",
+		"/v1/models/model",
+		"/v1beta/models",
+		"/v1beta/models/model",
+		"/v0/management/plugins/cliproxyapi-observer/health",
+		"/v1/responses/",
+		"/v1/chat/completions/",
+		"/v1/realtime/client_secrets",
+		"/v1beta/models/model:unknown",
+		"/v1beta/models/a/b:generateContent",
+		"/v1/models/../v1/chat/completions",
+	} {
+		if got := surfaceFor(path); got != surfaceNone {
+			t.Fatalf("%s: %v", path, got)
+		}
+	}
+}
+
 // Authentication is limited to the same operation whitelist. Unsupported paths
 // and invalid Keys report unhandled (false), never global authentication success.
 func TestAuthenticationScopesByOperation(t *testing.T) {
@@ -107,6 +181,8 @@ func TestAuthenticationScopesByOperation(t *testing.T) {
 		{"", ""},
 		{"POST", "/v1/chat/completions/"},
 		{"GET", "/v1/chat/completions"},
+		{"GET", "/v1/responses"},
+		{"GET", "/backend-api/codex/responses"},
 		{"POST", "/v1/images/generations"},
 		{"POST", "/v1/responses/compact"},
 		{"POST", "/v1beta/models/model:unknown"},
@@ -120,14 +196,16 @@ func TestAuthenticationScopesByOperation(t *testing.T) {
 	}
 }
 
-// Unowned/malformed traffic passes through without touching a closed store.
-// Owned generation/count scopes fail closed; directory scopes remain reads.
 func TestBeforeOwnershipAndStoreFailure(t *testing.T) {
 	m := liveManager(t)
 	k, secret, err := m.store.CreateKey(engine.KeySpec{Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Unowned/malformed traffic on non-model paths passes through without
+	// touching a closed store. Model execution paths are Observer-owned and
+	// fail closed: 403 without a compatible Observer scope, 503 when the store
+	// is unavailable.
 	generation := authenticateTest(t, m, pluginapi.FrontendAuthRequest{Method: "POST", Path: "/v1/chat/completions", Headers: http.Header{"Authorization": {"Bearer " + secret}}})
 	count := authenticateTest(t, m, pluginapi.FrontendAuthRequest{Method: "POST", Path: "/v1/messages/count_tokens", Headers: http.Header{"Authorization": {"Bearer " + secret}}})
 	directory := authenticateTest(t, m, pluginapi.FrontendAuthRequest{Method: "GET", Path: "/v1/models", Headers: http.Header{"Authorization": {"Bearer " + secret}}})
@@ -141,6 +219,13 @@ func TestBeforeOwnershipAndStoreFailure(t *testing.T) {
 			t.Fatal("interceptor rewrote request")
 		}
 		return r
+	}
+	code := func(r pluginapi.RequestInterceptResponse) string {
+		var body denialBody
+		if json.Unmarshal(r.ResponseBody, &body) != nil {
+			return ""
+		}
+		return body.Error.Code
 	}
 	metadata := func(scope, path string) map[string]any {
 		return map[string]any{coreexecutor.CallerScopeMetadataKey: session.CallerScope(scope), coreexecutor.RequestPathMetadataKey: path}
@@ -158,27 +243,30 @@ func TestBeforeOwnershipAndStoreFailure(t *testing.T) {
 	m.mu.Unlock()
 
 	for _, test := range []struct {
-		name string
-		meta map[string]any
-		deny bool
+		name   string
+		meta   map[string]any
+		deny   bool
+		status int
+		code   string
 	}{
-		{"own generation", metadata(generation.Principal, "/v1/chat/completions"), true},
-		{"own generation template", metadata(generation.Principal, "/v1beta/models/*action"), true},
-		{"own count", metadata(count.Principal, "/v1/messages/count_tokens"), true},
-		{"own count template", metadata(count.Principal, "/v1beta/models/*action"), true},
-		{"own directory", metadata(directory.Principal, "/v1/models"), false},
-		{"own missing path", metadata(generation.Principal, ""), false},
-		{"own unsupported path", metadata(generation.Principal, "/v1/images/generations"), false},
-		{"host scope", metadata("native-key", "/v1/chat/completions"), false},
-		{"no scope", map[string]any{coreexecutor.RequestPathMetadataKey: "/v1/chat/completions"}, false},
-		{"malformed scope", map[string]any{coreexecutor.CallerScopeMetadataKey: 17, coreexecutor.RequestPathMetadataKey: "/v1/chat/completions"}, false},
+		{"own generation", metadata(generation.Principal, "/v1/chat/completions"), true, 503, "admission_denied"},
+		{"own generation template", metadata(generation.Principal, "/v1beta/models/*action"), true, 503, "admission_denied"},
+		{"own count", metadata(count.Principal, "/v1/messages/count_tokens"), true, 503, "admission_denied"},
+		{"own count template", metadata(count.Principal, "/v1beta/models/*action"), true, 503, "admission_denied"},
+		{"own directory", metadata(directory.Principal, "/v1/models"), false, 0, ""},
+		{"own missing path", metadata(generation.Principal, ""), false, 0, ""},
+		{"own unsupported path", metadata(generation.Principal, "/v1/images/generations"), true, 403, "model_surface_unsupported"},
+		{"own non-model path", metadata(generation.Principal, "/v0/management/plugins"), false, 0, ""},
+		{"host scope", metadata("native-key", "/v1/chat/completions"), true, 403, "observer_key_required"},
+		{"no scope", map[string]any{coreexecutor.RequestPathMetadataKey: "/v1/chat/completions"}, true, 403, "observer_key_required"},
+		{"malformed scope", map[string]any{coreexecutor.CallerScopeMetadataKey: 17, coreexecutor.RequestPathMetadataKey: "/v1/chat/completions"}, true, 403, "observer_key_required"},
 	} {
 		r := before(test.meta)
 		if r.Terminate != test.deny {
 			t.Fatalf("%s: %+v", test.name, r)
 		}
-		if test.deny && r.StatusCode != 503 {
-			t.Fatalf("%s status: %d", test.name, r.StatusCode)
+		if test.deny && (r.StatusCode != test.status || code(r) != test.code) {
+			t.Fatalf("%s status/code: %d %q", test.name, r.StatusCode, code(r))
 		}
 	}
 	// Malformed before payloads carry no ownership and must pass.
@@ -370,8 +458,12 @@ func TestScopeOperationCoordination(t *testing.T) {
 	if r := before(count.Principal, "/v1beta/models/*action"); r.Terminate || m.store.Health().ActiveRequests != 1 {
 		t.Fatal("count template reserved admission")
 	}
-	if r := before("native-host-scope", "/v1beta/models/*action"); r.Terminate {
-		t.Fatal("unknown host scope was rejected")
+	if r := before("native-host-scope", "/v1beta/models/*action"); !r.Terminate || r.StatusCode != 403 {
+		t.Fatal("unknown host scope was accepted on a model surface")
+	}
+	// Supported Observer identities do not gain unsafe side surfaces.
+	if r := before(generation.Principal, "/v1/images/generations"); !r.Terminate || r.StatusCode != 403 {
+		t.Fatalf("unsupported model surface accepted an owned scope: %+v", r)
 	}
 	call(t, m, "request.complete", pluginapi.RequestCompletion{RequestID: "request", CompletedAt: time.Now()})
 }
