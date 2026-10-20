@@ -413,8 +413,8 @@ func freePort() (int, error) {
 	return listener.Addr().(*net.TCPAddr).Port, nil
 }
 
-// awaitReady checks the server and authenticated observer. Builtin client keys
-// are deliberately not used: the observer owns exclusive frontend auth.
+// awaitReady checks the server and authenticated observer. Native host keys are
+// deliberately not used: readiness must prove Observer's own management surface.
 // Startup synchronization may temporarily leave the observer unavailable.
 func (h *harness) awaitReady(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
