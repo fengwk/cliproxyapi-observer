@@ -7,6 +7,44 @@ import (
 	"time"
 )
 
+// Rate names are stable diagnostic identifiers. The empty string is never a
+// rate name; absent rates are listed instead of being inferred as zero.
+const (
+	rateInput      = "input"
+	rateOutput     = "output"
+	rateCacheRead  = "cache_read"
+	rateCacheWrite = "cache_write"
+)
+
+// Match and reason strings are part of the management JSON contract. They are
+// intentionally specific so the UI never has to guess why a price is absent.
+const (
+	matchManual    = "manual"
+	matchMapping   = "mapping"
+	matchProvider  = "provider"
+	matchNamespace = "namespace"
+	matchCanonical = "canonical"
+	matchExact     = "exact"
+	matchRule      = "rule"
+	matchAmbiguous = "ambiguous"
+	matchNone      = "none"
+
+	reasonManual             = "manual"
+	reasonRule               = "rule"
+	reasonAutoDisabled       = "auto_disabled"
+	reasonCatalogUnavailable = "catalog_unavailable"
+	reasonNotFound           = "not_found"
+	reasonAmbiguous          = "ambiguous"
+	reasonProviderConflict   = "provider_conflict"
+	reasonMappingMissing     = "mapping_missing"
+	reasonTiersUnsupported   = "tiers_unsupported"
+	reasonContextTiers       = "context_tiers"
+	reasonMissingRates       = "missing_rates"
+	reasonVariantOnly        = "variant_only"
+)
+
+const maxCandidates = 32
+
 type Rates struct {
 	Input      int64  `json:"input"`
 	Output     int64  `json:"output"`
@@ -14,12 +52,31 @@ type Rates struct {
 	CacheWrite int64  `json:"cache_write"`
 	Reasoning  *int64 `json:"reasoning,omitempty"`
 }
-type Price struct {
-	Model    string `json:"model"`
-	Provider string `json:"provider,omitempty"` // snapshot only; manual overrides are model-wide
-	Rates    Rates  `json:"rates"`
-	Source   string `json:"source"`
+
+// Candidate is one catalog identity that could explain an ambiguous match.
+// It is diagnostic only: it never becomes the billed price without an explicit
+// mapping (or a provider-qualified request).
+type Candidate struct {
+	Provider     string   `json:"provider"`
+	Model        string   `json:"model"`
+	Rates        Rates    `json:"rates"`
+	MissingRates []string `json:"missing_rates,omitempty"`
 }
+
+type Price struct {
+	Model           string      `json:"model"`
+	Provider        string      `json:"provider,omitempty"` // requested/observed channel; manual overrides are model-wide
+	Rates           Rates       `json:"rates"`
+	Source          string      `json:"source"`
+	Reason          string      `json:"reason,omitempty"`
+	Match           string      `json:"match,omitempty"`
+	CatalogProvider string      `json:"catalog_provider,omitempty"`
+	CatalogModel    string      `json:"catalog_model,omitempty"`
+	CatalogTime     *time.Time  `json:"catalog_time,omitempty"`
+	MissingRates    []string    `json:"missing_rates,omitempty"`
+	Candidates      []Candidate `json:"candidates,omitempty"`
+}
+
 type Rule struct {
 	ID            string `json:"id"`
 	Model         string `json:"model"`
@@ -27,11 +84,22 @@ type Rule struct {
 	TimeRange     string `json:"time_range,omitempty"`
 	Rates         Rates  `json:"rates"`
 }
-type Config struct {
-	Auto   bool    `json:"auto"`
-	Prices []Price `json:"prices"`
-	Rules  []Rule  `json:"rules"`
+
+// Mapping chooses an exact catalog identity for a complete public model ID.
+// It affects accounting identity only and never changes request routing.
+type Mapping struct {
+	Model        string `json:"model"`
+	Provider     string `json:"provider"`
+	CatalogModel string `json:"catalog_model"`
 }
+
+type Config struct {
+	Auto     bool      `json:"auto"`
+	Prices   []Price   `json:"prices"`
+	Rules    []Rule    `json:"rules"`
+	Mappings []Mapping `json:"mappings,omitempty"`
+}
+
 type Tokens struct {
 	// Input is uncached and disjoint from CacheRead and CacheWrite.
 	Input int64 `json:"input"`
@@ -42,12 +110,23 @@ type Tokens struct {
 	Reasoning  int64 `json:"reasoning"`
 	Total      int64 `json:"total"`
 }
+
+// Quote is a fully materialized, immutable accounting result. Diagnostic
+// fields describe the resolution but never participate in a later repricing.
 type Quote struct {
-	CostMicroUSD int64  `json:"cost_micro_usd"`
-	Source       string `json:"source"`
-	RuleID       string `json:"rule_id,omitempty"`
-	Rates        Rates  `json:"rates"`
+	CostMicroUSD    int64       `json:"cost_micro_usd"`
+	Source          string      `json:"source"`
+	RuleID          string      `json:"rule_id,omitempty"`
+	Rates           Rates       `json:"rates"`
+	Reason          string      `json:"reason,omitempty"`
+	Match           string      `json:"match,omitempty"`
+	CatalogProvider string      `json:"catalog_provider,omitempty"`
+	CatalogModel    string      `json:"catalog_model,omitempty"`
+	CatalogTime     *time.Time  `json:"catalog_time,omitempty"`
+	MissingRates    []string    `json:"missing_rates,omitempty"`
+	Candidates      []Candidate `json:"candidates,omitempty"`
 }
+
 type Snapshot struct {
 	Prices         []Price   `json:"prices"`
 	LastSync       time.Time `json:"last_sync"`
@@ -77,7 +156,9 @@ const maxSafe int64 = 9_000_000_000_000_000
 
 var errInvalid = errors.New("invalid pricing configuration or tokens")
 
-func DefaultConfig() Config { return Config{Auto: true, Prices: []Price{}, Rules: []Rule{}} }
+func DefaultConfig() Config {
+	return Config{Auto: true, Prices: []Price{}, Rules: []Rule{}}
+}
 func cloneRates(r Rates) Rates {
 	if r.Reasoning != nil {
 		v := *r.Reasoning
@@ -85,18 +166,63 @@ func cloneRates(r Rates) Rates {
 	}
 	return r
 }
+func cloneStrings(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	return append([]string{}, in...)
+}
+func cloneTime(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	v := t.UTC()
+	return &v
+}
+func cloneCandidates(in []Candidate) []Candidate {
+	if in == nil {
+		return nil
+	}
+	out := make([]Candidate, len(in))
+	for i, c := range in {
+		out[i] = c
+		out[i].Rates = cloneRates(c.Rates)
+		out[i].MissingRates = cloneStrings(c.MissingRates)
+	}
+	return out
+}
+func clonePrice(p Price) Price {
+	p.Rates = cloneRates(p.Rates)
+	p.CatalogTime = cloneTime(p.CatalogTime)
+	p.MissingRates = cloneStrings(p.MissingRates)
+	p.Candidates = cloneCandidates(p.Candidates)
+	return p
+}
 func cloneConfig(c Config) Config {
 	c.Prices = append([]Price{}, c.Prices...)
-	c.Rules = append([]Rule{}, c.Rules...)
 	for i := range c.Prices {
-		c.Prices[i].Rates = cloneRates(c.Prices[i].Rates)
+		c.Prices[i] = clonePrice(c.Prices[i])
+		// Configuration entries are model-wide overrides; diagnostics are
+		// generated by the resolver and must never be persisted as user input.
+		c.Prices[i].Provider = ""
+		c.Prices[i].Reason = ""
+		c.Prices[i].Match = ""
+		c.Prices[i].CatalogProvider = ""
+		c.Prices[i].CatalogModel = ""
+		c.Prices[i].CatalogTime = nil
+		c.Prices[i].MissingRates = nil
+		c.Prices[i].Candidates = nil
 	}
+	c.Rules = append([]Rule{}, c.Rules...)
 	for i := range c.Rules {
 		c.Rules[i].Rates = cloneRates(c.Rules[i].Rates)
 		if c.Rules[i].InputTokensGT != nil {
 			v := *c.Rules[i].InputTokensGT
 			c.Rules[i].InputTokensGT = &v
 		}
+	}
+	if c.Mappings != nil {
+		c.Mappings = append([]Mapping{}, c.Mappings...)
 	}
 	return c
 }
@@ -109,10 +235,10 @@ func validRates(r Rates) bool {
 	return r.Reasoning == nil || (*r.Reasoning >= 0 && *r.Reasoning <= maxSafe)
 }
 func Validate(c Config) error {
-	if len(c.Prices) > 4096 || len(c.Rules) > 4096 {
+	if len(c.Prices) > 4096 || len(c.Rules) > 4096 || len(c.Mappings) > 4096 {
 		return errInvalid
 	}
-	models, ids := map[string]bool{}, map[string]bool{}
+	models, ids, mapped := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, p := range c.Prices {
 		if !validIdentity(p.Model) || models[p.Model] || !validRates(p.Rates) || p.Provider != "" || (p.Source != "" && p.Source != "manual") {
 			return errInvalid
@@ -132,6 +258,12 @@ func Validate(c Config) error {
 				return errInvalid
 			}
 		}
+	}
+	for _, m := range c.Mappings {
+		if !validIdentity(m.Model) || !validIdentity(m.Provider) || !validIdentity(m.CatalogModel) || mapped[m.Model] {
+			return errInvalid
+		}
+		mapped[m.Model] = true
 	}
 	return nil
 }
