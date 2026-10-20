@@ -41,6 +41,12 @@
 普通非独占前端 provider 返回 `Authenticated:false` 是“交给下一 provider”，
 不是“终止请求”；原生 provider 仍可能认证成功。
 
+`tests/integration/model_guard_gap_test.go` 专门复现缺口，而不是假称修复：
+在零 Observer Key 的真实宿主上，原生 Key 可签发 Realtime 临时 token；
+Alpha Search 两个别名仍返回本地假上游的 200，假上游收到两次请求，
+Observer 没有记账。该测试通过说明缺口确实存在，不表示全入口要求通过验收。
+测试只使用隔离配置、假凭据和回环上游，不接触生产或实际模型服务。
+
 不能用以下方式假装补齐：
 
 - 开启全局独占认证会改变非模型接口，不符合用户要求。
