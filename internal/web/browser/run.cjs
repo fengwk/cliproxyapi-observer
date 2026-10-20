@@ -10,6 +10,7 @@ const os = require('node:os');
 const { chromium } = require('../../../web/node_modules/playwright');
 const mock = require('./mock-server.cjs');
 const { ensureManagementHTML } = require('./shell-helper.cjs');
+const measureContrast = require('./contrast.cjs');
 
 const args = { chrome: process.env.CHROME_BIN || '/usr/bin/google-chrome-stable',
   reportDir: path.resolve(__dirname, '../../../../browser-report'), baseUrl: '' };
@@ -82,6 +83,11 @@ async function shot(page, name) {
   }
   const info = await fs.stat(path.join(args.reportDir, file));
   report.screenshots.push({ file, bytes: info.size });
+  if (activeEnvironment?.page === page) {
+    const contrast = await measureContrast(activeEnvironment.frame);
+    check(name + ': rendered text and control contrast',
+      contrast.texts > 0 && contrast.controls > 0 && contrast.failures.length === 0, JSON.stringify(contrast));
+  }
 }
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const keyTab = frame => frame.getByRole('button', { name: 'Key 管理', exact: true });
@@ -501,6 +507,7 @@ async function persistentLoginAndNativeZoom(origin, shell, server) {
     await reopened.goto(server.resourceURL);
     await reopened.locator('.requests-table tbody tr').first().waitFor();
     check('remembered login survives complete Chrome profile restart', await reopened.locator('#login-key').count() === 0);
+    activeEnvironment = { page: reopened, frame: reopened, diagnostics: [] };
     await shot(reopened, 'remember-reopened-browser');
     // Chrome's own setting changes real browser zoom, not CSS zoom or emulated
     // viewport scale. This preference is confined to the disposable profile.
@@ -510,6 +517,7 @@ async function persistentLoginAndNativeZoom(origin, shell, server) {
     const zoom = await preferences.evaluate(() => new Promise(resolve => chrome.settingsPrivate.getDefaultZoom(resolve)));
     await preferences.close();
     const env = await openShell(null, origin, shell, { width: 1280, height: 900 }, 'light', server, context);
+    activeEnvironment = env;
     await env.frame.locator('.requests-table tbody tr').first().waitFor();
     const actual = await env.page.evaluate(() => ({ ratio: devicePixelRatio, width: innerWidth, outer: outerWidth }));
     check('official CPA shell uses native 200% Chrome zoom', zoom === 2 && actual.ratio === 2 && actual.width === 640, JSON.stringify(actual));

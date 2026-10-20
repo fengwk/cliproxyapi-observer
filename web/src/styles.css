@@ -149,6 +149,18 @@ html {
 }
 
 body {
+  /* Observer-local readable variants; never change the host document/tokens.
+     Host tertiary text and subtle borders are insufficient for form controls. */
+  --text-secondary: color-mix(in srgb, var(--text-primary) 78%, var(--bg-primary));
+  --text-tertiary: var(--text-secondary);
+  --muted-foreground: var(--text-secondary);
+  --observer-control-border: color-mix(in srgb, var(--text-primary) 62%, var(--bg-primary));
+  --observer-danger-text: #a03529;
+  --observer-danger-bg: #bc4032;
+  --error-color: var(--observer-danger-text);
+  --danger-color: var(--observer-danger-text);
+  --warning-color: var(--observer-danger-text);
+  --warning-text: var(--observer-danger-text);
   margin: 0;
   padding: 0;
   font-family: var(--font-family);
@@ -157,6 +169,13 @@ body {
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+[data-theme="dark"] body {
+  --observer-danger-text: #f1b0a6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) body { --observer-danger-text: #f1b0a6; }
 }
 
 /* Accessible focus visible outline */
@@ -361,20 +380,20 @@ input[type="number"] {
 .cpa-btn-secondary {
   background-color: var(--bg-primary);
   color: var(--text-primary);
-  border-color: var(--border-primary);
+  border-color: var(--observer-control-border);
 }
 .cpa-btn-secondary:not(:disabled):hover {
   background-color: var(--bg-tertiary);
-  border-color: var(--border-hover);
+  border-color: var(--observer-control-border);
 }
 
 .cpa-btn-danger {
-  background-color: var(--danger-color);
+  background-color: var(--observer-danger-bg);
   color: #ffffff;
-  border-color: var(--danger-color);
+  border-color: var(--observer-danger-bg);
 }
 .cpa-btn-danger:not(:disabled):hover {
-  opacity: 0.9;
+  background-color: #b2382b;
 }
 
 .cpa-btn-ghost {
@@ -409,7 +428,7 @@ input[type="number"] {
   font-family: inherit;
   color: var(--text-primary);
   background-color: var(--bg-primary);
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--observer-control-border);
   border-radius: var(--radius-md);
   transition: border-color 150ms ease, background-color 150ms ease;
   min-height: 36px;
@@ -418,6 +437,11 @@ input[type="number"] {
 .cpa-input:focus {
   border-color: var(--primary-color);
   outline: none;
+}
+
+.cpa-input::placeholder, .cpa-select-search-input::placeholder {
+  color: var(--text-secondary);
+  opacity: 1;
 }
 
 .cpa-input.has-error {
@@ -467,7 +491,7 @@ input[type="number"] {
   font-size: 0.9rem;
   color: var(--text-primary);
   background-color: var(--bg-primary);
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--observer-control-border);
   border-radius: var(--radius-md);
   cursor: pointer;
   min-height: 36px;
@@ -507,7 +531,7 @@ input[type="number"] {
   height: 30px;
   padding: 0.25rem 0.5rem;
   font-size: 0.85rem;
-  border: 1px solid var(--border-primary);
+  border: 1px solid var(--observer-control-border);
   border-radius: var(--radius-sm);
   background-color: var(--bg-secondary);
   color: var(--text-primary);
@@ -556,7 +580,7 @@ input[type="number"] {
   width: 42px;
   height: 24px;
   background-color: var(--bg-tertiary);
-  border: 1px solid var(--border-primary);
+  border: 1px solid var(--observer-control-border);
   border-radius: 9999px;
   position: relative;
   cursor: pointer;
@@ -579,6 +603,7 @@ input[type="number"] {
   width: 18px;
   height: 18px;
   background-color: #ffffff;
+  border: 1px solid var(--observer-control-border);
   border-radius: 9999px;
   transition: transform 200ms ease;
   box-shadow: var(--shadow);

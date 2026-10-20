@@ -515,4 +515,3 @@ coverage {各类保留起点、缺失指标、回填状态}
 | `commandcode/claude-haiku-4-5-20251001` | 命中对应条目，保留日期版本 |
 | `commandcode/moonshotai/Kimi-K2.7-Code` | 只剥离已知外层，保留内部路径与大小写后精确命中 |
 | `commandcode/xiaomi/mimo-v2.6-flash` | 当前渠道无精确条目，不能伪造；其他渠道只作为明确选择的候选 |
-
