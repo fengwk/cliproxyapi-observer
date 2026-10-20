@@ -157,7 +157,7 @@ func (s *Store) CreateKeyWithSecret(v KeySpec, secret string) (Key, string, erro
 		return Key{}, "", ErrInvalid
 	}
 	t := s.now().UTC()
-	k := storedKey{Key: Key{ID: random(), KeySpec: cleanSpec(v), CreatedAt: t, Starts: starts(t), Resets: Windows{FiveHour: t.Add(5 * time.Hour), Week: t.Add(7 * 24 * time.Hour), Month: month(t)}}, Hash: hash(secret)}
+	k := storedKey{Key: Key{ID: random(), Secret: secret, KeySpec: cleanSpec(v), CreatedAt: t, Starts: starts(t), Resets: Windows{FiveHour: t.Add(5 * time.Hour), Week: t.Add(7 * 24 * time.Hour), Month: month(t)}}, Hash: hash(secret)}
 	e := s.db.Update(func(tx *bolt.Tx) error {
 		if tx.Bucket([]byte("hashes")).Get([]byte(k.Hash)) != nil {
 			return ErrConflict
@@ -245,6 +245,7 @@ func (s *Store) RotateKeyWithSecret(id, secret string) (Key, string, error) {
 			return ErrInvalid
 		}
 		k.Hash = next
+		k.Secret = secret
 		return nil
 	})
 	if e != nil {
@@ -258,7 +259,7 @@ func (s *Store) RevokeKey(id string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, e := s.mutate(id, func(k *storedKey) error { k.Hash = ""; k.Enabled = false; return nil })
+	_, e := s.mutate(id, func(k *storedKey) error { k.Hash = ""; k.Secret = ""; k.Enabled = false; return nil })
 	return e
 }
 func (s *Store) ResetKey(id string, windows []string) (Key, error) {
@@ -380,6 +381,7 @@ func (s *Store) DeleteKey(id string) error {
 		t := s.now().UTC()
 		k.DeletedAt = &t
 		k.Hash = ""
+		k.Secret = ""
 		k.Enabled = false
 		k.Revoked = false
 		if old != "" {

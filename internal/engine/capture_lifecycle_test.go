@@ -581,7 +581,7 @@ func TestUnknownFeatureVersionReadOnlyRejected(t *testing.T) {
 	db, e := bolt.Open(path, 0600, nil)
 	must(t, e)
 	must(t, db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket([]byte("meta")).Put([]byte("observer_features"), []byte("2"))
+		return tx.Bucket([]byte("meta")).Put([]byte("observer_features"), []byte("3"))
 	}))
 	must(t, db.Close())
 	before, e := os.ReadFile(path)
@@ -656,7 +656,7 @@ func TestLegacySchemaSettingsIndexAndCapture(t *testing.T) {
 		if captureUsedBytes(tx) != int64(len(payload)) {
 			t.Fatal("byte counter not reconciled")
 		}
-		if string(tx.Bucket([]byte("meta")).Get([]byte("observer_features"))) != "1" {
+		if string(tx.Bucket([]byte("meta")).Get([]byte("observer_features"))) != "2" {
 			t.Fatal("feature marker missing")
 		}
 		return nil

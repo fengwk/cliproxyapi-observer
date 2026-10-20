@@ -69,7 +69,7 @@ func TestDeleteKeyLifecycleBusyAuthAndHistory(t *testing.T) {
 		if e := get(tx.Bucket([]byte("keys")), k.ID, &stored); e != nil {
 			return e
 		}
-		if stored.Hash != "" || stored.Enabled || stored.DeletedAt == nil {
+		if stored.Hash != "" || stored.Secret != "" || stored.Enabled || stored.DeletedAt == nil {
 			t.Fatal("tombstone incomplete", stored)
 		}
 		return nil
@@ -81,7 +81,7 @@ func TestDeleteKeyLifecycleBusyAuthAndHistory(t *testing.T) {
 	}
 	all, e := s.KeysIncludingDeleted()
 	must(t, e)
-	if len(all) != 1 || all[0].DeletedAt == nil || all[0].Revoked || all[0].Used.Total != 7 {
+	if len(all) != 1 || all[0].DeletedAt == nil || all[0].Revoked || all[0].Used.Total != 7 || all[0].Secret != "" {
 		t.Fatal("tombstone/history lost", all)
 	}
 	if _, e = s.UpdateKey(k.ID, KeySpec{Enabled: false}); !errors.Is(e, ErrDeleted) {
@@ -153,31 +153,32 @@ func TestDeleteKeyPendingBusy(t *testing.T) {
 	}
 }
 
-// Revocation clears the hash and disables the key but is not a tombstone.
-// Enabling requires rotation; a plain disable keeps the hash and is reversible.
+// Revocation clears the hash and plaintext and disables the key but is not a
+// tombstone. Enabling requires rotation; a plain disable keeps both the hash and
+// current plaintext and is reversible.
 func TestRevokedVersusDisabled(t *testing.T) {
 	s, _, _ := fixture(t)
 	k, old := key(t, s, KeySpec{Enabled: true})
 	disabled, e := s.UpdateKey(k.ID, KeySpec{Enabled: false})
 	must(t, e)
-	if disabled.Revoked || disabled.Enabled || disabled.DeletedAt != nil {
-		t.Fatal("disabled misclassified", disabled)
+	if disabled.Revoked || disabled.Enabled || disabled.DeletedAt != nil || disabled.Secret != old {
+		t.Fatal("disabled misclassified or lost plaintext", disabled)
 	}
 	if _, e = s.Authenticate(old); !errors.Is(e, ErrUnauthorized) {
 		t.Fatal("disabled authenticates", e)
 	}
 	enabled, e := s.UpdateKey(k.ID, KeySpec{Enabled: true})
 	must(t, e)
-	if enabled.Revoked {
-		t.Fatal("enabled key marked revoked")
+	if enabled.Revoked || enabled.Secret != old {
+		t.Fatal("enabled key marked revoked or lost plaintext", enabled)
 	}
 	if _, e = s.Authenticate(old); e != nil {
 		t.Fatal("enable after disable lost hash", e)
 	}
 	must(t, s.RevokeKey(k.ID))
 	revoked := total(t, s)
-	if !revoked.Revoked || revoked.Enabled || revoked.DeletedAt != nil {
-		t.Fatal("revocation not distinct", revoked)
+	if !revoked.Revoked || revoked.Enabled || revoked.DeletedAt != nil || revoked.Secret != "" {
+		t.Fatal("revocation not distinct or retained plaintext", revoked)
 	}
 	if _, e = s.Authenticate(old); !errors.Is(e, ErrUnauthorized) {
 		t.Fatal("revoked credential valid")
@@ -187,8 +188,8 @@ func TestRevokedVersusDisabled(t *testing.T) {
 	}
 	rotated, next, e := s.RotateKey(k.ID)
 	must(t, e)
-	if rotated.Revoked || rotated.Enabled {
-		t.Fatal("rotation did not leave key disabled", rotated)
+	if rotated.Revoked || rotated.Enabled || rotated.Secret != next {
+		t.Fatal("rotation did not leave key disabled or lost plaintext", rotated)
 	}
 	if _, e = s.Authenticate(next); !errors.Is(e, ErrUnauthorized) {
 		t.Fatal("rotation activated disabled key", e)

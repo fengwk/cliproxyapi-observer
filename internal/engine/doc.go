@@ -58,17 +58,22 @@
 // metadata, rollups, costs, quotas or the independent Key counters.
 //
 // DeleteKey writes a terminal tombstone, clears the authentication hash and
-// disables the Key in one transaction. Active requests and retained accounting
-// events return ErrBusy; deleted Keys reject all other mutations while history
-// and counters remain. Revocation (empty hash, not deleted) and ordinary
-// disabling remain distinguishable. Generated secrets are sk- plus 48 unbiased
-// alphanumeric characters; internal IDs remain 64 lowercase hex.
+// the stored plaintext credential, and disables the Key in one transaction.
+// Active requests and retained accounting events return ErrBusy; deleted Keys
+// reject all other mutations while history and counters remain. Revocation
+// (empty hash, not deleted) and ordinary disabling remain distinguishable;
+// revocation clears plaintext too, while disabling retains it for display.
+// Generated secrets are sk- plus 48 unbiased alphanumeric characters; internal
+// IDs remain 64 lowercase hex and are never substituted for a missing secret.
 //
-// Schema stays 2 and observer_features=1 marks the additive capture/state
-// buckets. A higher feature version is rejected from a read-only preflight
-// before opening a writable handle. Legacy settings inherit the former boolean
-// mode and raw retention; the FIFO index and TTL state are rebuilt idempotently
-// without rewriting or clearing old content.
+// Schema stays 2 and observer_features=2 marks additively persisted plaintext
+// Key material (feature 1 marked the capture/state buckets). A higher feature
+// version is rejected from a read-only preflight before opening a writable
+// handle, so older binaries that support only feature 1 cannot overwrite the
+// new field. Legacy feature-1/hash-only rows stay authenticatable with an empty
+// Secret and are not rewritten with a guessed credential. Other legacy settings
+// inherit the former boolean mode and raw retention; the FIFO index and TTL
+// state are rebuilt idempotently without rewriting or clearing old content.
 //
 // Lists expose zero effective rolling usage for expired windows without changing
 // anchors. Existing reset timestamps remain in the past so the UI can explain

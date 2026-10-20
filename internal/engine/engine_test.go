@@ -80,19 +80,26 @@ func total(t *testing.T, s *Store) Key {
 	return ks[0]
 }
 
-// Plaintext is revealed only once; rotation/revocation invalidate old material,
-// while expiry and model matching are exact rather than prefix authorization.
+// Current plaintext stays available to authenticated management, while
+// rotation/revocation invalidate old authentication. Expiry and model matching
+// remain exact rather than prefix authorization.
 func TestKeySecurity(t *testing.T) {
 	s, now, _ := fixture(t)
 	expiry := now.Add(time.Hour)
 	k, secret := key(t, s, KeySpec{Enabled: true, AllowedModels: []string{"gpt-exact"}, ExpiresAt: &expiry})
+	if k.Secret != secret {
+		t.Fatal("generated plaintext unavailable")
+	}
 	_, e := s.Authenticate(secret)
 	must(t, e)
 	if !errors.Is(s.Authorize(k.ID, "gpt-exact-v2"), ErrForbidden) {
 		t.Fatal("prefix accepted")
 	}
-	_, next, e := s.RotateKey(k.ID)
+	rotated, next, e := s.RotateKey(k.ID)
 	must(t, e)
+	if rotated.Secret != next {
+		t.Fatal("rotated plaintext unavailable")
+	}
 	if _, e = s.Authenticate(secret); !errors.Is(e, ErrUnauthorized) {
 		t.Fatal(e)
 	}
@@ -100,8 +107,8 @@ func TestKeySecurity(t *testing.T) {
 	must(t, e)
 	raw, e := os.ReadFile(s.path)
 	must(t, e)
-	if bytes.Contains(raw, []byte(secret)) || bytes.Contains(raw, []byte(next)) {
-		t.Fatal("plaintext secret on disk")
+	if !bytes.Contains(raw, []byte(next)) {
+		t.Fatal("current plaintext not persisted")
 	}
 	*now = expiry
 	if _, e = s.Authenticate(next); !errors.Is(e, ErrExpired) {
@@ -110,6 +117,9 @@ func TestKeySecurity(t *testing.T) {
 	must(t, s.RevokeKey(k.ID))
 	if _, e = s.Authenticate(next); !errors.Is(e, ErrUnauthorized) {
 		t.Fatal(e)
+	}
+	if got := total(t, s); got.Secret != "" || !got.Revoked {
+		t.Fatal("revocation retained plaintext", got)
 	}
 }
 
