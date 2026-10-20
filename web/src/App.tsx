@@ -307,7 +307,7 @@ export function App() {
   const pageInterval = tab === 'requests' ? 5 : 0;
 
   return (
-    <div className="cpa-app-layout">
+    <div className="cpa-app-layout cpa-authenticated-layout">
       {storageWarning && (
         <div style={{ padding: '0.5rem 0' }}>
           <Notice tone="warning">{storageWarning}</Notice>
@@ -315,12 +315,7 @@ export function App() {
       )}
       <header className="cpa-header">
         <span className="cpa-header-brand cpa-standalone-brand">Observer</span>
-        <div className="cpa-header-actions">
-          {themeControl}
-          <Button variant="ghost" onClick={() => navigate('logout')}>
-            退出
-          </Button>
-        </div>
+        <div className="cpa-header-actions">{themeControl}</div>
       </header>
 
       <nav className="cpa-tabs" aria-label="页面标签">
@@ -340,7 +335,13 @@ export function App() {
       </nav>
 
       <main id="content">
-        <Page key={tab} api={api} refreshInterval={pageInterval} onDirtyChange={setDirty} />
+        <Page
+          key={tab}
+          api={api}
+          refreshInterval={pageInterval}
+          onDirtyChange={setDirty}
+          onLogout={() => navigate('logout')}
+        />
       </main>
 
       {destination && (

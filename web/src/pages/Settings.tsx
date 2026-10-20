@@ -85,7 +85,7 @@ const CAPACITY_OPTIONS = [
   { value: 'GB', label: 'GiB (1,073,741,824 字节)' },
 ];
 
-export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange }) => {
+export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout }) => {
   // ---------------------------------------------------------------------------
   // Lifecycle & concurrency guards
   // ---------------------------------------------------------------------------
@@ -839,16 +839,10 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange }) => {
 
   return (
     <div className="settings-page" data-testid="observer-settings">
-      <header className="settings-row">
-        <h1 style={{ margin: 0, fontSize: 20 }}>设置</h1>
+      <div className="settings-toolbar">
         <Button variant="secondary" disabled={isMutationBusy} onClick={handleRetry}>刷新状态</Button>
-      </header>
+      </div>
       {loadError && <Notice tone="danger">{loadError}（保留上次成功状态，草稿未覆盖）</Notice>}
-      <nav className="settings-actions" aria-label="设置页内导航">
-        <a href="#settings-general-heading">内容与保留</a>
-        <a href="#settings-pricing-heading">模型价格</a>
-        <a href="#settings-health-heading">存储维护</a>
-      </nav>
       {/* =================================================================== */}
       {/* Section 1: 请求记录 */}
       {/* =================================================================== */}
@@ -1707,6 +1701,24 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange }) => {
           </Modal>
         )}
       </section>
+
+      {onLogout && (
+        <section className="settings-section" aria-labelledby="settings-session-heading">
+          <div className="settings-section-header">
+            <h2 className="settings-section-title" id="settings-session-heading">
+              会话
+            </h2>
+          </div>
+          <p className="settings-section-desc">
+            退出会清除本机保存的管理凭据。若有未保存的设置草稿，会先要求确认。
+          </p>
+          <div className="settings-actions">
+            <Button variant="danger" onClick={onLogout} data-testid="settings-logout">
+              退出
+            </Button>
+          </div>
+        </section>
+      )}
     </div>
   );
 };

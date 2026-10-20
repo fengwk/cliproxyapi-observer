@@ -148,6 +148,23 @@ html {
   -webkit-text-size-adjust: 100%;
 }
 
+/* CPA v1.26.5 native scrollbar styling, scoped to the Observer document
+   (including its portals). Never touches the host document. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-hover);
+}
+
 body {
   /* Observer-local readable variants; never change the host document/tokens.
      Host tertiary text and subtle borders are insufficient for form controls. */
@@ -219,14 +236,17 @@ input[type="number"] {
   }
 }
 
-/* Keep both the scrolling viewport and portals below CPA floating actions.
-   Padding on a scrolling document alone disappears as soon as a user scrolls. */
+/* Embedded layout ownership:
+   - The tab row stays at the frame top; on narrow screens it moves below the
+     host's floating actions.
+   - Authenticated content lives in #content, whose top edge is the host action
+     safety line. That pane clips scrolling controls; it is not a global root
+     safe-top reservation, and standalone/login documents keep normal scrolling. */
 [data-embedded="true"] {
   --observer-safe-top: calc(var(--header-height, 64px) + 12px);
 }
 [data-embedded="true"] #root {
   height: 100dvh;
-  padding-top: var(--observer-safe-top);
   overflow: hidden;
 }
 [data-embedded="true"] .cpa-app-layout {
@@ -235,6 +255,22 @@ input[type="number"] {
   overflow: auto;
   overscroll-behavior: contain;
 }
+[data-embedded="true"] .cpa-authenticated-layout {
+  overflow: hidden;
+}
+[data-embedded="true"] .cpa-authenticated-layout .cpa-tabs {
+  flex-shrink: 0;
+  /* 45px tab row + 31px gap = the 76px host action safety line. */
+  margin-bottom: 31px;
+}
+[data-embedded="true"] .cpa-authenticated-layout > #content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-bottom: 2rem;
+}
+[data-embedded="true"] .cpa-header,
 [data-embedded="true"] .cpa-standalone-brand {
   display: none;
 }
@@ -308,6 +344,14 @@ input[type="number"] {
   gap: 0.25rem;
   border-bottom: 1px solid var(--border-color);
   margin-bottom: 1.5rem;
+}
+
+/* The host's mobile header floats actions over the iframe's top edge. Keep the
+   tab row itself clear without reserving a global safe area for page content. */
+@media (max-width: 768px) {
+  [data-embedded="true"] .cpa-tabs {
+    margin-top: 72px;
+  }
 }
 
 .cpa-tab-item {
@@ -953,6 +997,21 @@ input[type="radio"], input[type="checkbox"] {
   width: 16px;
   height: 16px;
   flex-shrink: 0;
+}
+
+/* Login-only layout: keep the native checkbox optically centered with its
+   label at normal and native 200% zoom without restyling other inputs. */
+.cpa-checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 24px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.cpa-checkbox-label input[type="checkbox"] {
+  margin: 0;
+  vertical-align: middle;
 }
 button, input, select { font-family: inherit; }
 @media (max-width: 640px) {

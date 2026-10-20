@@ -33,10 +33,12 @@ vi.mock('./pages/Requests', () => ({
 }));
 
 vi.mock('./pages/Settings', () => ({
-  SettingsPage: ({ refreshInterval }: PageProps) => (
+  SettingsPage: ({ refreshInterval, onDirtyChange, onLogout }: PageProps) => (
     <div data-testid="mock-settings-page">
       <span>SettingsPage Mounted</span>
       <span data-testid="settings-interval">{refreshInterval}</span>
+      <button onClick={() => onDirtyChange?.(true)}>触发 Settings Dirty</button>
+      <button onClick={() => onLogout?.()}>退出</button>
     </div>
   ),
 }));
@@ -380,6 +382,8 @@ describe('App Component Lifecycle, Remember Login & Polling Integration', () => 
       expect(screen.getByText('Observer')).toBeInTheDocument();
     });
 
+    // 退出入口位于设置页底部，App 继续负责确认与双存储清理。
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
     fireEvent.click(screen.getByRole('button', { name: '退出' }));
 
     await waitFor(() => {
@@ -538,8 +542,9 @@ describe('App Component Lifecycle, Remember Login & Polling Integration', () => 
       expect(screen.getByTestId('mock-requests-page')).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Key 管理' }));
-    fireEvent.click(screen.getByRole('button', { name: '触发 Dirty' }));
+    // 进入设置页并使其变为 dirty；退出入口在设置页底部。
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '触发 Settings Dirty' }));
 
     // 点击退出
     fireEvent.click(screen.getByRole('button', { name: '退出' }));
@@ -549,7 +554,7 @@ describe('App Component Lifecycle, Remember Login & Polling Integration', () => 
 
     // 点击“继续编辑”
     fireEvent.click(screen.getByRole('button', { name: '继续编辑' }));
-    expect(screen.getByTestId('mock-keys-page')).toBeInTheDocument();
+    expect(screen.getByTestId('mock-settings-page')).toBeInTheDocument();
     expect(localStorage.getItem(LOCAL_KEY_STORAGE)).toBe('test-key');
 
     // 再次点击退出并确认放弃修改

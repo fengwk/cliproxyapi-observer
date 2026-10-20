@@ -203,20 +203,47 @@ async function verifyThemeAndLayout(env, name) {
   }
 }
 
+async function tabButtonsBox(frame, iframe) {
+  // The <nav> spans the full content width; only its buttons are interactive.
+  // Union the actual tab buttons (not the decorative full-width underline).
+  const boxes = await frame.locator('.cpa-tab-item').evaluateAll(elements => elements.map(element => {
+    const rect = element.getBoundingClientRect();
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+  }));
+  assert(boxes.length > 0, 'tab buttons missing');
+  assert(iframe, 'observer iframe rectangle missing');
+  const left = Math.min(...boxes.map(box => box.x));
+  const top = Math.min(...boxes.map(box => box.y));
+  const right = Math.max(...boxes.map(box => box.x + box.width));
+  const bottom = Math.max(...boxes.map(box => box.y + box.height));
+  return { x: iframe.x + left, y: iframe.y + top, width: right - left, height: bottom - top };
+}
+
 async function verifySafeRects(env, name, dialog = false) {
   const { page, frame } = env;
   const toolbar = await page.locator('.header-actions.floating-actions').boundingBox();
   const iframe = await page.locator('iframe[title="Observer"]').boundingBox();
-  const target = await frame.locator(dialog ? '[role="dialog"]' : '.cpa-header').boundingBox();
+  const target = dialog
+    ? await frame.locator('[role="dialog"]').boundingBox()
+    : await tabButtonsBox(frame, iframe);
   assert(toolbar && iframe && target, 'official toolbar/iframe/child rectangle missing');
   // Playwright boundingBox() is in main-frame coordinates, including for
   // iframe descendants. Compare all rectangles in that same coordinate space.
-  check(name + ': host actions do not cover controls',
-    target.y >= toolbar.y + toolbar.height - 1, JSON.stringify({ toolbar, iframe, target }));
+  const intersects = target.x < toolbar.x + toolbar.width && target.x + target.width > toolbar.x &&
+    target.y < toolbar.y + toolbar.height && target.y + target.height > toolbar.y;
+  check(name + ': host actions do not intersect child controls', !intersects,
+    JSON.stringify({ toolbar, iframe, target }));
   if (dialog) {
     check(name + ': dialog stays inside the iframe viewport', target.x >= iframe.x - 1 && target.y >= iframe.y - 1 &&
       target.x + target.width <= iframe.x + iframe.width + 1 && target.y + target.height <= iframe.y + iframe.height + 1,
     JSON.stringify({ iframe, target }));
+    check(name + ': dialog stays below host actions',
+      target.y >= toolbar.y + toolbar.height - 1, JSON.stringify({ toolbar, target }));
+    const footer = await frame.locator('[role="dialog"] .cpa-modal-footer').boundingBox().catch(() => null);
+    if (footer) {
+      check(name + ': dialog footer stays inside the iframe viewport',
+        footer.y + footer.height <= iframe.y + iframe.height + 1, JSON.stringify({ iframe, footer }));
+    }
   }
   const overflow = await frame.evaluate(() => ({
     width: innerWidth, document: document.documentElement.scrollWidth, body: document.body.scrollWidth,
@@ -224,6 +251,80 @@ async function verifySafeRects(env, name, dialog = false) {
   }));
   check(name + ': viewport is not stretched by tables', overflow.document <= overflow.width + 1 &&
     overflow.body <= overflow.width + 1, JSON.stringify(overflow));
+}
+
+const rectsIntersect = (a, b) => a.x < b.x + b.width && a.x + a.width > b.x &&
+  a.y < b.y + b.height && a.y + a.height > b.y;
+
+async function hostLayout(env) {
+  const { page, frame } = env;
+  const [toolbar, iframe, content, tabs, root] = await Promise.all([
+    page.locator('.header-actions.floating-actions').boundingBox(),
+    page.locator('iframe[title="Observer"]').boundingBox(),
+    frame.locator('#content').boundingBox(),
+    frame.locator('.cpa-tabs').boundingBox(),
+    frame.locator('#root').boundingBox(),
+  ]);
+  assert(toolbar && iframe && content && tabs && root, 'official toolbar/iframe/content/tabs rectangle missing');
+  const scroll = await frame.evaluate(() => {
+    const element = document.querySelector('#content');
+    return {
+      scrollTop: element.scrollTop,
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      overflowY: getComputedStyle(element).overflowY,
+      rootPaddingTop: getComputedStyle(document.querySelector('#root')).paddingTop,
+      viewport: innerWidth,
+    };
+  });
+  return { toolbar, iframe, content, tabs, root, scroll };
+}
+
+// The scroller viewport itself must start at or below the host action line.
+// Content inside may be partially clipped while scrolled; #content is the clip.
+async function verifyContentPane(env, name) {
+  const layout = await hostLayout(env);
+  check(name + ': content viewport stays below host actions',
+    layout.content.y >= layout.toolbar.y + layout.toolbar.height - 1, JSON.stringify(layout));
+  check(name + ': authenticated content is a clipped flex scroller',
+    layout.scroll.overflowY === 'auto' && layout.scroll.rootPaddingTop === '0px' &&
+    layout.scroll.clientHeight <= layout.scroll.scrollHeight, JSON.stringify(layout));
+  if (layout.scroll.viewport > 768) {
+    check(name + ': tabs stay at frame top on desktop',
+      Math.abs(layout.tabs.y - layout.iframe.y) <= 1, JSON.stringify(layout));
+  }
+  return layout;
+}
+
+async function verifyControlClear(env, name, selector) {
+  const { page, frame } = env;
+  const toolbar = await page.locator('.header-actions.floating-actions').boundingBox();
+  const control = await frame.locator(selector).first().boundingBox();
+  assert(toolbar && control, selector + ' or host toolbar rectangle missing');
+  check(name + ': first-row control does not intersect host actions',
+    !rectsIntersect(control, toolbar), JSON.stringify({ toolbar, control }));
+}
+
+// Native checkbox glyph and text must share a vertical center at 100% and at
+// Chrome's real 200% zoom; flex alignment is what this guards.
+async function verifyRememberCheckbox(env, name) {
+  const input = env.frame.locator('#remember-login');
+  if (await input.count() === 0) return;
+  const metrics = await env.frame.evaluate(() => {
+    const box = document.querySelector('#remember-login');
+    const label = box?.closest('label');
+    const text = label?.querySelector('span');
+    if (!box || !label || !text) return null;
+    const a = box.getBoundingClientRect(), b = text.getBoundingClientRect(), l = label.getBoundingClientRect();
+    return {
+      centerDelta: (a.top + a.height / 2) - (b.top + b.height / 2),
+      labelDisplay: getComputedStyle(label).display,
+      inputInside: a.top >= l.top - 1 && a.bottom <= l.bottom + 1,
+    };
+  });
+  check(name + ': remember checkbox is vertically centered',
+    metrics && Math.abs(metrics.centerDelta) <= 1.5 && metrics.labelDisplay.includes('flex') && metrics.inputInside,
+    JSON.stringify(metrics));
 }
 
 async function loginObserver(frame) {
@@ -250,6 +351,32 @@ async function readonlyPages(env, name) {
     return { actual: page.width, viewport: innerWidth };
   });
   check(name + ': request page uses full available width', width.actual >= width.viewport - 70, JSON.stringify(width));
+  const paneTop = await verifyContentPane(env, name);
+  await verifyControlClear(env, name + ': requests poll/refresh', '.requests-header');
+  const topGeometry = await frame.evaluate(() => {
+    const root = document.querySelector('#root');
+    const app = document.querySelector('.cpa-app-layout');
+    const tabs = document.querySelector('.cpa-tabs');
+    return {
+      rootPaddingTop: getComputedStyle(root).paddingTop,
+      rootTop: root.getBoundingClientRect().top,
+      appTop: app.getBoundingClientRect().top,
+      tabsTop: tabs.getBoundingClientRect().top,
+      tabsBottom: tabs.getBoundingClientRect().bottom,
+      viewport: innerWidth,
+    };
+  });
+  check(name + ': embedded content has no global safe-top reservation',
+    topGeometry.rootPaddingTop === '0px' && Math.abs(topGeometry.appTop - topGeometry.rootTop) <= 1,
+    JSON.stringify(topGeometry));
+  check(name + ': top tabs stay at the embedded frame top / mobile clearance',
+    topGeometry.tabsTop - topGeometry.rootTop >= 0 && topGeometry.tabsTop - topGeometry.rootTop <= 80 &&
+    topGeometry.tabsBottom <= topGeometry.rootTop + 140, JSON.stringify({ topGeometry, paneTop }));
+  await requestsTab(frame).focus();
+  check(name + ': top tabs accept keyboard focus', await frame.evaluate(() => {
+    const active = document.activeElement;
+    return Boolean(active && active.classList.contains('cpa-tab-item') && active.getBoundingClientRect().width > 0);
+  }));
   const railToggle = page.locator('.sidebar-toggle-floating');
   if (await railToggle.isVisible()) {
     await railToggle.click();
@@ -264,7 +391,7 @@ async function readonlyPages(env, name) {
   }
   await frame.getByTestId('requests-table-section').scrollIntoViewIfNeeded();
   await shot(page, name + '-request-table');
-  await frame.locator('.cpa-app-layout').evaluate(el => { el.scrollTop = 0; });
+  await frame.locator('#content').evaluate(el => { el.scrollTop = 0; });
   // Details must be fetched on demand, safely rendered as text and never turn
   // malicious model/header/JSON strings into DOM or script.
   if (server) check(name + ': details initially lazy', server.counters.detailReads === 0);
@@ -314,16 +441,44 @@ async function readonlyPages(env, name) {
   await settingsTab(frame).click();
   await frame.getByTestId('observer-settings').waitFor();
   await frame.locator('.settings-table tbody tr').first().waitFor();
+  await frame.locator('#content').evaluate(el => { el.scrollTop = 0; });
   await verifySafeRects(env, name + '-settings');
+  await verifyContentPane(env, name + ': settings top');
+  await verifyControlClear(env, name + ': settings refresh', '.settings-toolbar');
+  await shot(page, name + '-settings-top');
   const capacity = await frame.locator('#settings-max-body-amount').boundingBox();
   check(name + ': capacity input has readable width', capacity && capacity.width >= (name.startsWith('390') ? 75 : 100), JSON.stringify(capacity));
-  await frame.locator('.cpa-app-layout').evaluate(el => { el.scrollTop = 400; });
-  // Scroll safe viewport retains the top gutter; page controls cannot slide
-  // underneath host actions even though the child document is scrollable.
-  const root = await frame.locator('#root').boundingBox();
-  const scroller = await frame.locator('.cpa-app-layout').boundingBox();
-  check(name + ': safe viewport survives scrolling', scroller.y > root.y + 20);
-  await shot(page, name + '-settings');
+  // Scroll the capture Select to a partially clipped position. Its bounding
+  // rect may extend above the pane, but hit testing must show the clipped part
+  // is not interactive and the visible part is.
+  const clippedSelect = await frame.evaluate(() => {
+    const content = document.querySelector('#content');
+    const select = document.querySelector('#settings-capture-mode');
+    const offset = select.getBoundingClientRect().top - content.getBoundingClientRect().top + content.scrollTop;
+    content.scrollTop = Math.max(0, offset + 8);
+    const pane = content.getBoundingClientRect(), rect = select.getBoundingClientRect();
+    const x = rect.left + Math.min(12, rect.width / 2);
+    const clippedHit = document.elementFromPoint(x, pane.top - 2);
+    const visibleHit = document.elementFromPoint(x, Math.min(pane.top + 8, rect.bottom - 1));
+    return {
+      paneTop: pane.top, selectTop: rect.top, selectBottom: rect.bottom, scrollTop: content.scrollTop,
+      clippedHitsSelect: Boolean(clippedHit && select.contains(clippedHit)),
+      visibleHitsSelect: Boolean(visibleHit && select.contains(visibleHit)),
+    };
+  });
+  check(name + ': capture Select is clipped by the content pane, not the host toolbar',
+    clippedSelect.selectTop < clippedSelect.paneTop && clippedSelect.scrollTop > 0 &&
+    !clippedSelect.clippedHitsSelect && clippedSelect.visibleHitsSelect, JSON.stringify(clippedSelect));
+  await verifyContentPane(env, name + ': settings scrolled');
+  await frame.locator('#content').evaluate(el => { el.scrollTop = el.scrollHeight; });
+  await delay(200);
+  const paneBottom = await verifyContentPane(env, name + ': settings bottom');
+  const logoutBox = await frame.getByTestId('settings-logout').boundingBox();
+  check(name + ': logout is reachable at the settings bottom',
+    logoutBox && logoutBox.y >= paneBottom.content.y - 1 &&
+    logoutBox.y + logoutBox.height <= paneBottom.content.y + paneBottom.content.height + 1 &&
+    !rectsIntersect(logoutBox, paneBottom.toolbar), JSON.stringify({ logoutBox, paneBottom }));
+  await shot(page, name + '-settings-bottom');
   check(name + ': XSS strings stayed text', await frame.evaluate(() => !window.__observerXss &&
     !document.querySelector('#content script,#content img[onerror],#content iframe')));
 }
@@ -533,6 +688,21 @@ async function persistentLoginAndNativeZoom(origin, shell, server) {
     await readonlyPages(env, 'native-zoom-200');
     check('native 200% zoom has no console/page/CSP errors', env.diagnostics.length === 0, env.diagnostics.join('\n'));
     report.console_errors.push(...env.diagnostics);
+    // The persistent profile is already logged in. Open the standalone login
+    // once, clear only this mock origin's storage, and verify the native
+    // checkbox at the same real 200% zoom used above.
+    const zoomedLogin = await context.newPage();
+    await zoomedLogin.goto(server.resourceURL);
+    await zoomedLogin.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
+    await zoomedLogin.reload();
+    await zoomedLogin.locator('#login-key').waitFor();
+    const zoomLogin = await zoomedLogin.evaluate(() => ({ ratio: devicePixelRatio, width: innerWidth }));
+    check('native 200% zoom login uses physical zoom', zoomLogin.ratio === 2, JSON.stringify(zoomLogin));
+    const loginEnv = { page: zoomedLogin, frame: zoomedLogin, diagnostics: [] };
+    activeEnvironment = loginEnv;
+    await verifyRememberCheckbox(loginEnv, 'native-zoom-200');
+    await shot(zoomedLogin, 'native-zoom-200-login');
+    await zoomedLogin.close();
   } finally {
     await context?.close();
     await fs.rm(profile, { recursive: true, force: true });
@@ -561,6 +731,7 @@ async function main() {
       try {
         await step(name + ': login theme', () => verifyThemeAndLayout(env, name));
         await shot(env.page, name + '-login');
+        await verifyRememberCheckbox(env, name);
         await loginObserver(env.frame);
         await step(name + ': readonly pages', () => readonlyPages(env, name));
         if (!real && item.width === 1280 && item.theme === 'light') {
