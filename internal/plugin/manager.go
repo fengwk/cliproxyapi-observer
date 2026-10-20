@@ -88,14 +88,18 @@ type Manager struct {
 	cancel             context.CancelFunc
 	workers            sync.WaitGroup
 	scopes             sync.Map // host caller_scope -> callerScope; never contains secrets
+	admitted           sync.Map // our request ID -> our Key ID; completion ownership gate
 	billingFaults      sync.Map // marker-write failure fallback; explicit recovery or durable handoff only
 	capsMu             sync.Mutex
 	catalogCaps        map[[32]byte]time.Time
 }
 
+// A host caller_scope is owned only after this plugin authenticated that exact
+// request shape. The authenticated operation is authoritative for Gemini's
+// FullPath wildcard, which cannot reveal generateContent vs countTokens.
 type callerScope struct {
-	KeyID    string
-	Generate bool
+	KeyID     string
+	Operation requestOperation
 }
 
 func NewManager(assets AssetFunc) *Manager { return &Manager{assets: assets, now: time.Now} }
@@ -109,7 +113,10 @@ func (m *Manager) HandleCall(method string, raw []byte) (out []byte, err error) 
 	defer func() {
 		if recover() != nil {
 			if method == pluginabi.MethodRequestInterceptBefore {
-				out, err = okEnvelope(denied(503))
+				// m.before has a panic boundary that fails closed only after
+				// ownership. This outer fallback must never reject unrelated
+				// traffic because this plugin panicked.
+				out, err = okEnvelope(pluginapi.RequestInterceptResponse{})
 			} else {
 				out, err = errorEnvelope(&PluginError{"plugin_error", "internal error", 503})
 			}
@@ -157,12 +164,9 @@ func (m *Manager) HandleCall(method string, raw []byte) (out []byte, err error) 
 		if e = m.openLocked(c); e != nil {
 			if had {
 				_ = m.openLocked(old)
-			} else if method == pluginabi.MethodPluginRegister {
-				// Keep the exclusive provider installed on storage faults. Failing
-				// registration here would allow the host's built-in keys to win.
-				m.cfg, m.configured = c, true
-				return okEnvelope(registrationResponse())
 			}
+			// Registration no longer has to stay installed to protect an exclusive
+			// provider. Failing here leaves native CPA authentication untouched.
 			return fail("storage_unavailable", 503)
 		}
 		m.cfg = c
@@ -206,7 +210,14 @@ func (m *Manager) HandleCall(method string, raw []byte) (out []byte, err error) 
 		}
 		m.mu.RLock()
 		defer m.mu.RUnlock()
-		if m.store != nil {
+		if m.store == nil {
+			m.admitted.Delete(r.RequestID)
+			return okEnvelope(struct{}{})
+		}
+		// Lifecycle events also arrive for native host requests that this
+		// interceptor deliberately passed through. Release only an admission
+		// this plugin created.
+		if _, ok := m.admitted.LoadAndDelete(r.RequestID); ok {
 			_ = m.store.Complete(r.RequestID, r.CompletedAt)
 		}
 		return okEnvelope(struct{}{})
@@ -261,6 +272,14 @@ func (m *Manager) closeLocked() error {
 	m.capsMu.Lock()
 	m.catalogCaps = nil
 	m.capsMu.Unlock()
+	m.admitted.Range(func(id, _ any) bool {
+		m.admitted.Delete(id)
+		return true
+	})
+	// Keep caller scopes across store replacement. Clearing them would turn an
+	// already authenticated request into pass-through; while the store stays
+	// closed, owned scopes fail closed, and after reopen Authorize revalidates
+	// the Key. Scopes are hashed principals, never credentials.
 	if m.cancel != nil {
 		m.cancel()
 		m.workers.Wait()
@@ -337,6 +356,12 @@ func (m *Manager) authenticate(raw []byte) ([]byte, error) {
 	if json.Unmarshal(raw, &r) != nil {
 		return okEnvelope(pluginapi.FrontendAuthResponse{})
 	}
+	// Unsupported operations are not handled at all, so native CPA Keys keep
+	// their existing authentication path. Never report global success.
+	operation := operationFor(r.Method, r.Path)
+	if operation == operationUnknown {
+		return okEnvelope(pluginapi.FrontendAuthResponse{})
+	}
 	secret, e := credential(r)
 	if e != nil {
 		return okEnvelope(pluginapi.FrontendAuthResponse{})
@@ -353,37 +378,83 @@ func (m *Manager) authenticate(raw []byte) ([]byte, error) {
 	if e != nil {
 		return okEnvelope(pluginapi.FrontendAuthResponse{})
 	}
-	generate := !countTokenPath(r.Path)
 	principal := "observer:" + k.ID
-	if !generate {
+	switch operation {
+	case operationCount:
 		principal = "observer-count:" + k.ID
+	case operationDirectory:
+		principal = "observer-directory:" + k.ID
 	}
 	// handlers.requestCallerScope hashes Gin userApiKey via the pinned SDK helper.
-	// userApiKey itself is NOT present in RequestInterceptRequest.Metadata.
-	m.scopes.Store(session.CallerScope(principal), callerScope{KeyID: k.ID, Generate: generate})
+	// userApiKey itself is NOT present in RequestInterceptRequest.Metadata. The
+	// principal already separates operations; LoadOrStore also prevents a
+	// concurrent request from replacing the first recorded operation.
+	m.scopes.LoadOrStore(session.CallerScope(principal), callerScope{KeyID: k.ID, Operation: operation})
 	return okEnvelope(pluginapi.FrontendAuthResponse{Authenticated: true, Principal: principal})
 }
 func denied(status int) pluginapi.RequestInterceptResponse {
 	return pluginapi.RequestInterceptResponse{Terminate: true, StatusCode: status, ResponseBody: []byte(`{"error":{"code":"admission_denied","message":"request not admitted"}}`)}
 }
-func (m *Manager) before(raw []byte) ([]byte, error) {
+func (m *Manager) before(raw []byte) (out []byte, err error) {
+	// Fail closed only after ownership is proven. A panic while classifying
+	// unknown/native traffic must not reject that traffic globally.
+	owned := false
+	defer func() {
+		if recover() != nil {
+			if owned {
+				out, err = okEnvelope(denied(503))
+			} else {
+				out, err = okEnvelope(pluginapi.RequestInterceptResponse{})
+			}
+		}
+	}()
 	var r pluginapi.RequestInterceptRequest
 	if json.Unmarshal(raw, &r) != nil {
-		return okEnvelope(denied(400))
+		return okEnvelope(pluginapi.RequestInterceptResponse{})
 	}
+	scope, _ := r.Metadata[coreexecutor.CallerScopeMetadataKey].(string)
+	if scope == "" {
+		return okEnvelope(pluginapi.RequestInterceptResponse{})
+	}
+	v, ok := m.scopes.Load(scope)
+	if !ok {
+		return okEnvelope(pluginapi.RequestInterceptResponse{})
+	}
+	caller, ok := v.(callerScope)
+	if !ok || caller.KeyID == "" {
+		return okEnvelope(pluginapi.RequestInterceptResponse{})
+	}
+	// The host supplies an exact path for most routes, but Gin's FullPath for
+	// Gemini is "/v1beta/models/*action". That template cannot distinguish
+	// generateContent from countTokens, so the authenticated operation governs.
+	path, _ := r.Metadata[coreexecutor.RequestPathMetadataKey].(string)
+	operation, template := beforeOperation(path)
+	if template {
+		switch caller.Operation {
+		case operationGeneration, operationCount:
+			operation = caller.Operation
+		default:
+			// A directory (or otherwise non-execution) scope never enters a
+			// model execution, even if a path was rewritten upstream.
+			return okEnvelope(denied(403))
+		}
+	} else if operation == operationGeneration || operation == operationCount {
+		// Exact routes must agree with the scope's authenticated operation:
+		// generation cannot masquerade as count, and count cannot bypass
+		// generation quota/concurrency.
+		if caller.Operation != operation {
+			return okEnvelope(denied(403))
+		}
+	} else {
+		// Unknown, absent, directory, or unsupported paths are not execution
+		// operations Observer owns. Native/unowned scopes were already returned.
+		return okEnvelope(pluginapi.RequestInterceptResponse{})
+	}
+	owned = true
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.store == nil {
 		return okEnvelope(denied(503))
-	}
-	scope, _ := r.Metadata[coreexecutor.CallerScopeMetadataKey].(string)
-	v, ok := m.scopes.Load(scope)
-	if !ok {
-		return okEnvelope(denied(401))
-	}
-	caller, ok := v.(callerScope)
-	if !ok || caller.KeyID == "" {
-		return okEnvelope(denied(401))
 	}
 	model := r.RequestedModel
 	if model == "" {
@@ -391,9 +462,15 @@ func (m *Manager) before(raw []byte) ([]byte, error) {
 	}
 	id := caller.KeyID
 	e := m.store.Authorize(id, model)
-	generate := caller.Generate
+	if operation == operationCount {
+		if e != nil {
+			return okEnvelope(denied(denialStatus(e)))
+		}
+		return okEnvelope(pluginapi.RequestInterceptResponse{})
+	}
+	generate := true
 	if b, ok := r.Metadata[coreexecutor.GenerateMetadataKey].(bool); ok {
-		generate = generate && b
+		generate = b
 	}
 	if e == nil && generate {
 		if _, fault := m.billingFaults.Load(id); fault {
@@ -403,19 +480,26 @@ func (m *Manager) before(raw []byte) ([]byte, error) {
 			return okEnvelope(denied(400))
 		}
 		e = m.store.Admit(engine.Admission{RequestID: r.RequestID, TraceID: r.TraceID, KeyID: id, Model: model, At: m.now()})
+		if e == nil {
+			m.admitted.Store(r.RequestID, id)
+		}
 	}
 	if e != nil {
-		status := 403
-		if errors.Is(e, engine.ErrQuota) || errors.Is(e, engine.ErrConcurrency) {
-			status = 429
-		}
-		if errors.Is(e, engine.ErrAccounting) || errors.Is(e, engine.ErrClosed) {
-			status = 503
-		}
-		return okEnvelope(denied(status))
+		return okEnvelope(denied(denialStatus(e)))
 	}
 	if generate {
 		m.store.Capture(engine.CaptureInput{RequestID: r.RequestID, TraceID: r.TraceID, KeyID: id, Headers: r.Headers, Body: r.Body, At: m.now()})
 	}
 	return okEnvelope(pluginapi.RequestInterceptResponse{})
+}
+
+func denialStatus(e error) int {
+	status := 403
+	if errors.Is(e, engine.ErrQuota) || errors.Is(e, engine.ErrConcurrency) {
+		status = 429
+	}
+	if errors.Is(e, engine.ErrAccounting) || errors.Is(e, engine.ErrClosed) {
+		status = 503
+	}
+	return status
 }

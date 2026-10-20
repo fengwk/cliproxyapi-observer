@@ -86,18 +86,3 @@ func (m *Manager) pruneCatalog(now time.Time) {
 		}
 	}
 }
-
-// Match only host-known original URL paths, not body heuristics or a wildcard
-// before-hook template. The identity is stable per Key and operation.
-func countTokenPath(path string) bool {
-	if path == "/v1/messages/count_tokens" {
-		return true
-	}
-	const prefix = "/v1beta/models/"
-	const suffix = ":countTokens"
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
-		return false
-	}
-	model := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
-	return model != "" && !strings.ContainsAny(model, "/\\:%\x00\r\n")
-}

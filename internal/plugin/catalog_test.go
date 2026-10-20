@@ -66,9 +66,11 @@ func TestCatalogCapabilityScopeAndSingleUse(t *testing.T) {
 		t.Fatal("catalog token created a DB Key")
 	}
 	var before pluginapi.RequestInterceptResponse
-	_ = json.Unmarshal(call(t, m, "request.intercept_before", pluginapi.RequestInterceptRequest{RequestID: "catalog", Metadata: map[string]any{coreexecutor.CallerScopeMetadataKey: session.CallerScope(a.Principal)}}), &before)
-	if !before.Terminate {
-		t.Fatal("catalog principal admitted inference")
+	_ = json.Unmarshal(call(t, m, "request.intercept_before", pluginapi.RequestInterceptRequest{RequestID: "catalog", RequestedModel: "model", Metadata: map[string]any{
+		coreexecutor.CallerScopeMetadataKey: session.CallerScope(a.Principal), coreexecutor.RequestPathMetadataKey: "/v1/chat/completions",
+	}}), &before)
+	if before.Terminate || m.store.Health().ActiveRequests != 0 {
+		t.Fatal("catalog capability entered admission")
 	}
 }
 
@@ -143,20 +145,20 @@ func TestCountScopeFromOriginalPath(t *testing.T) {
 	if generation.Principal != "observer:"+k.ID || count.Principal != "observer-count:"+k.ID {
 		t.Fatal("operation principal not distinct")
 	}
-	before := func(principal, model, id string) pluginapi.RequestInterceptResponse {
+	before := func(principal, model, id, path string) pluginapi.RequestInterceptResponse {
 		var r pluginapi.RequestInterceptResponse
 		_ = json.Unmarshal(call(t, m, "request.intercept_before", pluginapi.RequestInterceptRequest{RequestID: id, RequestedModel: model, Body: body, Metadata: map[string]any{
-			coreexecutor.CallerScopeMetadataKey: session.CallerScope(principal), coreexecutor.GenerateMetadataKey: true, coreexecutor.RequestPathMetadataKey: "/v1beta/models/*action",
+			coreexecutor.CallerScopeMetadataKey: session.CallerScope(principal), coreexecutor.GenerateMetadataKey: true, coreexecutor.RequestPathMetadataKey: path,
 		}}), &r)
 		return r
 	}
-	if before(generation.Principal, "model", "generation").Terminate {
+	if before(generation.Principal, "model", "generation", "/v1beta/models/model:generateContent").Terminate {
 		t.Fatal("generation rejected")
 	}
-	if before(count.Principal, "model", "count").Terminate || m.store.Health().ActiveRequests != 1 {
+	if before(count.Principal, "model", "count", "/v1beta/models/model:countTokens").Terminate || m.store.Health().ActiveRequests != 1 {
 		t.Fatal("count reserved a slot")
 	}
-	if !before(count.Principal, "other", "bad-count").Terminate {
+	if !before(count.Principal, "other", "bad-count", "/v1beta/models/model:countTokens").Terminate {
 		t.Fatal("count bypassed model restriction")
 	}
 	call(t, m, "usage.handle", pluginapi.UsageRecord{RequestID: "count-usage", Generate: true, AccessProvider: AccessProvider, APIKey: count.Principal, Provider: "openai", Model: "model", RequestedAt: time.Now(), Detail: pluginapi.UsageDetail{InputTokens: 100}})
@@ -199,7 +201,7 @@ func TestCountWhenQuotaFull(t *testing.T) {
 	for _, operation := range []string{"generateContent", "countTokens"} {
 		a := authenticateTest(t, m, pluginapi.FrontendAuthRequest{Method: "POST", Path: "/v1beta/models/model:" + operation, Headers: http.Header{"Authorization": {"Bearer " + secret}}})
 		var r pluginapi.RequestInterceptResponse
-		_ = json.Unmarshal(call(t, m, "request.intercept_before", pluginapi.RequestInterceptRequest{RequestID: operation, RequestedModel: "model", Metadata: map[string]any{coreexecutor.CallerScopeMetadataKey: session.CallerScope(a.Principal), coreexecutor.GenerateMetadataKey: true, coreexecutor.RequestPathMetadataKey: "/v1beta/models/*action"}}), &r)
+		_ = json.Unmarshal(call(t, m, "request.intercept_before", pluginapi.RequestInterceptRequest{RequestID: operation, RequestedModel: "model", Metadata: map[string]any{coreexecutor.CallerScopeMetadataKey: session.CallerScope(a.Principal), coreexecutor.GenerateMetadataKey: true, coreexecutor.RequestPathMetadataKey: "/v1beta/models/model:" + operation}}), &r)
 		if r.Terminate != (operation == "generateContent") {
 			t.Fatal("quota applied to wrong operation")
 		}
