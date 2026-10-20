@@ -431,6 +431,17 @@ async function readonlyPages(env, name) {
   }
   await keyTab(frame).click();
   await frame.locator('table[aria-label="Key 列表"] tbody tr').first().waitFor();
+  check(name + ': key table displays credentials rather than internal IDs',
+    await frame.getByRole('columnheader', { name: '密钥', exact: true }).count() === 1 &&
+    await frame.getByRole('columnheader', { name: '内部 ID', exact: true }).count() === 0);
+  if (server) {
+    const managed = frame.getByRole('row').filter({ hasText: 'sk-key-alpha' });
+    check(name + ': current client secret is readable and copyable in the list',
+      await managed.count() === 1 && await managed.getByRole('button', { name: '复制密钥', exact: true }).count() === 1);
+    const legacy = frame.getByRole('row').filter({ hasText: '未保存明文，请重新生成' });
+    check(name + ': unavailable historical material is not replaced by an ID',
+      await legacy.count() === 1 && await legacy.getByRole('button', { name: '复制密钥', exact: true }).count() === 0);
+  }
   await verifySafeRects(env, name + '-keys');
   await shot(page, name + '-keys');
   // Opening/closing the editor is read-only and verifies mobile portal sizing.
@@ -514,8 +525,8 @@ async function interactions(env) {
     viewReads() >= readsBefore + 12 && maxDrift <= 1 && stableFocusAndScroll &&
     await frame.locator('.requests-table tbody tr').first().getAttribute('data-stable-node') === 'retained',
     JSON.stringify({ cycles: viewReads() - readsBefore, maxDrift, stableFocusAndScroll }));
-  // Management login may persist only by explicit Observer preference; client
-  // credentials are still never retained. Verify a real document reload.
+  // Management login persists by explicit preference; client credentials are
+  // reloaded from the management API, never from browser persistent storage.
   await frame.goto(frame.url());
   await frame.locator('.requests-table tbody tr').first().waitFor();
   check('remembered management login survives reload', await frame.locator('#login-key').count() === 0);
@@ -548,9 +559,23 @@ async function interactions(env) {
     created.allowed_models.join() === 'exact-model-v1');
   const storage = await frame.evaluate(() => JSON.stringify({ ...sessionStorage, ...localStorage }));
   check('client secret not persisted in browser storage', !storage.includes(custom));
-  await frame.getByRole('button', { name: '我已安全保存密钥，关闭', exact: true }).click();
-  check('one-time client secret cleared on close', !(await frame.locator('body').innerText()).includes(custom));
+  await frame.getByRole('button', { name: '关闭并返回列表', exact: true }).click();
+  await frame.getByRole('dialog').waitFor({ state: 'detached' });
   const row = frame.getByRole('row').filter({ hasText: 'browser-custom' });
+  await row.getByText(custom, { exact: true }).waitFor();
+  check('client secret remains available after closing the success modal',
+    (await row.innerText()).includes(custom) && !await frame.getByRole('dialog').count());
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(frame.url()).origin });
+  await row.getByRole('button', { name: '复制密钥', exact: true }).click();
+  check('copy from the list writes the actual secret, not the ID',
+    await frame.evaluate(() => navigator.clipboard.readText()) === custom);
+  await shot(page, 'persistent-client-key-list');
+  await frame.goto(frame.url());
+  await frame.locator('.requests-table tbody tr').first().waitFor();
+  await keyTab(frame).click();
+  await row.getByText(custom, { exact: true }).waitFor();
+  check('client secret survives a real document reload through the management API',
+    (await row.innerText()).includes(custom));
   await row.getByRole('button', { name: '轮转', exact: true }).click();
   await frame.getByRole('radio', { name: '自定义新密钥', exact: true }).check();
   const next = 'browser-rotated-secret-exact-123456!';
@@ -560,13 +585,17 @@ async function interactions(env) {
   await frame.getByRole('dialog', { name: 'Key 轮转成功', exact: true }).waitFor();
   check('custom rotation retains stable identity', server.state.keys.find(k => k.label === 'browser-custom').id === created.id &&
     server.counters.keyRotates === 1);
-  await frame.getByRole('button', { name: '我已安全保存密钥，关闭', exact: true }).click();
+  await frame.getByRole('button', { name: '关闭并返回列表', exact: true }).click();
+  await row.getByText(next, { exact: true }).waitFor();
+  check('rotation replaces the plaintext shown in the list',
+    !(await row.innerText()).includes(custom) && server.state.secretValues.get(created.id) === next);
   const retainedHash = server.state.secrets.get(created.id);
   assert.match(retainedHash, /^[a-f0-9]{64}$/);
   await row.getByRole('button', { name: '禁用', exact: true }).click();
   await frame.getByRole('button', { name: '确认禁用', exact: true }).click();
   await row.getByRole('button', { name: '启用', exact: true }).waitFor();
-  check('disable preserves the credential hash', !created.enabled && server.state.secrets.get(created.id) === retainedHash);
+  check('disable preserves the credential hash and displayed plaintext', !created.enabled &&
+    server.state.secrets.get(created.id) === retainedHash && (await row.innerText()).includes(next));
   await row.getByRole('button', { name: '启用', exact: true }).click();
   await frame.getByRole('button', { name: '确认启用', exact: true }).click();
   await row.getByRole('button', { name: '禁用', exact: true }).waitFor();
@@ -576,7 +605,7 @@ async function interactions(env) {
   await row.waitFor({ state: 'detached' });
   check('terminal deletion removes authentication but preserves accounting identity',
     Boolean(created.deleted_at) && !created.enabled && !server.state.secrets.has(created.id) &&
-    server.state.keys.some(key => key.id === created.id));
+    !server.state.secretValues.has(created.id) && server.state.keys.some(key => key.id === created.id));
   // Editing the name must not truncate an unchanged nanosecond expiry.
   const nano = frame.getByRole('row').filter({ hasText: '纳秒到期 Key' });
   await nano.getByRole('button', { name: '编辑', exact: true }).click();

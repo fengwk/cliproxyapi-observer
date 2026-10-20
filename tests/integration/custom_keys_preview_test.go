@@ -60,8 +60,22 @@ func TestCustomKeysAndPreviewThroughNativeHost(t *testing.T) {
 		t.Fatal("rotation changed identity")
 	}
 	denyInference(t, h, secret)
+	// Rotation intentionally replaces the current display material. Every other
+	// management field, including fixed accounting, must remain unchanged.
+	for _, item := range before["keys"].(map[string]any)["items"].([]any) {
+		key := item.(map[string]any)
+		if key["id"] == created.Key.ID {
+			if key["secret"] != secret {
+				t.Fatal("pre-rotation list did not expose current material")
+			}
+			key["secret"] = next
+		}
+	}
 	browserAssertManagementUnchanged(t, h, before)
-	for _, name := range []string{"/keys", "/requests", "/summary"} {
+	if current := listKeyMaterials(t, h, "/keys")[created.Key.ID]; current.Secret != next {
+		t.Fatal("management list did not expose the replacement material")
+	}
+	for _, name := range []string{"/requests", "/summary", "/health"} {
 		raw := h.api(t, "GET", name, nil, 200, nil)
 		if bytes.Contains(raw, []byte(secret)) || bytes.Contains(raw, []byte(next)) {
 			t.Fatal("secret exposed by read API")
@@ -74,9 +88,12 @@ func TestCustomKeysAndPreviewThroughNativeHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs := []byte(h.stdout.String() + h.stderr.String())
+	if !bytes.Contains(raw, []byte(next)) {
+		t.Fatal("current plaintext not saved for management")
+	}
 	for _, material := range []string{secret, next} {
-		if bytes.Contains(raw, []byte(material)) || bytes.Contains(logs, []byte(material)) {
-			t.Fatal("plaintext persisted")
+		if bytes.Contains(logs, []byte(material)) {
+			t.Fatal("client plaintext leaked to logs")
 		}
 	}
 	h, err = h.restartPreservingConfig(t)
@@ -85,6 +102,9 @@ func TestCustomKeysAndPreviewThroughNativeHost(t *testing.T) {
 	}
 	if status, _ := h.infer(t, next, false); status != 200 {
 		t.Fatal("custom authentication lost on restart")
+	}
+	if current := listKeyMaterials(t, h, "/keys")[created.Key.ID]; current.Secret != next {
+		t.Fatal("current plaintext unavailable after restart")
 	}
 	var snapshot map[string]json.RawMessage
 	h.api(t, "GET", "/prices", nil, 200, &snapshot)

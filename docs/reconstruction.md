@@ -1,7 +1,8 @@
-# Observer v0.8.0 重构说明
+# Observer 当前开发实现说明
 
-本文件说明 v0.8.0 的实现行为；`REFACTOR-next.md` 是需求/验收设计，v0.6/v0.7
-发布说明是历史记录。本版变化见 [发布说明](release-notes-v0.8.0.md)；发布不代表生产实例已部署。
+本文件包含 v0.8.0 发布后的未发布开发变更；`REFACTOR-next.md` 是历史需求设计，
+v0.6/v0.7/v0.8 发布说明保留各版本历史行为。当前模型策略及 SDK 覆盖缺口见
+[模型接口策略](model-policy.md)，尚不能发布为全路由 Observer-only 网关。
 
 ## 能力与可复用验收
 
@@ -14,10 +15,10 @@
 | R05 平铺筛选 | 查询/Enter 才应用，历史维度及下线模型可选 | `ui.test.tsx`、`Requests.test.tsx`、真实宿主 `rebuild_test.go` |
 | R06 细分统计 | 事务性小时/日汇总、一致视图、四种分组、样本覆盖 | `statistics*_test.go`、`load_acceptance_test.go`、真实升级测试 |
 | R07 终态删除 | 墓碑清哈希，busy/幂等/410，保留账本 | `key_lifecycle_test.go`、`rebuild_test.go`、浏览器删除流程 |
-| R08 ID/密钥 | `sk-` + 48 字母数字，稳定内部 ID，一次性明文 | `key_lifecycle_test.go`、`custom_keys_preview_test.go`、Key 页面测试 |
+| R08 ID/密钥 | `sk-` + 48 字母数字，内部 ID 保留关联；当前明文持久展示/复制 | `key_material_test.go`、`custom_keys_preview_test.go`、Key 页面测试 |
 | R09 可解释计费 | 共用解析器、完整身份、候选和显式映射、历史报价固定 | `internal/pricing/*test.go`、`upgrade_test.go`、设置页草稿隔离测试 |
 | R10 内容生命周期 | 三模式、独立 TTL、单 gzip、索引 FIFO/到期、清理/清空/整理 | `capture*_test.go`、`rebuild_test.go`、`acceptance_test.go`、设置页测试 |
-| R11 原生认证共存 | 非独占；有限操作 + 自有认证归属，原生流量不记账 | `native_scope_test.go`、`security_test.go`、`gemini_test.go` |
+| R11 最新模型鉴权策略 | 非独占；被拦截的模型执行只允许 Observer Key；非模型行为保留；全入口覆盖未完成 | `native_scope_test.go`、`model_guard_test.go`、`gemini_test.go` |
 
 测试文件位于 `internal/engine`、`internal/plugin`、`internal/pricing`、
 `web/src` 和 `tests/integration`。测试覆盖能力不等于任意部署保证；
@@ -31,21 +32,28 @@
   `/v1/responses`、`/backend-api/codex/responses`，以及 Gemini
   `/v1beta/models/{model}:generateContent|streamGenerateContent`。
 - 目录读取：GET `/v1/models`、`/v1beta/models` 及合法模型详情。
-  count：POST `/v1/messages/count_tokens`、Gemini `:countTokens`。
+  count：POST `/v1/messages/count_tokens`、Gemini `:countTokens`，也要求 Observer Key。
   目录/count 不准入、不预留、不采集、不记账；count 仍校验自有 Key 的模型权限。
-- 不支持的路径/方法和原生/未知 caller scope 不由 Observer 处理。
+- 在 request.before 覆盖的模型路径上，原生/未知/缺失 caller scope 返回
+  `403 observer_key_required`；被拦截但不支持计账的模型入口返回
+  `403 model_surface_unsupported`。非模型及无关路径不由 Observer 处理。
   Gemini 的 before-hook 是通配模板，使用认证时记下的真实操作，不猜正文；
   真生成也不能用 `Generate=false` 绕过准入。
 - 已认证的自有生成在存储暂停、重配置、记账故障或维护时 fail-closed；
   不能把无关流量一起拒绝，也不能一律返回认证成功。
+- Live/Realtime/Alpha Search 等宿主直接转发链不经过 request.before。
+  Responses WebSocket 的原生认证可完成握手，但每 turn 的模型执行被拒绝；
+  v8.0.30 丢弃 DirectResponse 错误正文，客户端看到连接关闭，不保证收到 403 JSON。
+  不能把此有限覆盖当作“所有模型入口已锁定”，详见 [覆盖表](model-policy.md)。
 - **无原生 Key 的匿名模式**：CPA 不安装认证 provider 时可能匿名返回 200；
   安装非独占 provider 后全链弃权会返回 401。当前 SDK 没有安全的按路径原生
   委派接口，因此不承诺这类配置的透明共存。真实宿主测试锁定该已知限制。
 - **同明文双重身份/混合来源**：原生与 Observer provider 各自认证。
-  同一明文也在 CPA 原生 Key 列表时，Observer 禁用/删除不能撤销宿主的另一个
-  凭据。跨 query/header 的混合凭据亦可能由原生 provider 接管。
+  同一明文也在 CPA 原生 Key 列表时，原生认证先胜出会在受管模型执行阶段被拒绝，
+  而不是作为 Observer 请求计账。跨 query/header 的混合凭据亦可能由原生 provider 接管，
+  然后在同一模型边界被拒绝；不影响独立的非模型认证。
   不读取宿主密钥库、不改变 provider 顺序抢认证；部署时必须使用不同明文并只发
-  一套一致凭据。不要把“客户端得到 200”误当作“已受 Observer 额度管理”。
+  一套一致凭据。已知未覆盖路径的 200 不代表已受 Observer 额度管理。
 - 插件被宿主卸载/停用后不能拦截请求，CPA 的非持久化用量队列也不能保证
   热替换/崩溃时所有事件交付。停流升级、检查待记账与 unknown 标记仍然必要。
 
@@ -107,6 +115,10 @@ field 为 `model|key_id|provider|auth_index`，返回
   终态 Key 再编辑/启用/轮换/重置/恢复 → 410。
   `GET /keys?include_deleted=true` 包含墓碑，默认排除。
   旧 `DELETE /keys` 仍为可轮换后再用的撤销，不改成终态删除。
+- Key 管理响应增加 `secret` 当前明文字段，可在列表和详情反复复制，重启后仍可读取。
+  创建/轮换仍保留顶层 `secret`。禁用保留明文，撤销/删除清空明文和认证哈希。
+  旧 hash-only 行无法恢复，显示未保存并提示重新生成；也可备份后使用新库重新创建。
+  客户端明文不写浏览器持久存储/URL/日志，不加入请求、汇总、facets 或健康响应。
 - 设置增加 `capture_mode=off|headers|headers_and_body` 和
   `capture_retention_seconds`（60..raw_retention_hours×3600）。
   旧客户端只发 bool 时：false→off，true 只在原来 off 时启用 body，
@@ -138,14 +150,16 @@ preview、Snapshot、Quote 使用同一个 resolver；原因/候选/缺失费率
    当作用量回调已落盘。
 2. 备份**整个数据目录**与匹配旧插件二进制，并核实可读取；
    保留中断标记等关联文件。不要在线普通复制正在写入的 bbolt 文件。
-3. 使用 v0.8.0 替换插件后启动。保持原 DB 路径，不创建新空库掩盖升级失败。
+3. 部署前先解决模型入口覆盖问题。数据可继续使用原 schema2 库，也可按用户允许
+   在停流备份后显式换用全新空库、重新创建客户端 Key；不自动删除旧文件。
 4. 检查 Key 身份/累计、旧费用、内容模式和健康。旧 schema2 增量补建索引，
    按 1000 条明细一批回填新增细分字段及小时汇总；事务 checkpoint 可续接，
    不再次累加旧四项汇总、重计额度或重新报价。已不在库中的细分不可重建。
-5. 遇到打开/维护失败先停止写入并保留证据。高于 `observer_features=1` 的库会在
+5. 新写入功能标记为 `observer_features=2`；高于 2 的库会在
    可写打开前拒绝；旧无 schema2 的非空异构库仍拒绝，不就地迁移。
 6. 如需回退，停止新版本，恢复第 2 步的一致备份及对应旧二进制。
-   **不能直接让旧 v0.7 写新库**：旧版不认识功能/内容索引标记，也未保证拒绝。
+   **不能直接让旧版本写新库**：v0.8 支持 feature1，会拒绝 feature2；
+   v0.7 不认识功能/内容索引标记，也未保证拒绝。
    恢复旧备份意味着放弃升级后数据，必须先导出/保全所需证据并明确接受该代价。
 
 `TestUpgradeFromActualV070PreservesLedgerAndCredentials` 从固定旧 commit

@@ -38,8 +38,10 @@ session affinity remain untouched. SDK baseline v8.0.30, schema 6 minimum.
 - Reset selected windows to now/zero; it must never clear an accounting failure
   unless all pending events are durably stored. Usage may overshoot after an
   admitted concurrent request; no speculative reservation/precharge.
-- Authentication principal = `observer:<key ID>`. Only SHA-256 secret hashes
-  persist, random >=256-bit material, plaintext revealed only on create/rotate.
+- Authentication principal = `observer:<key ID>`. SHA-256 hashes authenticate;
+  the user-authorized current client secret also persists for repeated internal
+  management display/copy. Revoke/delete clear both, disable retains them.
+  Stable IDs are not credentials. Feature marker 2 prevents feature-1 writers.
 - RequestInterceptRequest.RequestID is the admission ID; UsageRecord.RequestID
   is an execution ID (retries can have multiple IDs). TraceID correlates them.
   Charge every distinct execution once; replay never charges twice. Key cycles
@@ -151,6 +153,7 @@ type KeySpec struct {
 }
 type Key struct {
     ID string `json:"id"`; KeySpec // embedded flat JSON
+    Secret string `json:"secret,omitempty"` // authenticated management display
     Used Limits `json:"used"`; Starts Windows `json:"starts"`; Resets Windows `json:"resets"`
     Active int `json:"active"`; BlockedReason string `json:"blocked_reason,omitempty"`
     CreatedAt time.Time `json:"created_at"`
@@ -271,10 +274,13 @@ Resource shell may be public, but all data authenticated.
 
 Plugin frontend auth extracts bearer/x-api-key/x-goog-api-key and supported
 query key/auth_token, disallows conflicting material. Authentication is
-nonexclusive and only recognizes finite supported operations. Unknown/native
-scopes are unchanged. Once authenticated as owned generation, admission fails
-closed across reconfiguration/store failures. Anonymous/no-native-provider and
-duplicate/mixed-key limitations are explicit in the reconstruction guide.
+nonexclusive and only recognizes finite supported operations. Non-model routes
+stay unchanged, but native/unknown scopes on guarded model execution paths now
+fail with 403. Authenticated owned generation fails closed across reconfiguration/
+store failures. Unsupported intercepted model surfaces are denied, not billed.
+Host Live/Realtime/Alpha Search paths skip this hook: all-route enforcement is
+blocked, not solved by merely listing their paths. See docs/model-policy.md.
+Anonymous/no-native-provider and duplicate/mixed-key limitations remain explicit.
 An unloaded plugin cannot enforce its own authentication or admission.
 Before-interceptor validates principal metadata, makes admission once;
 after-interceptor no-op. Complete releases by RequestID. Do not mutate or

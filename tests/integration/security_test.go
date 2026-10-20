@@ -170,8 +170,16 @@ func TestKeyAuthenticationCoexistenceAndInvalidation(t *testing.T) {
 	}
 	logs := []byte(h.stdout.String() + h.stderr.String())
 	for _, secret := range []string{created.Secret, rotated.Secret, mgmtKey, upstreamKey} {
-		if bytes.Contains(db, []byte(secret)) || bytes.Contains(logs, []byte(secret)) {
-			t.Fatal("plaintext credential in database/logs")
+		if bytes.Contains(logs, []byte(secret)) {
+			t.Fatal("plaintext credential in logs")
+		}
+	}
+	// Client material is intentionally persisted for management; bbolt's freed
+	// pages are not securely erased by revocation. Host/upstream credentials,
+	// unlike managed client secrets, must never enter this database.
+	for _, secret := range []string{mgmtKey, upstreamKey} {
+		if bytes.Contains(db, []byte(secret)) {
+			t.Fatal("host or upstream credential in database")
 		}
 	}
 }
