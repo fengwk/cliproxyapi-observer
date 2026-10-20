@@ -83,7 +83,7 @@ func (s *Service) Observe(model, provider string) {
 	if admitted {
 		s.observed[k] = struct{}{}
 	}
-	miss := s.config.Auto && s.effective(model, provider).Source == "unpriced"
+	miss := s.config.Auto && s.resolveLocked(model, provider).source == "unpriced"
 	// One global cooldown also bounds storms from many different missing IDs.
 	queue := miss && admitted && time.Since(s.lastAttempt) >= time.Minute
 	s.mu.Unlock()

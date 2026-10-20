@@ -7,19 +7,27 @@ import (
 	"time"
 )
 
-func (s *Service) effective(model, provider string) Quote {
-	for _, p := range s.config.Prices {
-		if p.Model == model {
-			return Quote{Source: "manual", Rates: cloneRates(p.Rates)}
-		}
+func requiredMissing(t Tokens, rates Rates, missing map[string]bool) []string {
+	out := []string{}
+	output := t.Output
+	if rates.Reasoning != nil {
+		output -= t.Reasoning
 	}
-	if s.config.Auto {
-		if r, ok := lookup(s.catalog, model, provider); ok {
-			return Quote{Source: "auto", Rates: cloneRates(r)}
-		}
+	if t.Input > 0 && missing[rateInput] {
+		out = append(out, rateInput)
 	}
-	return Quote{Source: "unpriced"}
+	if output > 0 && missing[rateOutput] {
+		out = append(out, rateOutput)
+	}
+	if t.CacheRead > 0 && missing[rateCacheRead] {
+		out = append(out, rateCacheRead)
+	}
+	if t.CacheWrite > 0 && missing[rateCacheWrite] {
+		out = append(out, rateCacheWrite)
+	}
+	return out
 }
+
 func (s *Service) Quote(model, provider string, t Tokens, at time.Time) (Quote, error) {
 	for _, v := range []int64{t.Input, t.Output, t.CacheRead, t.CacheWrite, t.Reasoning, t.Total} {
 		if v < 0 {
@@ -35,7 +43,8 @@ func (s *Service) Quote(model, provider string, t Tokens, at time.Time) (Quote, 
 	prompt.Add(prompt, big.NewInt(t.CacheRead))
 	prompt.Add(prompt, big.NewInt(t.CacheWrite))
 	s.mu.Lock()
-	q := s.effective(model, provider)
+	res := s.resolveLocked(model, provider)
+	ruleID := ""
 	for _, r := range s.config.Rules {
 		if r.Model != model || (r.InputTokensGT != nil && prompt.Cmp(big.NewInt(*r.InputTokensGT)) <= 0) {
 			continue
@@ -48,10 +57,30 @@ func (s *Service) Quote(model, provider string, t Tokens, at time.Time) (Quote, 
 				continue
 			}
 		}
-		q = Quote{Source: "rule", RuleID: r.ID, Rates: cloneRates(r.Rates)}
+		res = resolution{source: "rule", match: matchRule, reason: reasonRule, rates: cloneRates(r.Rates)}
+		ruleID = r.ID
 		break
 	}
+	if res.source == "auto" {
+		applyTier(&res, prompt)
+	}
+	required := []string(nil)
+	if res.source == "auto" || res.source == "manual" || res.source == "rule" {
+		required = requiredMissing(t, res.rates, missingSet(res.missing))
+	}
+	if len(required) > 0 {
+		res.source, res.reason, res.rates, res.missing = "unpriced", reasonMissingRates, Rates{}, required
+	}
 	s.mu.Unlock()
+
+	q := Quote{
+		Source: res.source, RuleID: ruleID, Rates: cloneRates(res.rates), Reason: res.reason, Match: res.match,
+		CatalogProvider: res.catalogProvider, CatalogModel: res.catalogModel, CatalogTime: cloneTime(res.catalogTime),
+		MissingRates: cloneStrings(res.missing), Candidates: cloneCandidates(res.candidates),
+	}
+	if res.source == "unpriced" || len(required) > 0 {
+		return q, nil
+	}
 	output := t.Output
 	sum := new(big.Int)
 	add := func(rate, tokens int64) { sum.Add(sum, new(big.Int).Mul(big.NewInt(rate), big.NewInt(tokens))) }
@@ -71,24 +100,24 @@ func (s *Service) Quote(model, provider string, t Tokens, at time.Time) (Quote, 
 	q.CostMicroUSD = sum.Int64()
 	return q, nil
 }
+
 func (s *Service) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := Snapshot{Prices: []Price{}, LastSync: s.lastSync, Error: s.lastError, Refreshing: s.flight != nil}
-	for identity := range s.catalog {
-		if identity.Provider != "" {
-			out.CatalogEntries++
-		}
+	for _, list := range s.catalog.exact {
+		out.CatalogEntries += len(list)
 	}
 	seen := map[string]bool{}
 	for k := range s.observed {
-		q := s.effective(k.Model, k.Provider)
-		out.Prices = append(out.Prices, Price{Model: k.Model, Provider: k.Provider, Rates: q.Rates, Source: q.Source})
+		q := s.resolveLocked(k.Model, k.Provider)
+		out.Prices = append(out.Prices, q.price(k.Model, k.Provider))
 		seen[k.Model] = true
 	}
 	for _, p := range s.config.Prices {
 		if !seen[p.Model] {
-			out.Prices = append(out.Prices, Price{Model: p.Model, Rates: cloneRates(p.Rates), Source: "manual"})
+			q := manualResolution(p)
+			out.Prices = append(out.Prices, q.price(p.Model, ""))
 		}
 	}
 	sort.Slice(out.Prices, func(i, j int) bool {
@@ -126,7 +155,7 @@ func (s *Service) Preview(models []ModelIdentity) ([]PreviewPrice, error) {
 		return nil, errInvalid
 	}
 	for _, model := range models {
-		if !validIdentity(model.Model) || len(model.Provider) > 1024 {
+		if !validIdentity(model.Model) || len(model.Provider) > 1024 || (model.Provider != "" && !validIdentity(model.Provider)) {
 			return nil, errInvalid
 		}
 	}
@@ -138,11 +167,8 @@ func (s *Service) Preview(models []ModelIdentity) ([]PreviewPrice, error) {
 	}
 	out := make([]PreviewPrice, 0, len(models))
 	for _, model := range models {
-		q := s.effective(model.Model, model.Provider)
-		out = append(out, PreviewPrice{
-			Price:    Price{Model: model.Model, Provider: model.Provider, Rates: q.Rates, Source: q.Source},
-			HasRules: rules[model.Model],
-		})
+		q := s.resolveLocked(model.Model, model.Provider)
+		out = append(out, PreviewPrice{Price: q.price(model.Model, model.Provider), HasRules: rules[model.Model]})
 	}
 	return out, nil
 }
