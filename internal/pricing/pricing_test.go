@@ -187,7 +187,7 @@ func TestCatalogAndNoNetworkQuote(t *testing.T) {
 		rate                    int64
 	}{
 		{"m", "openai", "auto", 1250000}, {"m", "other", "auto", 4000000},
-		{"m", "", "unpriced", 0}, {"openai/m(high)", "openai", "auto", 1250000},
+		{"m", "", "unpriced", 0}, {"openai/m(high)", "openai", "unpriced", 0},
 		{"dated", "", "unpriced", 0}, {"free", "", "auto", 0},
 	} {
 		q := quote(t, s, tc.model, tc.provider, Tokens{}, time.Now())
@@ -268,7 +268,7 @@ func TestPersistenceAndFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	bad, _ := NewService(DefaultConfig(), path, client)
-	if bad.Snapshot().Error == "" || len(bad.catalog) != 0 {
+	if bad.Snapshot().Error == "" || !bad.catalog.empty() {
 		t.Fatal("corrupt cache accepted")
 	}
 	// A non-directory parent deterministically fails even under root.

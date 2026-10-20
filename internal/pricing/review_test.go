@@ -58,8 +58,10 @@ func TestProviderSnapshotAndManualValidation(t *testing.T) {
 		{Model: "m", Provider: "a", Rates: Rates{Input: 1}}})
 	s.Observe("m", "b")
 	s.Observe("m", "a")
-	want := []Price{{Model: "m", Provider: "a", Source: "auto", Rates: Rates{Input: 1}},
-		{Model: "m", Provider: "b", Source: "auto", Rates: Rates{Input: 2}}}
+	want := []Price{
+		{Model: "m", Provider: "a", Source: "auto", Rates: Rates{Input: 1}, Match: matchProvider, CatalogProvider: "a", CatalogModel: "m"},
+		{Model: "m", Provider: "b", Source: "auto", Rates: Rates{Input: 2}, Match: matchProvider, CatalogProvider: "b", CatalogModel: "m"},
+	}
 	for i := 0; i < 20; i++ {
 		if got := s.Snapshot().Prices; !reflect.DeepEqual(got, want) {
 			t.Fatal(got)
@@ -117,8 +119,8 @@ func TestCatalogIndexExactAndAmbiguity(t *testing.T) {
 		if r, ok := lookup(index, "openai/m", "a"); !ok || r.Input != 1 {
 			t.Fatal(r, ok)
 		}
-		if r, ok := lookup(index, "m(high)", "a"); !ok || r.Input != 3 {
-			t.Fatal(r, ok)
+		if _, ok := lookup(index, "m(high)", "a"); ok {
+			t.Fatal("decorated identity must stay distinct")
 		}
 		entries[0], entries[2] = entries[2], entries[0]
 	}
