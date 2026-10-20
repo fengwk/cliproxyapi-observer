@@ -60,6 +60,14 @@ async function step(name, action) {
   }
 }
 async function shot(page, name) {
+  const env = activeEnvironment?.page === page ? activeEnvironment : null;
+  // Radix can have mounted the dialog before its first fade-in frame, even
+  // with reduced motion. Require the final rendered state, not an empty scan.
+  const settledDialog = () => env?.frame.waitForFunction(() => {
+    const dialog = document.querySelector('[role="dialog"]');
+    return !dialog || getComputedStyle(dialog).opacity === '1';
+  });
+  await settledDialog();
   const file = path.join('screenshots', name + '.png');
   if (name.startsWith('native-zoom-200')) {
     // Playwright's CSS-sized default screenshot clips the physical surface at
@@ -83,8 +91,9 @@ async function shot(page, name) {
   }
   const info = await fs.stat(path.join(args.reportDir, file));
   report.screenshots.push({ file, bytes: info.size });
-  if (activeEnvironment?.page === page) {
-    const contrast = await measureContrast(activeEnvironment.frame);
+  if (env) {
+    await settledDialog();
+    const contrast = await measureContrast(env.frame);
     check(name + ': rendered text and control contrast',
       contrast.texts > 0 && contrast.controls > 0 && contrast.failures.length === 0, JSON.stringify(contrast));
   }
