@@ -21,6 +21,7 @@ describe('KeysPage & ModelPicker Behavior Acceptance Tests', () => {
       {
         id: 'key_1234567890abcdef1234567890abcdef',
         label: '生产环境网关',
+        secret: 'sk-observer-current-secret-123456',
         enabled: true,
         expires_at: '2026-10-19T14:30:00.123456789Z',
         max_concurrent: 10,
@@ -64,23 +65,40 @@ describe('KeysPage & ModelPicker Behavior Acceptance Tests', () => {
           }
           if (opts.method === 'POST') {
             capturedPostBody = opts.body;
+            const spec = opts.body as { label: string; secret?: string };
+            const created = {
+              ...mockKeys[0],
+              id: 'key_created_behavior_1234567890',
+              label: spec.label,
+              secret: spec.secret || 'sk-observer-mock-auto-secret-123456',
+            };
+            mockKeys = [...mockKeys, created];
             return Promise.resolve({
-              key: { ...mockKeys[0], label: (opts.body as { label: string }).label },
-              secret: 'sk-observer-mock-auto-secret-123456',
+              key: created,
+              secret: created.secret,
             });
           }
           if (opts.method === 'PUT') {
             capturedPutBody = opts.body;
-            return Promise.resolve(mockKeys[0]);
+            const id = new URLSearchParams(path.split('?')[1] || '').get('id');
+            const index = mockKeys.findIndex((key) => key.id === id);
+            const updated = { ...mockKeys[index >= 0 ? index : 0], ...(opts.body as Partial<Key>) };
+            if (index >= 0) mockKeys[index] = updated;
+            return Promise.resolve(updated);
           }
           if (opts.method === 'DELETE') {
             return Promise.resolve({});
           }
         }
         if (path.startsWith('/keys/rotate?')) {
-          return Promise.resolve({
-            key: mockKeys[0],
+          const rotated = {
+            ...mockKeys[0],
             secret: 'sk-observer-mock-rotated-secret-654321',
+          };
+          mockKeys[0] = rotated;
+          return Promise.resolve({
+            key: rotated,
+            secret: rotated.secret,
           });
         }
         if (path.startsWith('/keys/reset?')) {
@@ -441,10 +459,10 @@ describe('KeysPage & ModelPicker Behavior Acceptance Tests', () => {
   });
 
   /**
-   * 10. secret关闭消失
-   * 意图：验证明文密钥仅在成功弹窗中短暂展示，用户点击关闭后彻底从 DOM 移除，且不写入 localStorage/sessionStorage。
+   * 10. secret持久可见
+   * 意图：验证明文密钥在成功弹窗关闭后仍由最新管理接口响应提供，保持可见且不写入浏览器 Storage。
    */
-  it('secret关闭消失: revealed secret is displayed transiently and cleared on close without persistence', async () => {
+  it('secret持久可见: current secret remains visible after closing the modal without browser persistence', async () => {
     render(<KeysPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
 
     await waitFor(() => {
@@ -453,7 +471,7 @@ describe('KeysPage & ModelPicker Behavior Acceptance Tests', () => {
 
     fireEvent.click(screen.getByText('+ 新建 Key'));
     const nameInput = screen.getByPlaceholderText('例如: 生产环境客户端 / 研发测试');
-    fireEvent.change(nameInput, { target: { value: 'SecretEphemeral' } });
+    fireEvent.change(nameInput, { target: { value: 'SecretPersistent' } });
     fireEvent.click(screen.getByRole('button', { name: '确认创建' }));
 
     await waitFor(() => {
@@ -462,25 +480,28 @@ describe('KeysPage & ModelPicker Behavior Acceptance Tests', () => {
 
     // 检查 sessionStorage 和 localStorage 没有保存密钥
     expect(window.sessionStorage.getItem('observer.management-key')).toBeNull();
+    expect(JSON.stringify({ ...window.sessionStorage, ...window.localStorage })).not.toContain(
+      'sk-observer-mock-auto-secret-123456'
+    );
 
-    // 点击关闭
-    fireEvent.click(screen.getByRole('button', { name: '我已安全保存密钥，关闭' }));
+    // 点击关闭后，列表仍展示管理接口返回的当前明文。
+    fireEvent.click(screen.getByRole('button', { name: '关闭并返回列表' }));
 
     await waitFor(() => {
-      expect(screen.queryByText('sk-observer-mock-auto-secret-123456')).not.toBeInTheDocument();
+      expect(screen.queryByRole('heading', { name: 'Key 创建成功' })).not.toBeInTheDocument();
     });
+    expect(screen.getByText('sk-observer-mock-auto-secret-123456')).toBeInTheDocument();
   });
 
   /**
    * 11. copy失败可见
    * 意图：当 navigator.clipboard.writeText 写入失败时，界面显示明确的失败提示，而不是虚假的“已复制”。
    */
-  it('copy失败可见: shows visible error feedback when clipboard copy fails instead of claiming copied', async () => {
+  it('copy失败可见: shows visible error feedback when actual secret copy fails instead of claiming copied', async () => {
     // 模拟剪贴板写入抛出拒绝异常
+    const writeText = vi.fn().mockRejectedValue(new Error('Clipboard access denied'));
     Object.assign(navigator, {
-      clipboard: {
-        writeText: vi.fn().mockRejectedValue(new Error('Clipboard access denied')),
-      },
+      clipboard: { writeText },
     });
 
     render(<KeysPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
@@ -489,8 +510,11 @@ describe('KeysPage & ModelPicker Behavior Acceptance Tests', () => {
       expect(screen.getByText('生产环境网关')).toBeInTheDocument();
     });
 
-    const copyBtn = screen.getByTitle('复制内部 ID');
+    const copyBtn = screen.getByTitle('复制密钥');
     fireEvent.click(copyBtn);
+
+    // 验证尝试复制的是实际明文，而非内部 ID
+    expect(writeText).toHaveBeenCalledWith('sk-observer-current-secret-123456');
 
     // 验证出现可见的失败提示
     await waitFor(() => {
@@ -499,6 +523,7 @@ describe('KeysPage & ModelPicker Behavior Acceptance Tests', () => {
 
     // 验证按钮上绝对不会显示“已复制”
     expect(screen.queryByText('已复制')).not.toBeInTheDocument();
+    expect(screen.queryByText('已复制密钥')).not.toBeInTheDocument();
   });
 
   /**

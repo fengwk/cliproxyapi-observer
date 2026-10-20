@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { KeysPage } from './KeysPage';
 import type { ApiClient } from '../lib/api';
 import type { Key } from '../lib/types';
@@ -14,6 +14,7 @@ describe('KeysPage', () => {
       {
         id: 'key_1234567890abcdef1234567890abcdef',
         label: '生产环境网关',
+        secret: 'sk-observer-current-secret-123456',
         enabled: true,
         expires_at: '2026-10-19T14:30:00.123456789Z',
         max_concurrent: 10,
@@ -53,25 +54,43 @@ describe('KeysPage', () => {
       request: vi.fn().mockImplementation((path: string, opts?: { method?: string; body?: unknown }) => {
         if (path === '/keys' || path.startsWith('/keys?')) {
           if (!opts?.method || opts.method === 'GET') {
-            return Promise.resolve({ items: mockKeys });
+            return Promise.resolve({ items: mockKeys.map((key) => ({ ...key })) });
           }
           if (opts.method === 'POST') {
-            return Promise.resolve({
-              key: { ...mockKeys[0], label: (opts.body as { label: string }).label },
+            const body = opts.body as { label: string };
+            const created = {
+              ...mockKeys[0],
+              id: 'key_created_1234567890abcdef',
+              label: body.label,
               secret: 'sk-observer-mock-auto-secret-123456',
+            };
+            mockKeys = [...mockKeys, created];
+            return Promise.resolve({
+              key: created,
+              secret: created.secret,
             });
           }
           if (opts.method === 'PUT') {
-            return Promise.resolve(mockKeys[0]);
+            const body = opts.body as Partial<Key>;
+            const id = new URLSearchParams(path.split('?')[1] || '').get('id');
+            const index = mockKeys.findIndex((key) => key.id === id);
+            const updated = { ...mockKeys[index >= 0 ? index : 0], ...body };
+            if (index >= 0) mockKeys[index] = updated;
+            return Promise.resolve(updated);
           }
           if (opts.method === 'DELETE') {
             return Promise.resolve({});
           }
         }
         if (path.startsWith('/keys/rotate?')) {
-          return Promise.resolve({
-            key: mockKeys[0],
+          const rotated = {
+            ...mockKeys[0],
             secret: 'sk-observer-mock-rotated-secret-654321',
+          };
+          mockKeys[0] = rotated;
+          return Promise.resolve({
+            key: rotated,
+            secret: rotated.secret,
           });
         }
         if (path.startsWith('/keys/reset?')) {
@@ -86,7 +105,7 @@ describe('KeysPage', () => {
     };
   });
 
-  it('renders keys table with name-led columns, masked ID, and explicit unlimited quotas', async () => {
+  it('renders keys table with name-led columns, full actual secret, and explicit unlimited quotas', async () => {
     render(<KeysPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
 
     // Wait for keys to load
@@ -94,8 +113,10 @@ describe('KeysPage', () => {
       expect(screen.getByText('生产环境网关')).toBeInTheDocument();
     });
 
-    // Masked ID: key_1234...abcdef
-    expect(screen.getByText(/key_1234\.\.\.abcdef/)).toBeInTheDocument();
+    // The 密钥 column contains the actual credential, never a masked internal ID.
+    expect(screen.getByRole('columnheader', { name: '密钥' })).toBeInTheDocument();
+    expect(screen.getByText('sk-observer-current-secret-123456')).toBeInTheDocument();
+    expect(screen.queryByText(/key_1234\.\.\.abcdef/)).not.toBeInTheDocument();
 
     // 4 compact quota lines: month limit is 0 so should display '不限', not $0 / $0
     expect(screen.getByText(/\$1\.5 \/ \$5/)).toBeInTheDocument();
@@ -106,7 +127,7 @@ describe('KeysPage', () => {
     expect(screen.getByText('2 个指定模型')).toBeInTheDocument();
   });
 
-  it('creates new key and displays revealed secret transiently, clearing on close', async () => {
+  it('creates new key, keeps the secret visible after modal close and list reload', async () => {
     render(<KeysPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
 
     await waitFor(() => {
@@ -125,16 +146,27 @@ describe('KeysPage', () => {
     // Submit auto-generated key
     fireEvent.click(screen.getByRole('button', { name: '确认创建' }));
 
-    // Wait for secret revealed modal
+    // Wait for success modal, which now points to the persistent list view.
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'Key 创建成功' })).toBeInTheDocument();
     });
-    expect(screen.getByText('sk-observer-mock-auto-secret-123456')).toBeInTheDocument();
+    const successDialog = screen.getByRole('dialog', { name: 'Key 创建成功' });
+    expect(within(successDialog).getByText('sk-observer-mock-auto-secret-123456')).toBeInTheDocument();
+    expect(screen.getByText(/仍可在 Key 列表的“密钥”列随时查看并复制/)).toBeInTheDocument();
 
-    // Close revealed modal -> secret is removed from DOM
-    fireEvent.click(screen.getByRole('button', { name: '我已安全保存密钥，关闭' }));
+    // Closing only dismisses the modal; the current management response remains the source of truth.
+    fireEvent.click(screen.getByRole('button', { name: '关闭并返回列表' }));
     await waitFor(() => {
-      expect(screen.queryByText('sk-observer-mock-auto-secret-123456')).not.toBeInTheDocument();
+      expect(screen.queryByRole('heading', { name: 'Key 创建成功' })).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByText('sk-observer-mock-auto-secret-123456')).toBeInTheDocument();
+    });
+
+    // Refresh is a normal GET /keys; the secret must persist rather than becoming one-time material.
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }));
+    await waitFor(() => {
+      expect(screen.getByText('sk-observer-mock-auto-secret-123456')).toBeInTheDocument();
     });
   });
 
@@ -174,7 +206,7 @@ describe('KeysPage', () => {
     });
   });
 
-  it('rotates key independently and reveals new secret', async () => {
+  it('rotates key and keeps the latest secret in the list after closing and reloading', async () => {
     render(<KeysPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
 
     await waitFor(() => {
@@ -190,7 +222,22 @@ describe('KeysPage', () => {
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'Key 轮转成功' })).toBeInTheDocument();
     });
-    expect(screen.getByText('sk-observer-mock-rotated-secret-654321')).toBeInTheDocument();
+    const successDialog = screen.getByRole('dialog', { name: 'Key 轮转成功' });
+    expect(within(successDialog).getByText('sk-observer-mock-rotated-secret-654321')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '关闭并返回列表' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { name: 'Key 轮转成功' })).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByText('sk-observer-mock-rotated-secret-654321')).toBeInTheDocument();
+      expect(screen.queryByText('sk-observer-current-secret-123456')).not.toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }));
+    await waitFor(() => {
+      expect(screen.getByText('sk-observer-mock-rotated-secret-654321')).toBeInTheDocument();
+    });
   });
 
   it('handles reset quota confirmation with honest accounting warnings', async () => {
@@ -213,5 +260,54 @@ describe('KeysPage', () => {
         expect.objectContaining({ method: 'POST' })
       );
     });
+  });
+
+  it('copies the actual current secret from both the list and the details dialog', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+
+    render(<KeysPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('生产环境网关')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTitle('复制密钥'));
+    await waitFor(() => {
+      expect(writeText).toHaveBeenLastCalledWith('sk-observer-current-secret-123456');
+    });
+    expect(screen.getByText('已复制密钥')).toBeInTheDocument();
+
+    // Details is still available from the key name, but its primary copy action is the secret.
+    fireEvent.click(screen.getByTitle('查看 Key 详情'));
+    const dialog = await screen.findByRole('dialog', { name: /Key 详情: 生产环境网关/ });
+    expect(within(dialog).queryByText(/内部 ID/)).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByTitle('复制密钥'));
+    await waitFor(() => {
+      expect(writeText).toHaveBeenLastCalledWith('sk-observer-current-secret-123456');
+    });
+  });
+
+  it('shows honest unavailable text and no copy action for a legacy row without plaintext', async () => {
+    mockKeys.push({
+      ...mockKeys[0],
+      id: 'key_legacy_hash_only',
+      label: '历史哈希 Key',
+      secret: undefined,
+    });
+
+    render(<KeysPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('历史哈希 Key')).toBeInTheDocument();
+    });
+
+    const legacyRow = screen.getByText('历史哈希 Key').closest('tr');
+    expect(legacyRow).not.toBeNull();
+    if (legacyRow) {
+      expect(within(legacyRow).getByText('未保存明文，请重新生成')).toBeInTheDocument();
+      expect(within(legacyRow).queryByTitle('复制密钥')).not.toBeInTheDocument();
+      expect(within(legacyRow).queryByText('key_legacy_hash_only')).not.toBeInTheDocument();
+    }
   });
 });

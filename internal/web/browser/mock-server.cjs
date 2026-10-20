@@ -112,6 +112,13 @@ function publicKey(key) {
   return out;
 }
 
+function managementKey(state, key) {
+  const out = publicKey(key);
+  const secret = state.secretValues.get(key.id);
+  if (typeof secret === 'string' && secret.length > 0) out.secret = secret;
+  return out;
+}
+
 function defaultCatalogControl() {
   return {
     token_delay_ms: 0,
@@ -403,6 +410,7 @@ function createState(options) {
     pricesLastSync: iso(now - 15 * 60 * 1000),
     catalogEntries: 150,
     secrets: new Map(),
+    secretValues: new Map(),
     nextKey: 1,
     counters: {
       priceRefreshes: 0,
@@ -421,6 +429,8 @@ function createState(options) {
   for (const k of state.keys) {
     const rawSecret = SECRET_PREFIX + k.id;
     state.secrets.set(k.id, crypto.createHash('sha256').update(rawSecret).digest('hex'));
+    // key-legacy models a historical hash-only row whose plaintext is genuinely unavailable.
+    if (k.id !== 'key-legacy') state.secretValues.set(k.id, rawSecret);
   }
   return state;
 }
@@ -1033,6 +1043,7 @@ function createServer(options) {
     state.catalogControl = fresh.catalogControl;
     state.pricesLastSync = fresh.pricesLastSync;
     state.secrets = fresh.secrets;
+    state.secretValues = fresh.secretValues;
     state.nextKey = fresh.nextKey;
     // 保持 startServer() 返回的 counters 引用有效。
     Object.assign(state.counters, fresh.counters);
@@ -1300,7 +1311,7 @@ function createServer(options) {
       if (suffix === '/keys') {
         if (req.method === 'GET') {
           for (const key of url.searchParams.keys()) if (key !== 'include_deleted' || url.searchParams.getAll(key).length !== 1 || !['true', 'false'].includes(url.searchParams.get(key))) throw failure(400, 'invalid_query', 'invalid include_deleted');
-          sendJson(res, 200, { items: state.keys.filter(key => !key.deleted_at || url.searchParams.get('include_deleted') === 'true').map(publicKey) });
+          sendJson(res, 200, { items: state.keys.filter(key => !key.deleted_at || url.searchParams.get('include_deleted') === 'true').map(key => managementKey(state, key)) });
           return;
         }
         if (req.method === 'POST') {
@@ -1327,8 +1338,9 @@ function createServer(options) {
           });
           state.keys.push(key);
           state.secrets.set(id, digest);
+          state.secretValues.set(id, secret);
           state.counters.keyCreates += 1;
-          sendJson(res, 201, { key: publicKey(key), secret });
+          sendJson(res, 201, { key: managementKey(state, key), secret });
           return;
         }
         if (req.method === 'PUT') {
@@ -1345,7 +1357,7 @@ function createServer(options) {
             allowed_models: spec.allowed_models,
             limits: spec.limits
           });
-          sendJson(res, 200, publicKey(key));
+          sendJson(res, 200, managementKey(state, key));
           return;
         }
         if (req.method === 'DELETE') {
@@ -1356,6 +1368,7 @@ function createServer(options) {
           key.active = 0;
           key.blocked_reason = 'revoked';
           state.secrets.delete(key.id);
+          state.secretValues.delete(key.id);
           state.counters.keyRevokes += 1;
           res.writeHead(204, {
             'Cache-Control': 'no-store',
@@ -1373,7 +1386,7 @@ function createServer(options) {
         const key = findKey(state, parseQueryID(url, 'delete'), true);
         if (key.active > 0) throw failure(409, 'busy', 'resource busy');
         key.deleted_at ||= iso(Date.now()); key.enabled = false; key.revoked = true;
-        state.secrets.delete(key.id); res.writeHead(204); res.end(); return;
+        state.secrets.delete(key.id); state.secretValues.delete(key.id); res.writeHead(204); res.end(); return;
       }
       if (suffix === '/keys/rotate') {
         requireMethod(req, 'POST');
@@ -1389,9 +1402,10 @@ function createServer(options) {
         if (owner === id) throw failure(400, 'invalid_key', 'new key must differ');
         if (owner) throw failure(409, 'conflict', 'client key already exists');
         state.secrets.set(key.id, digest);
+        state.secretValues.set(key.id, secret);
         key.secret_rotated_at = iso(Date.now());
         state.counters.keyRotates += 1;
-        sendJson(res, 200, { key: publicKey(key), secret });
+        sendJson(res, 200, { key: managementKey(state, key), secret });
         return;
       }
 
@@ -1409,7 +1423,7 @@ function createServer(options) {
           key.resets[window] = at;
         }
         state.counters.keyResets += 1;
-        sendJson(res, 200, publicKey(key));
+        sendJson(res, 200, managementKey(state, key));
         return;
       }
 
@@ -1424,7 +1438,7 @@ function createServer(options) {
         key.blocked_reason = '';
         key.recovered_at = iso(Date.now());
         state.counters.keyRecovers += 1;
-        sendJson(res, 200, publicKey(key));
+        sendJson(res, 200, managementKey(state, key));
         return;
       }
 

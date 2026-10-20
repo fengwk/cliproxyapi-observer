@@ -33,6 +33,8 @@ export interface KeySpec {
 export interface Key {
   id: string;
   label: string;
+  /** Actual client credential; absent/empty for legacy hash-only rows. */
+  secret?: string;
   enabled: boolean;
   expires_at?: string | null;
   max_concurrent: number;

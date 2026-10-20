@@ -352,7 +352,7 @@ export function KeyEditor({ keyData, api, onClose, onSuccess }: KeyEditorProps) 
                     </Notice>
                   )}
                   <span style={{ fontSize: '0.78rem', color: 'var(--text-tertiary)' }}>
-                    规范: 8..256 个可见 ASCII 字符 (U+0021..007E)，禁止空格。系统仅存储哈希，不会明文持久化。
+                    规范: 8..256 个可见 ASCII 字符 (U+0021..007E)，禁止空格。明文密钥会保存在本机管理数据库中，可在 Key 列表中随时查看和复制。
                   </span>
                 </div>
               )}
