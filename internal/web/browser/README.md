@@ -104,7 +104,8 @@ Mock 模式覆盖桌面 1280、手机 390 与暖灰/纯白/深色/跟随系统�
 
 ## 资源与 mock 合约
 
-资源从 `internal/web/dist/{index.html,ui.js,ui.css,theme.js}` 读取，与 Go 嵌入资源一致。
+资源从 `internal/web/dist/{ui.html,ui.js,ui.css,theme.js}` 读取，与 Go 嵌入资源一致；
+Vite 构建结束时将入口 `index.html` 重命名为 `ui.html`。
 公开固定路由为资源/管理前缀下的 `/ui`、`/ui/`、`/ui.js`、`/ui.css`、`/theme.js`，
 携带相同 CSP、内容类型和 `no-store`。管理数据必须通过 Bearer 管理认证。
 不存在单独的 `settings.js` / `models.js` 或任意文件目录服务。
