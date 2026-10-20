@@ -137,6 +137,26 @@ describe('SettingsPage', () => {
     expect(screen.getAllByText('15.0 MB').length).toBeGreaterThanOrEqual(1);
   });
 
+  it('omits the redundant page title and jump links, and exposes logout at the bottom', async () => {
+    const onLogout = vi.fn();
+    const { container } = render(
+      <SettingsPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} onLogout={onLogout} />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('observer-settings')).toBeDefined();
+    });
+
+    expect(screen.queryByRole('heading', { level: 1, name: '设置' })).toBeNull();
+    expect(container.querySelector('a[href^="#settings-"]')).toBeNull();
+
+    const logout = screen.getByTestId('settings-logout');
+    expect(logout).toHaveTextContent('退出');
+    fireEvent.click(logout);
+    // Settings delegates storage clearing/confirmation to App.
+    expect(onLogout).toHaveBeenCalledTimes(1);
+  });
+
   // Test section draft isolation: saving General does NOT save unsaved Pricing drafts
   it('enforces section draft isolation: saving general settings preserves confirmed pricing', async () => {
     render(<SettingsPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);

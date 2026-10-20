@@ -12,6 +12,7 @@ export interface PageProps {
   api: ApiClient;
   refreshInterval?: number; // Requests only: seconds; zero disables its timer.
   onDirtyChange: (dirty: boolean) => void;
+  onLogout?: () => void; // Settings only: App owns confirmation and storage clearing.
 }
 
 export interface ApiClientOptions {
