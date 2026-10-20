@@ -3,7 +3,7 @@ import type { PageProps } from '../lib/api';
 import type { Key } from '../lib/types';
 import { formatUSD, formatDateTime, errorMessage } from '../lib/format';
 import { Button, Input, Select, Badge, Notice, EmptyState } from '../components/ui';
-import { copyToClipboard, maskId } from './KeysHelpers';
+import { copyToClipboard } from './KeysHelpers';
 import { KeyEditor, type RevealedSecretState } from './KeysEditor';
 import {
   RotateKeyModal,
@@ -201,7 +201,7 @@ export function KeysPage({ api, onDirtyChange }: KeysPageProps) {
       list = list.filter(
         (k) =>
           (k.label && k.label.toLowerCase().includes(q)) ||
-          k.id.toLowerCase().includes(q)
+          (typeof k.secret === 'string' && k.secret.toLowerCase().includes(q))
       );
     }
 
@@ -249,7 +249,7 @@ export function KeysPage({ api, onDirtyChange }: KeysPageProps) {
       >
         <div style={{ flex: '1 1 240px', minWidth: '180px' }}>
           <Input
-            placeholder="搜索名称或内部 ID..."
+            placeholder="搜索名称或密钥..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             aria-label="搜索 Key"
@@ -324,7 +324,7 @@ export function KeysPage({ api, onDirtyChange }: KeysPageProps) {
             <thead>
               <tr>
                 <th>名称 / 状态</th>
-                <th>内部 ID</th>
+                <th style={{ width: '230px' }}>密钥</th>
                 <th>额度使用 (已用 / 限额)</th>
                 <th>并发限制</th>
                 <th>模型权限</th>
@@ -345,7 +345,22 @@ export function KeysPage({ api, onDirtyChange }: KeysPageProps) {
                     <td>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                          <strong style={{ fontSize: '0.95rem' }}>{k.label || '(未命名)'}</strong>
+                          <button
+                            type="button"
+                            onClick={() => setActiveModal({ type: 'details', key: k })}
+                            title="查看 Key 详情"
+                            style={{
+                              border: 'none',
+                              background: 'transparent',
+                              padding: 0,
+                              font: 'inherit',
+                              color: 'inherit',
+                              cursor: 'pointer',
+                              textAlign: 'left',
+                            }}
+                          >
+                            <strong style={{ fontSize: '0.95rem' }}>{k.label || '(未命名)'}</strong>
+                          </button>
                           {isDeleted ? (
                             <Badge tone="danger">已删除</Badge>
                           ) : isRevoked ? (
@@ -373,31 +388,41 @@ export function KeysPage({ api, onDirtyChange }: KeysPageProps) {
                       </div>
                     </td>
 
-                    {/* Masked Internal ID + Copy ID */}
+                    {/* Full client secret + copy (never an internal ID) */}
                     <td>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                        <button
-                          type="button"
-                          className="cpa-code"
-                          style={{
-                            border: 'none',
-                            cursor: 'pointer',
-                            textAlign: 'left',
-                          }}
-                          onClick={() => setActiveModal({ type: 'details', key: k })}
-                          title="点击查看详细信息"
-                        >
-                          {maskId(k.id)}
-                        </button>
-                        <Button
-                          variant="ghost"
-                          style={{ padding: '0.2rem 0.4rem', minHeight: 'auto', fontSize: '0.75rem' }}
-                          onClick={() => handleCopy(k.id, k.id)}
-                          title="复制内部 ID"
-                        >
-                          {copiedId === k.id ? '已复制 ID' : '复制内部 ID'}
-                        </Button>
-                      </div>
+                      {typeof k.secret === 'string' && k.secret.length > 0 ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', minWidth: 0 }}>
+                          <div
+                            style={{
+                              fontFamily: 'var(--font-mono)',
+                              fontSize: '0.8rem',
+                              backgroundColor: 'var(--bg-tertiary)',
+                              borderRadius: 'var(--radius-sm)',
+                              padding: '0.3rem 0.4rem',
+                              maxHeight: '7rem',
+                              overflow: 'auto',
+                              whiteSpace: 'pre-wrap',
+                              overflowWrap: 'anywhere',
+                              wordBreak: 'break-all',
+                              userSelect: 'all',
+                            }}
+                          >
+                            {k.secret}
+                          </div>
+                          <Button
+                            variant="ghost"
+                            style={{ padding: '0.2rem 0.4rem', minHeight: 'auto', fontSize: '0.75rem', alignSelf: 'flex-start' }}
+                            onClick={() => handleCopy(k.secret as string, k.id)}
+                            title="复制密钥"
+                          >
+                            {copiedId === k.id ? '已复制密钥' : '复制密钥'}
+                          </Button>
+                        </div>
+                      ) : (
+                        <span style={{ fontSize: '0.8rem', color: 'var(--text-tertiary)' }}>
+                          未保存明文，请重新生成
+                        </span>
+                      )}
                     </td>
 
                     {/* Compact Quota Lines (Explicit Unlimited) */}

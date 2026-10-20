@@ -217,13 +217,15 @@ test('summary: bucket granularity, totals and filters', async () => {
   });
 });
 
-test('keys: fixed query-ID create/update/rotate/reset/recover/revoke with hashed-only secrets', async () => {
+test('keys: fixed query-ID create/update/rotate/reset/recover/revoke with persistent plaintext secrets', async () => {
   await withServer(async (server) => {
     const list = await json(server, '/keys');
     assert.equal(list.res.status, 200);
     assert.ok(Array.isArray(list.body.items));
     assert.ok(list.body.items.some((key) => key.label === mock.XSS.label));
-    assert.ok(list.body.items.every((key) => !('secret' in key) && !('secret_hash' in key)));
+    assert.ok(list.body.items.every((key) => !('secret_hash' in key)));
+    assert.equal(list.body.items.find((key) => key.id === 'key-alpha').secret, 'sk-key-alpha');
+    assert.equal(list.body.items.find((key) => key.id === 'key-legacy').secret, undefined);
     assert.ok(list.body.items.some((key) => key.id === 'key-legacy' && key.allowed_models.includes('retired-model-v0')));
     assert.ok(list.body.items.some((key) => key.id === 'key-blocked' && key.blocked_reason));
 
@@ -241,10 +243,11 @@ test('keys: fixed query-ID create/update/rotate/reset/recover/revoke with hashed
     assert.equal(created.res.status, 201);
     assert.match(created.body.secret, /^sk-[A-Za-z0-9]{48}$/);
     assert.equal(created.body.key.label, '合约测试 Key');
-    assert.equal(created.body.key.secret, undefined);
+    assert.equal(created.body.key.secret, created.body.secret);
     const id = created.body.key.id;
-    assert.ok(server.state.secrets.has(id), 'mock 只保存 secret 哈希');
+    assert.ok(server.state.secrets.has(id), 'mock 保存用于认证的 secret 哈希');
     assert.notEqual(server.state.secrets.get(id), created.body.secret);
+    assert.equal(server.state.secretValues.get(id), created.body.secret, 'mock 保存可再次读取的当前明文');
 
     const updated = await json(server, '/keys?id=' + encodeURIComponent(id), {
       method: 'PUT',
@@ -260,12 +263,15 @@ test('keys: fixed query-ID create/update/rotate/reset/recover/revoke with hashed
     assert.equal(updated.res.status, 200);
     assert.equal(updated.body.label, '合约测试 Key（已编辑）');
     assert.equal(updated.body.enabled, false);
+    assert.equal(updated.body.secret, created.body.secret, '禁用/编辑保留当前明文');
     assert.deepEqual(updated.body.allowed_models, []);
 
     const rotated = await json(server, '/keys/rotate?id=' + encodeURIComponent(id), { method: 'POST' });
     assert.equal(rotated.res.status, 200);
     assert.match(rotated.body.secret, /^sk-[A-Za-z0-9]{48}$/);
     assert.notEqual(rotated.body.secret, created.body.secret);
+    assert.equal(rotated.body.key.secret, rotated.body.secret, '轮转响应中的 key 也返回最新明文');
+    assert.equal(server.state.secretValues.get(id), rotated.body.secret);
 
     const reset = await json(server, '/keys/reset?id=' + encodeURIComponent(id), {
       method: 'POST',
@@ -274,6 +280,7 @@ test('keys: fixed query-ID create/update/rotate/reset/recover/revoke with hashed
     assert.equal(reset.res.status, 200);
     assert.equal(reset.body.used.five_hour, 0);
     assert.equal(reset.body.used.total, 0);
+    assert.equal(reset.body.secret, rotated.body.secret);
 
     const blocked = server.state.keys.find((key) => key.id === 'key-blocked');
     const beforeRecover = JSON.parse(JSON.stringify(blocked));
@@ -291,6 +298,7 @@ test('keys: fixed query-ID create/update/rotate/reset/recover/revoke with hashed
     });
     assert.equal(recovered.res.status, 200);
     assert.equal(recovered.body.blocked_reason, '');
+    assert.equal(recovered.body.secret, 'sk-key-blocked');
     assert.equal(server.counters.keyRecovers, 1);
     assert.deepEqual(recovered.body.used, beforeRecover.used, '恢复不得重置 used');
     assert.deepEqual(recovered.body.starts, beforeRecover.starts, '恢复不得重置 starts');
@@ -304,6 +312,14 @@ test('keys: fixed query-ID create/update/rotate/reset/recover/revoke with hashed
     assert.equal(revoked.status, 204);
     assert.equal(server.state.counters.keyRevokes, 1);
     assert.equal(server.state.secrets.has(id), false);
+    assert.equal(server.state.secretValues.has(id), false);
+    const afterRevoke = await json(server, '/keys');
+    assert.equal(afterRevoke.body.items.find((key) => key.id === id).secret, undefined, '撤销后不得返回旧明文');
+
+    const deleted = await json(server, '/keys/delete?id=' + encodeURIComponent(id), { method: 'POST' });
+    assert.equal(deleted.res.status, 204);
+    const afterDelete = await json(server, '/keys?include_deleted=true');
+    assert.equal(afterDelete.body.items.find((key) => key.id === id).secret, undefined, '删除后不得返回旧明文');
 
     const invalid = await json(server, '/keys', {
       method: 'POST',

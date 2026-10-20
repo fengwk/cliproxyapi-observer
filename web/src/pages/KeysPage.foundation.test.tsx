@@ -19,6 +19,7 @@ describe('KeysPage Foundation Features', () => {
       {
         id: 'key_active_123',
         label: '活跃服务 Key',
+        secret: 'sk-active-secret-123',
         enabled: true,
         revoked: false,
         created_at: '2026-01-01T00:00:00Z',
@@ -26,6 +27,7 @@ describe('KeysPage Foundation Features', () => {
       {
         id: 'key_disabled_456',
         label: '已禁用 Key',
+        secret: 'sk-disabled-secret-456',
         enabled: false,
         revoked: false,
         created_at: '2026-01-02T00:00:00Z',
@@ -57,6 +59,14 @@ describe('KeysPage Foundation Features', () => {
             (err as unknown as { status: number }).status = 409;
             return Promise.reject(err);
           }
+          const id = new URLSearchParams(path.split('?')[1] || '').get('id');
+          const key = mockKeys.find((item) => item.id === id);
+          if (key) {
+            key.deleted_at = '2026-10-21T00:00:00Z';
+            key.enabled = false;
+            key.revoked = true;
+            key.secret = undefined;
+          }
           return Promise.resolve(null);
         }
         if (path === '/keys' || path.startsWith('/keys?')) {
@@ -66,6 +76,12 @@ describe('KeysPage Foundation Features', () => {
               return Promise.resolve({ items: mockKeys });
             }
             return Promise.resolve({ items: mockKeys.filter((k) => !k.deleted_at) });
+          }
+          if (opts.method === 'PUT') {
+            const id = new URLSearchParams(path.split('?')[1] || '').get('id');
+            const key = mockKeys.find((item) => item.id === id);
+            if (key) Object.assign(key, opts.body);
+            return Promise.resolve(key || {});
           }
         }
         return Promise.resolve({});
@@ -183,7 +199,40 @@ describe('KeysPage Foundation Features', () => {
     expect(screen.getByRole('heading', { name: /删除 Key:/ })).toBeInTheDocument();
   });
 
-  it('filters keys by search input matching label or ID', async () => {
+  it('keeps the actual secret copy when disabling and removes it after permanent deletion', async () => {
+    render(<KeysPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('活跃服务 Key')).toBeInTheDocument();
+    });
+
+    const activeRow = screen.getByText('活跃服务 Key').closest('tr');
+    expect(activeRow).not.toBeNull();
+    expect(within(activeRow as HTMLElement).getByText('sk-active-secret-123')).toBeInTheDocument();
+    expect(within(activeRow as HTMLElement).getByTitle('复制密钥')).toBeInTheDocument();
+
+    // Reversible disable must reload the list with the same current secret.
+    fireEvent.click(activeRow!.querySelector('button[title="禁用此 Key"]') as HTMLButtonElement);
+    fireEvent.click(await screen.findByRole('button', { name: '确认禁用' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { name: /禁用 Key:/ })).not.toBeInTheDocument();
+    });
+
+    const disabledRow = screen.getByText('活跃服务 Key').closest('tr');
+    expect(disabledRow).not.toBeNull();
+    expect(within(disabledRow as HTMLElement).getByText('sk-active-secret-123')).toBeInTheDocument();
+    expect(within(disabledRow as HTMLElement).getByTitle('复制密钥')).toBeInTheDocument();
+
+    // Permanent deletion removes the credential material from the reloaded list.
+    fireEvent.click(disabledRow!.querySelector('button[title="永久删除此 Key"]') as HTMLButtonElement);
+    fireEvent.click(await screen.findByRole('button', { name: '确认永久删除' }));
+    await waitFor(() => {
+      expect(screen.queryByText('活跃服务 Key')).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText('sk-active-secret-123')).not.toBeInTheDocument();
+  });
+
+  it('filters keys by search input matching label or actual secret, never hidden internal ID', async () => {
     render(<KeysPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
 
     await waitFor(() => {
@@ -191,10 +240,15 @@ describe('KeysPage Foundation Features', () => {
       expect(screen.getByText('已禁用 Key')).toBeInTheDocument();
     });
 
-    const searchInput = screen.getByPlaceholderText('搜索名称或内部 ID...');
-    fireEvent.change(searchInput, { target: { value: 'disabled' } });
+    const searchInput = screen.getByPlaceholderText('搜索名称或密钥...');
+    fireEvent.change(searchInput, { target: { value: 'disabled-secret' } });
 
     expect(screen.queryByText('活跃服务 Key')).not.toBeInTheDocument();
     expect(screen.getByText('已禁用 Key')).toBeInTheDocument();
+
+    // Internal IDs drive mutations/history but are not a credential or a searchable display value.
+    fireEvent.change(searchInput, { target: { value: 'key_active_123' } });
+    expect(screen.queryByText('活跃服务 Key')).not.toBeInTheDocument();
+    expect(screen.getByText('未找到匹配的 Key')).toBeInTheDocument();
   });
 });

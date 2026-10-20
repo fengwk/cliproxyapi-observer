@@ -607,17 +607,33 @@ export function DetailsModal({ keyData, onClose, onCopy, copiedId, copyError }: 
         {copyError && <Notice tone="danger">{copyError}</Notice>}
 
         <div>
-          <span style={{ color: 'var(--text-secondary)' }}>完整内部 ID（用于记账关联，不可用于 API 认证）:</span>
-          <div className="cpa-secret-box" style={{ marginTop: '0.35rem' }}>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.85rem' }}>{keyData.id}</span>
-            <Button
-              variant="secondary"
-              style={{ padding: '0.25rem 0.6rem', minHeight: 'auto', fontSize: '0.8rem' }}
-              onClick={() => onCopy(keyData.id, 'details-id')}
-            >
-              {copiedId === 'details-id' ? '已复制 ID' : '复制内部 ID'}
-            </Button>
-          </div>
+          <span style={{ color: 'var(--text-secondary)' }}>客户端密钥:</span>
+          {typeof keyData.secret === 'string' && keyData.secret.length > 0 ? (
+            <div className="cpa-secret-box" style={{ marginTop: '0.35rem' }}>
+              <span
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: '0.85rem',
+                  wordBreak: 'break-all',
+                  userSelect: 'all',
+                }}
+              >
+                {keyData.secret}
+              </span>
+              <Button
+                variant="secondary"
+                style={{ padding: '0.25rem 0.6rem', minHeight: 'auto', fontSize: '0.8rem' }}
+                onClick={() => onCopy(keyData.secret as string, `details-${keyData.id}`)}
+                title="复制密钥"
+              >
+                {copiedId === `details-${keyData.id}` ? '已复制密钥' : '复制密钥'}
+              </Button>
+            </div>
+          ) : (
+            <div className="cpa-secret-box" style={{ marginTop: '0.35rem' }}>
+              <span style={{ color: 'var(--text-tertiary)' }}>未保存明文，请重新生成</span>
+            </div>
+          )}
         </div>
 
         <div className="cpa-form-grid cpa-form-grid-2">
@@ -821,9 +837,6 @@ export interface SecretRevealedModalProps {
 }
 
 export function SecretRevealedModal({ data, onClose, onCopy, copiedId, copyError }: SecretRevealedModalProps) {
-  const [hidden, setHidden] = useState(false);
-  const secretSpanRef = useRef<HTMLSpanElement | null>(null);
-
   return (
     <Modal
       title={data.action === 'create' ? 'Key 创建成功' : 'Key 轮转成功'}
@@ -831,16 +844,15 @@ export function SecretRevealedModal({ data, onClose, onCopy, copiedId, copyError
       size="md"
       footer={
         <Button variant="primary" onClick={onClose}>
-          我已安全保存密钥，关闭
+          关闭并返回列表
         </Button>
       }
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
         {copyError && <Notice tone="danger">{copyError}</Notice>}
 
-        <Notice tone="warning">
-          <strong>重要安全提示：</strong>
-          客户端明文密钥仅在本次展示一次，关闭后将无法再次查看或找回！请立即妥善保存。关闭后立即清除内存。
+        <Notice tone="info">
+          密钥已保存。关闭本窗口后，仍可在 Key 列表的“密钥”列随时查看并复制。
         </Notice>
 
         <div>
@@ -848,13 +860,9 @@ export function SecretRevealedModal({ data, onClose, onCopy, copiedId, copyError
             <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
               客户端密钥 ({data.label}):
             </span>
-            <span style={{ fontSize: '0.8rem', color: 'var(--text-tertiary)' }}>
-              格式为 sk-... (共 51 位)
-            </span>
           </div>
           <div className="cpa-secret-box">
             <span
-              ref={secretSpanRef}
               style={{
                 fontFamily: 'var(--font-mono)',
                 fontSize: '0.95rem',
@@ -864,44 +872,21 @@ export function SecretRevealedModal({ data, onClose, onCopy, copiedId, copyError
               }}
               aria-label="客户端明文密钥"
             >
-              {hidden ? '•••••••••••••••••••••••••••••••••••••••••••••••••••' : data.secret}
+              {data.secret}
             </span>
-            <div style={{ display: 'flex', gap: '0.35rem', flexShrink: 0 }}>
-              <Button
-                variant="ghost"
-                style={{ padding: '0.3rem 0.6rem', minHeight: 'auto', fontSize: '0.8rem' }}
-                onClick={() => setHidden(!hidden)}
-              >
-                {hidden ? '显示' : '隐藏'}
-              </Button>
-              <Button
-                variant="ghost"
-                style={{ padding: '0.3rem 0.6rem', minHeight: 'auto', fontSize: '0.8rem' }}
-                onClick={() => {
-                  if (secretSpanRef.current && typeof window !== 'undefined') {
-                    const range = document.createRange();
-                    range.selectNodeContents(secretSpanRef.current);
-                    const sel = window.getSelection();
-                    sel?.removeAllRanges();
-                    sel?.addRange(range);
-                  }
-                }}
-              >
-                全选文本
-              </Button>
-              <Button
-                variant="primary"
-                style={{ padding: '0.35rem 0.8rem', minHeight: 'auto' }}
-                onClick={() => onCopy(data.secret, 'revealed-secret')}
-              >
-                {copiedId === 'revealed-secret' ? '已复制' : '复制密钥'}
-              </Button>
-            </div>
+            <Button
+              variant="primary"
+              style={{ padding: '0.35rem 0.8rem', minHeight: 'auto', flexShrink: 0 }}
+              onClick={() => onCopy(data.secret, 'revealed-secret')}
+              title="复制密钥"
+            >
+              {copiedId === 'revealed-secret' ? '已复制密钥' : '复制密钥'}
+            </Button>
           </div>
         </div>
 
         <p style={{ fontSize: '0.82rem', color: 'var(--text-tertiary)', margin: 0 }}>
-          系统绝不会在浏览器 Storage、Cookie、日志或 URL 中保留明文密钥。
+          明文仅用于管理界面展示和复制，不会写入浏览器 Storage、Cookie、URL 或日志。
         </p>
       </div>
     </Modal>
