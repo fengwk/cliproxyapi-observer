@@ -11,13 +11,13 @@ export interface FilterState {
   status: '' | 'success' | 'failed';
 }
 
-export type PresetRange = 'today' | 'last7days' | 'custom';
+export type PresetRange = 'today' | 'last7days' | 'last30days' | 'custom';
+export type ViewTab = 'requests' | 'model' | 'key' | 'account' | 'provider';
 
 /**
  * Returns today's UTC date as YYYY-MM-DD.
  */
-export function getTodayUTCDateString(): string {
-  const now = new Date();
+export function getTodayUTCDateString(now: Date = new Date()): string {
   const year = now.getUTCFullYear();
   const month = String(now.getUTCMonth() + 1).padStart(2, '0');
   const day = String(now.getUTCDate()).padStart(2, '0');
@@ -27,9 +27,8 @@ export function getTodayUTCDateString(): string {
 /**
  * Returns the date N days before today in UTC as YYYY-MM-DD.
  */
-export function getPastUTCDateString(daysAgo: number): string {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() - daysAgo);
+export function getPastUTCDateString(daysAgo: number, now: Date = new Date()): string {
+  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysAgo));
   const year = d.getUTCFullYear();
   const month = String(d.getUTCMonth() + 1).padStart(2, '0');
   const day = String(d.getUTCDate()).padStart(2, '0');
@@ -37,111 +36,86 @@ export function getPastUTCDateString(daysAgo: number): string {
 }
 
 /**
- * Returns tomorrow's UTC date as YYYY-MM-DD (next UTC midnight).
+ * Returns tomorrow's UTC date as YYYY-MM-DD.
  */
-export function getTomorrowUTCDateString(): string {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() + 1);
-  const year = d.getUTCFullYear();
-  const month = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(d.getUTCDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+export function getTomorrowUTCDateString(now: Date = new Date()): string {
+  return getPastUTCDateString(-1, now);
 }
 
 /**
- * Default today preset bounds:
- * from = today's start in UTC (YYYY-MM-DD)
- * to = '' (will resolve to current time NOW at query time to avoid querying future bounds).
+ * Returns inclusive preset range:
+ * - today: [today, today]
+ * - last7days: [6 days ago, today] (covers 7 inclusive days)
+ * - last30days: [29 days ago, today] (covers 30 inclusive days)
  */
-export function getTodayPresetRange(): { from: string; to: string } {
-  return {
-    from: getTodayUTCDateString(),
-    to: '',
-  };
-}
-
-/**
- * Last 7 days preset bounds:
- * Historical daily data before raw retention requires whole UTC day boundaries.
- * from = 6 days ago UTC midnight (YYYY-MM-DD, covering 7 full days)
- * to = tomorrow UTC midnight (YYYY-MM-DD, next UTC midnight boundary).
- */
-export function getLast7DaysPresetRange(): { from: string; to: string } {
-  return {
-    from: getPastUTCDateString(6),
-    to: getTomorrowUTCDateString(),
-  };
-}
-
-/**
- * Corrective whole-date action for historical daily error.
- * Historically, queries before raw_retention_hours must use whole UTC dates.
- * Snaps from and to to YYYY-MM-DD boundaries without fabricated hours.
- */
-export function snapToWholeDateRange(fromVal: string, toVal: string): { from: string; to: string } {
-  let cleanFrom = fromVal ? fromVal.slice(0, 10) : getTodayUTCDateString();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanFrom)) {
-    cleanFrom = getTodayUTCDateString();
+export function getPresetRange(preset: PresetRange, now: Date = new Date()): { from: string; to: string } {
+  const today = getTodayUTCDateString(now);
+  if (preset === 'today') {
+    return { from: today, to: today };
   }
-
-  let cleanTo = toVal ? toVal.slice(0, 10) : '';
-  if (!cleanTo || !/^\d{4}-\d{2}-\d{2}$/.test(cleanTo)) {
-    cleanTo = getTomorrowUTCDateString();
+  if (preset === 'last7days') {
+    return { from: getPastUTCDateString(6, now), to: today };
   }
-
-  return {
-    from: cleanFrom,
-    to: cleanTo,
-  };
+  if (preset === 'last30days') {
+    return { from: getPastUTCDateString(29, now), to: today };
+  }
+  return { from: today, to: today };
 }
 
 /**
- * Detects whether a query error is specifically a historical date range error.
- * Excludes generic network failures, 401 unauthorized, or pricing refresh errors.
+ * Compatibility preset bounds.
  */
-export function isHistoricalDateQueryError(
-  errorMsg: string | null | undefined,
-  fromVal: string,
-  toVal: string
-): boolean {
-  if (!errorMsg) return false;
-  const lower = errorMsg.toLowerCase();
+export function getTodayPresetRange(now: Date = new Date()): { from: string; to: string } {
+  return getPresetRange('today', now);
+}
 
-  // Exclude 401, unauthorized, network, fetch failure
-  if (
-    lower.includes('401') ||
-    lower.includes('unauthorized') ||
-    lower.includes('network') ||
-    lower.includes('failed to fetch')
-  ) {
-    return false;
-  }
-
-  // If backend error explicitly mentions historical or whole date
-  if (lower.includes('historical') || lower.includes('whole date') || lower.includes('整日')) {
-    return true;
-  }
-
-  const isQueryInvalid =
-    lower.includes('invalid') ||
-    lower.includes('date') ||
-    lower.includes('range') ||
-    lower.includes('400');
-
-  if (!isQueryInvalid) return false;
-
-  const today = getTodayUTCDateString();
-  const fromDay = fromVal ? fromVal.slice(0, 10) : today;
-  const isOlder = fromDay < today;
-  const hasHours = fromVal.includes('T') || toVal.includes('T');
-
-  return isOlder || hasHours;
+export function getLast7DaysPresetRange(now: Date = new Date()): { from: string; to: string } {
+  return getPresetRange('last7days', now);
 }
 
 /**
- * Builds the URLSearchParams query string for /requests and /summary.
- * For today's query, defaults 'to' to NOW when empty to avoid querying future timestamps.
- * For historical queries (older than today), defaults 'to' to tomorrow UTC midnight to satisfy whole-day boundaries.
+ * Returns whether the query range is currently dynamic (ending on today).
+ * Historical queries ending in the past pause auto-refresh.
+ */
+export function isDynamicRange(toDate: string, now: Date = new Date()): boolean {
+  if (!toDate) return true;
+  const today = getTodayUTCDateString(now);
+  return toDate.slice(0, 10) === today;
+}
+
+/**
+ * Builds URLSearchParams query string for GET /requests/view.
+ * Uses inclusive dates (from_date, to_date) formatted as YYYY-MM-DD.
+ */
+export function buildRequestViewParams(
+  filters: FilterState,
+  view: ViewTab,
+  page: number,
+  pageSize = 25,
+  now: Date = new Date()
+): string {
+  const params = new URLSearchParams();
+  const today = getTodayUTCDateString(now);
+  const fromVal = filters.from.trim() ? filters.from.trim().slice(0, 10) : today;
+  const toVal = filters.to.trim() ? filters.to.trim().slice(0, 10) : today;
+
+  params.set('from_date', fromVal);
+  params.set('to_date', toVal);
+  params.set('view', view);
+  params.set('page', String(page));
+  params.set('page_size', String(pageSize));
+
+  if (filters.key_id) params.set('key_id', filters.key_id);
+  if (filters.model) params.set('model', filters.model);
+  if (filters.provider) params.set('provider', filters.provider);
+  if (filters.auth_index) params.set('auth_index', filters.auth_index);
+  if (filters.status) params.set('status', filters.status);
+
+  return params.toString();
+}
+
+/**
+ * Compatibility query param builder for legacy test assertions.
  */
 export function buildRequestsQueryParams(
   filters: FilterState,
@@ -153,26 +127,19 @@ export function buildRequestsQueryParams(
   params.set('page', String(page));
   params.set('page_size', String(pageSize));
 
-  // from: if already RFC3339 with 'T', keep it; otherwise append T00:00:00Z
   const rawFrom = filters.from.trim();
-  const today = getTodayUTCDateString();
+  const today = getTodayUTCDateString(new Date(nowIso));
   if (rawFrom) {
-    params.set('from', rawFrom.includes('T') ? rawFrom : `${rawFrom}T00:00:00Z`);
+    params.set('from', rawFrom.includes('T') ? rawFrom : `${rawFrom.slice(0, 10)}T00:00:00Z`);
   } else {
     params.set('from', `${today}T00:00:00Z`);
   }
 
-  // to:
   const rawTo = filters.to.trim();
   if (rawTo) {
-    params.set('to', rawTo.includes('T') ? rawTo : `${rawTo}T00:00:00Z`);
+    params.set('to', rawTo.includes('T') ? rawTo : `${rawTo.slice(0, 10)}T00:00:00Z`);
   } else {
-    const fromDay = rawFrom ? rawFrom.slice(0, 10) : today;
-    if (fromDay < today) {
-      params.set('to', `${getTomorrowUTCDateString()}T00:00:00Z`);
-    } else {
-      params.set('to', nowIso);
-    }
+    params.set('to', nowIso);
   }
 
   if (filters.key_id) params.set('key_id', filters.key_id);
@@ -185,21 +152,95 @@ export function buildRequestsQueryParams(
 }
 
 /**
+ * Snaps range to whole dates for error recovery.
+ */
+export function snapToWholeDateRange(
+  fromVal: string,
+  toVal: string,
+  now: Date = new Date()
+): { from: string; to: string } {
+  const today = getTodayUTCDateString(now);
+  let cleanFrom = fromVal ? fromVal.slice(0, 10) : today;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanFrom)) {
+    cleanFrom = today;
+  }
+  let cleanTo = toVal ? toVal.slice(0, 10) : today;
+  if (!cleanTo || !/^\d{4}-\d{2}-\d{2}$/.test(cleanTo)) {
+    cleanTo = today;
+  }
+  return { from: cleanFrom, to: cleanTo };
+}
+
+/**
+ * Detects whether a query error specifically relates to historical dates.
+ */
+export function isHistoricalDateQueryError(
+  errorMsg: string | null | undefined,
+  fromVal: string,
+  toVal: string
+): boolean {
+  if (!errorMsg) return false;
+  const lower = errorMsg.toLowerCase();
+  if (
+    lower.includes('401') ||
+    lower.includes('unauthorized') ||
+    lower.includes('network') ||
+    lower.includes('failed to fetch')
+  ) {
+    return false;
+  }
+  if (lower.includes('historical') || lower.includes('whole date') || lower.includes('整日')) {
+    return true;
+  }
+  const isQueryInvalid =
+    lower.includes('invalid') || lower.includes('date') || lower.includes('range') || lower.includes('400');
+  if (!isQueryInvalid) return false;
+  const today = getTodayUTCDateString();
+  const fromDay = fromVal ? fromVal.slice(0, 10) : today;
+  return fromDay < today || fromVal.includes('T') || toVal.includes('T');
+}
+
+/**
  * Capture status honest user copy mapping.
  */
+export const CAPTURE_STATUS_MAP: Record<
+  string,
+  { label: string; tone: 'neutral' | 'success' | 'warning' | 'danger' }
+> = {
+  available: { label: '可用', tone: 'neutral' },
+  redacted: { label: '已脱敏', tone: 'neutral' },
+  disabled: { label: '采集未开启 (默认)', tone: 'warning' },
+  pending: { label: '采集中', tone: 'neutral' },
+  too_large: { label: '正文过大未保存', tone: 'warning' },
+  unsupported: { label: '格式不支持未保存', tone: 'warning' },
+  expired: { label: '已过期已清理', tone: 'neutral' },
+  evicted: { label: '容量淘汰', tone: 'warning' },
+  purged: { label: '已清空', tone: 'neutral' },
+  missing: { label: '未捕获', tone: 'warning' },
+  truncated: { label: '超限未保存', tone: 'warning' },
+};
+
 export const CAPTURE_STATUS_LABELS: Record<string, string> = {
   available: '可用',
+  redacted: '已脱敏',
   disabled: '采集未开启',
-  expired: '采集已过期',
+  pending: '采集中',
+  too_large: '过大未保存',
+  unsupported: '不支持格式',
+  expired: '已过期',
+  evicted: '容量淘汰',
+  purged: '已清空',
   missing: '未捕获',
-  truncated: '内容已截断',
-  redacted: '内容已脱敏',
+  truncated: '超限未保存',
 };
 
 /**
  * Pricing source human label mapping.
  */
-export function formatPriceSource(source: string, ruleId?: string): { label: string; isWarning: boolean } {
+export function formatPriceSource(
+  source?: string,
+  ruleId?: string
+): { label: string; isWarning: boolean } {
   if (!source || source === 'unpriced') {
     return { label: '未定价按 0', isWarning: true };
   }
@@ -207,7 +248,7 @@ export function formatPriceSource(source: string, ruleId?: string): { label: str
     return { label: '手动定价', isWarning: false };
   }
   if (source === 'catalog' || source === 'auto') {
-    return { label: '公共参考价格', isWarning: false };
+    return { label: '公共参考价', isWarning: false };
   }
   if (source === 'rule') {
     return { label: ruleId ? `规则 (${ruleId})` : '自定义规则', isWarning: false };
@@ -219,8 +260,10 @@ export function formatPriceSource(source: string, ruleId?: string): { label: str
  * Exact micro-USD to dollar string.
  * Never rounds small non-zero numbers to 0.
  */
-export function formatCostExact(microUSD: number): string {
-  if (microUSD === 0) return '0';
+export function formatCostExact(microUSD?: number): string {
+  if (microUSD === undefined || microUSD === null || isNaN(microUSD) || microUSD === 0) {
+    return '0';
+  }
   const formatted = formatUSD(microUSD);
   if (microUSD > 0 && formatted === '0') {
     return (microUSD / 1000000).toFixed(6).replace(/0+$/, '');
@@ -230,25 +273,26 @@ export function formatCostExact(microUSD: number): string {
 
 /**
  * Resolves display label and fallback for Key ID.
- * Avoids showing raw 64-hex IDs as labels.
+ * Identifies deleted keys from deleted_at.
  */
 export function resolveKeyDisplay(
   keyId: string,
   keysMap: Map<string, Key>
-): { label: string; isFallback: boolean; fullId: string } {
+): { label: string; isFallback: boolean; fullId: string; isDeleted: boolean } {
   if (!keyId) {
-    return { label: '—', isFallback: false, fullId: '' };
+    return { label: '—', isFallback: false, fullId: '', isDeleted: false };
   }
   const keyObj = keysMap.get(keyId);
+  const isDeleted = Boolean(keyObj?.deleted_at);
+
   if (keyObj && keyObj.label) {
-    return { label: keyObj.label, isFallback: false, fullId: keyId };
+    return { label: keyObj.label, isFallback: false, fullId: keyId, isDeleted };
   }
-  // Fallback: 64-hex opaque Key ID truncated to 12 chars
   const is64Hex = /^[a-f0-9]{64}$/i.test(keyId);
   if (is64Hex) {
-    return { label: `${keyId.slice(0, 12)}…`, isFallback: true, fullId: keyId };
+    return { label: `${keyId.slice(0, 12)}…`, isFallback: true, fullId: keyId, isDeleted };
   }
-  return { label: keyId, isFallback: false, fullId: keyId };
+  return { label: keyId, isFallback: false, fullId: keyId, isDeleted };
 }
 
 /**
@@ -288,7 +332,9 @@ export function redactBody(body: unknown): unknown {
     return body.map(redactBody);
   }
   if (typeof body === 'object') {
-    const sensitiveRegex = /authorization|cookie|api.?key|token|secret|password/i;
+    // Match credential fields, not legitimate generation options such as
+    // max_tokens / token_limit. The server remains the redaction boundary.
+    const sensitiveRegex = /^(authorization|cookie|set-cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password)$/i;
     const output: Record<string, unknown> = Object.create(null);
     for (const [k, v] of Object.entries(body as Record<string, unknown>)) {
       if (sensitiveRegex.test(k)) {
@@ -303,13 +349,94 @@ export function redactBody(body: unknown): unknown {
 }
 
 /**
- * Formats a raw ISO timestamp to UTC short string for tooltips and fallback display.
- * e.g. YYYY-MM-DD HH:mm UTC
+ * Formats a raw ISO timestamp to UTC short string.
+ * e.g. YYYY-MM-DD HH:mm:ss UTC
  */
+export function formatUTCDateTime(iso?: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  const s = d.toISOString();
+  return `${s.slice(0, 10)} ${s.slice(11, 19)} UTC`;
+}
+
 export function formatUTCShort(iso: string, withYear = true): string {
   if (!iso) return '—';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return String(iso);
   const isoStr = d.toISOString();
   return (withYear ? isoStr.slice(0, 10) : isoStr.slice(5, 10)) + ' ' + isoStr.slice(11, 16) + ' UTC';
+}
+
+/**
+ * Calculates Cache Hit Rate percentage.
+ * Cache Hit Rate (Token) = Σcache_read_tokens / Σfull_input_tokens
+ * where full_input_tokens = input_tokens + cache_read_tokens + cache_write_tokens.
+ * Returns null if fullInput is 0 or input/cache_read undefined.
+ */
+export function calculateCacheHitRate(
+  cacheRead?: number,
+  input?: number,
+  cacheWrite?: number
+): string | null {
+  if (cacheRead === undefined || input === undefined) return null;
+  const read = Number(cacheRead) || 0;
+  const inTokens = Number(input) || 0;
+  const write = Number(cacheWrite) || 0;
+  const fullInput = inTokens + read + write;
+  if (fullInput <= 0) return null;
+  return `${((read / fullInput) * 100).toFixed(1)}%`;
+}
+
+/**
+ * Calculates Failure Rate percentage.
+ */
+export function calculateFailureRate(failures?: number, requests?: number): string | null {
+  if (requests === undefined || requests <= 0) return null;
+  const f = Number(failures) || 0;
+  return `${((f / requests) * 100).toFixed(1)}%`;
+}
+
+/**
+ * Calculates TPS (Tokens per second) for a single request:
+ * TPS = output / ((latency_ms - ttft_ms) / 1000)
+ * Only valid if isStream is true, output > 0, and 0 < ttft_ms < latency_ms.
+ */
+export function calculateTPS(
+  output?: number,
+  latencyMs?: number,
+  ttftMs?: number,
+  isStream?: boolean
+): string | null {
+  if (!isStream) return null;
+  if (!output || output <= 0) return null;
+  if (!latencyMs || !ttftMs) return null;
+  if (ttftMs <= 0 || ttftMs >= latencyMs) return null;
+  const genSec = (latencyMs - ttftMs) / 1000;
+  if (genSec <= 0) return null;
+  return (output / genSec).toFixed(1);
+}
+
+/**
+ * Formats average latency.
+ */
+export function formatAvgLatency(latencyMs?: number, samples?: number): string {
+  if (!samples || samples <= 0 || latencyMs === undefined) return '—';
+  return `${Math.round(latencyMs / samples)} ms`;
+}
+
+/**
+ * Formats average TTFT.
+ */
+export function formatAvgTTFT(ttftMs?: number, samples?: number): string {
+  if (!samples || samples <= 0 || ttftMs === undefined) return '—';
+  return `${Math.round(ttftMs / samples)} ms`;
+}
+
+/**
+ * Formats numbers with comma separators.
+ */
+export function formatNumber(n?: number): string {
+  if (n === undefined || n === null || isNaN(n)) return '—';
+  return n.toLocaleString('en-US');
 }
