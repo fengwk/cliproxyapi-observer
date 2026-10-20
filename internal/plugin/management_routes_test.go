@@ -31,29 +31,32 @@ func dispatchForTest(t *testing.T, m *Manager, method, path string, query url.Va
 func TestManagementRegistrationHasOnlyStaticExactRoutes(t *testing.T) {
 	reg := managementRegistration()
 	want := map[string]bool{
-		"POST " + routeModelsToken:   true,
-		"GET " + routeHealth:         true,
-		"GET " + routeKeys:           true,
-		"POST " + routeKeys:          true,
-		"PUT " + routeKeys:           true,
-		"DELETE " + routeKeys:        true,
-		"POST " + routeKeyRotate:     true,
-		"POST " + routeKeyReset:      true,
-		"POST " + routeKeyRecover:    true,
-		"GET " + routeRequests:       true,
-		"GET " + routeRequestDetail:  true,
-		"GET " + routeSummary:        true,
-		"GET " + routeSettings:       true,
-		"PUT " + routeSettings:       true,
-		"GET " + routePrices:         true,
-		"POST " + routePricesRefresh: true,
-		"POST " + routePricesPreview: true,
-		"POST " + routeCompact:       true,
-		"GET " + routeUI:             true,
-		"GET " + routeUIAlt:          true,
-		"GET " + routeUIJS:           true,
-		"GET " + routeUICSS:          true,
-		"GET " + routeThemeJS:        true,
+		"POST " + routeModelsToken:     true,
+		"GET " + routeHealth:           true,
+		"GET " + routeKeys:             true,
+		"POST " + routeKeys:            true,
+		"PUT " + routeKeys:             true,
+		"DELETE " + routeKeys:          true,
+		"POST " + routeKeyDelete:       true,
+		"POST " + routeKeyRotate:       true,
+		"POST " + routeKeyReset:        true,
+		"POST " + routeKeyRecover:      true,
+		"GET " + routeRequests:         true,
+		"GET " + routeRequestDetail:    true,
+		"GET " + routeSummary:          true,
+		"GET " + routeSettings:         true,
+		"PUT " + routeSettings:         true,
+		"GET " + routePrices:           true,
+		"POST " + routePricesRefresh:   true,
+		"POST " + routePricesPreview:   true,
+		"POST " + routeCapturesCleanup: true,
+		"POST " + routeCapturesPurge:   true,
+		"POST " + routeCompact:         true,
+		"GET " + routeUI:               true,
+		"GET " + routeUIAlt:            true,
+		"GET " + routeUIJS:             true,
+		"GET " + routeUICSS:            true,
+		"GET " + routeThemeJS:          true,
 	}
 
 	seen := map[string]bool{}
@@ -182,8 +185,45 @@ func TestRegisteredManagementRoutesDispatch(t *testing.T) {
 	if r = dispatchForTest(t, NewManager(nil), http.MethodPost, managementBasePath+"/prices/refresh", nil, ""); r.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("unavailable price refresh: %d %s", r.StatusCode, r.Body)
 	}
+	if r = dispatchForTest(t, m, http.MethodPost, managementBasePath+"/captures/cleanup", nil, ""); r.StatusCode != http.StatusOK {
+		t.Fatalf("cleanup captures: %d %s", r.StatusCode, r.Body)
+	}
+	if r = dispatchForTest(t, m, http.MethodPost, managementBasePath+"/captures/purge", nil, `{"confirm":true}`); r.StatusCode != http.StatusOK {
+		t.Fatalf("purge captures: %d %s", r.StatusCode, r.Body)
+	}
 	if r = dispatchForTest(t, m, http.MethodPost, managementBasePath+"/compact", nil, ""); r.StatusCode != http.StatusOK {
 		t.Fatalf("compact: %d %s", r.StatusCode, r.Body)
+	}
+
+	deleted := created
+	deleted.Key.ID = ""
+	if r = dispatchForTest(t, m, http.MethodPost, managementBasePath+"/keys", nil,
+		`{"label":"terminal","enabled":true}`); r.StatusCode != http.StatusCreated || json.Unmarshal(r.Body, &deleted) != nil {
+		t.Fatalf("create deleted key: %d %s", r.StatusCode, r.Body)
+	}
+	if r = dispatchForTest(t, m, http.MethodPost, managementBasePath+"/keys/delete", url.Values{"id": {deleted.Key.ID}}, ""); r.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete key: %d %s", r.StatusCode, r.Body)
+	}
+	if r = dispatchForTest(t, m, http.MethodPost, managementBasePath+"/keys/delete", url.Values{"id": {deleted.Key.ID}}, ""); r.StatusCode != http.StatusNoContent {
+		t.Fatalf("idempotent delete key: %d %s", r.StatusCode, r.Body)
+	}
+	var defaultKeys, allKeys keysResponse
+	if r = dispatchForTest(t, m, http.MethodGet, managementBasePath+"/keys", nil, ""); r.StatusCode != http.StatusOK ||
+		json.Unmarshal(r.Body, &defaultKeys) != nil || len(defaultKeys.Items) != 1 {
+		t.Fatalf("default keys: %d %s", r.StatusCode, r.Body)
+	}
+	if r = dispatchForTest(t, m, http.MethodGet, managementBasePath+"/keys", url.Values{"include_deleted": {"true"}}, ""); r.StatusCode != http.StatusOK ||
+		json.Unmarshal(r.Body, &allKeys) != nil || len(allKeys.Items) != 2 {
+		t.Fatalf("include deleted keys: %d %s", r.StatusCode, r.Body)
+	}
+	foundDeleted := false
+	for _, key := range allKeys.Items {
+		if key.ID == deleted.Key.ID && key.DeletedAt != nil {
+			foundDeleted = true
+		}
+	}
+	if !foundDeleted {
+		t.Fatal("deleted key missing from include_deleted listing")
 	}
 
 	for _, path := range []string{"/ui", "/ui/", "/ui.js", "/ui.css"} {
@@ -226,6 +266,10 @@ func TestManagementIDQueryValidation(t *testing.T) {
 		{"put newline id", http.MethodPut, managementBasePath + "/keys", url.Values{"id": {"a\nb"}}, `{}`},
 		{"delete duplicate id", http.MethodDelete, managementBasePath + "/keys", url.Values{"id": {"a", "b"}}, ""},
 		{"delete unknown parameter", http.MethodDelete, managementBasePath + "/keys", url.Values{"id": {"a"}, "x": {"1"}}, ""},
+		{"terminal delete duplicate id", http.MethodPost, managementBasePath + "/keys/delete", url.Values{"id": {"a", "b"}}, ""},
+		{"terminal delete missing id", http.MethodPost, managementBasePath + "/keys/delete", nil, ""},
+		{"terminal delete unknown parameter", http.MethodPost, managementBasePath + "/keys/delete", url.Values{"id": {"a"}, "x": {"1"}}, ""},
+		{"terminal delete nonempty body", http.MethodPost, managementBasePath + "/keys/delete", url.Values{"id": {"a"}}, `{}`},
 		{"rotate duplicate id", http.MethodPost, managementBasePath + "/keys/rotate", url.Values{"id": {"a", "b"}}, ""},
 		{"rotate missing id", http.MethodPost, managementBasePath + "/keys/rotate", nil, ""},
 		{"reset duplicate id", http.MethodPost, managementBasePath + "/keys/reset", url.Values{"id": {"a", "b"}}, `{"windows":["week"]}`},
@@ -238,7 +282,17 @@ func TestManagementIDQueryValidation(t *testing.T) {
 		{"detail missing id", http.MethodGet, managementBasePath + "/requests/detail", nil, ""},
 		{"detail empty id", http.MethodGet, managementBasePath + "/requests/detail", url.Values{"id": {""}}, ""},
 		{"list keys query", http.MethodGet, managementBasePath + "/keys", url.Values{"id": {"a"}}, ""},
+		{"list keys repeated include_deleted", http.MethodGet, managementBasePath + "/keys", url.Values{"include_deleted": {"true", "false"}}, ""},
+		{"list keys invalid include_deleted", http.MethodGet, managementBasePath + "/keys", url.Values{"include_deleted": {"1"}}, ""},
+		{"list keys unknown with include_deleted", http.MethodGet, managementBasePath + "/keys", url.Values{"include_deleted": {"true"}, "x": {"1"}}, ""},
 		{"create key query", http.MethodPost, managementBasePath + "/keys", url.Values{"id": {"a"}}, `{}`},
+		{"cleanup query", http.MethodPost, managementBasePath + "/captures/cleanup", url.Values{"x": {"1"}}, ""},
+		{"cleanup body", http.MethodPost, managementBasePath + "/captures/cleanup", nil, `{}`},
+		{"purge query", http.MethodPost, managementBasePath + "/captures/purge", url.Values{"x": {"1"}}, `{"confirm":true}`},
+		{"purge missing confirmation", http.MethodPost, managementBasePath + "/captures/purge", nil, `{}`},
+		{"purge false confirmation", http.MethodPost, managementBasePath + "/captures/purge", nil, `{"confirm":false}`},
+		{"purge unknown field", http.MethodPost, managementBasePath + "/captures/purge", nil, `{"confirm":true,"extra":true}`},
+		{"purge empty body", http.MethodPost, managementBasePath + "/captures/purge", nil, ""},
 		{"health query", http.MethodGet, managementBasePath + "/health", url.Values{"x": {"1"}}, ""},
 		{"settings query", http.MethodGet, managementBasePath + "/settings", url.Values{"x": {"1"}}, ""},
 	}
@@ -332,5 +386,30 @@ func TestManagementQueryRejectsEqualRange(t *testing.T) {
 		"to":   {"2026-01-02T00:00:00Z"},
 	}); err != nil {
 		t.Fatalf("rejected ordered range: %v", err)
+	}
+}
+
+// New lifecycle sentinels must map to distinct, sanitized management statuses.
+// Maintenance during admission is a 503, never the old default 403.
+func TestLifecycleErrorMappings(t *testing.T) {
+	for _, tc := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{engine.ErrDeleted, http.StatusGone, "deleted"},
+		{engine.ErrUnsupported, http.StatusConflict, "unsupported"},
+		{engine.ErrMaintenance, http.StatusConflict, "maintenance"},
+	} {
+		r := storeFailureResponse(tc.err)
+		if r.StatusCode != tc.status || !strings.Contains(string(r.Body), `"code":"`+tc.code+`"`) {
+			t.Fatalf("%v: %d %s", tc.err, r.StatusCode, r.Body)
+		}
+		if strings.Contains(string(r.Body), tc.err.Error()+":") {
+			t.Fatalf("raw error leaked: %s", r.Body)
+		}
+	}
+	if got := denialStatus(engine.ErrMaintenance); got != http.StatusServiceUnavailable {
+		t.Fatalf("maintenance admission status: %d", got)
 	}
 }

@@ -27,25 +27,28 @@ const (
 	// Registration paths are relative to the host Management API prefix.
 	routesPrefix = "/plugins/" + PluginID
 
-	routeHealth        = routesPrefix + "/health"
-	routeModelsToken   = routesPrefix + "/models/token"
-	routeKeys          = routesPrefix + "/keys"
-	routeKeyRotate     = routeKeys + "/rotate"
-	routeKeyReset      = routeKeys + "/reset"
-	routeKeyRecover    = routeKeys + "/recover"
-	routeRequests      = routesPrefix + "/requests"
-	routeRequestDetail = routeRequests + "/detail"
-	routeSummary       = routesPrefix + "/summary"
-	routeSettings      = routesPrefix + "/settings"
-	routePrices        = routesPrefix + "/prices"
-	routePricesRefresh = routesPrefix + "/prices/refresh"
-	routePricesPreview = routesPrefix + "/prices/preview"
-	routeCompact       = routesPrefix + "/compact"
-	routeUI            = routesPrefix + "/ui"
-	routeUIAlt         = routeUI + "/"
-	routeUIJS          = routesPrefix + "/ui.js"
-	routeUICSS         = routesPrefix + "/ui.css"
-	routeThemeJS       = routesPrefix + "/theme.js"
+	routeHealth          = routesPrefix + "/health"
+	routeModelsToken     = routesPrefix + "/models/token"
+	routeKeys            = routesPrefix + "/keys"
+	routeKeyDelete       = routeKeys + "/delete"
+	routeKeyRotate       = routeKeys + "/rotate"
+	routeKeyReset        = routeKeys + "/reset"
+	routeKeyRecover      = routeKeys + "/recover"
+	routeCapturesCleanup = routesPrefix + "/captures/cleanup"
+	routeCapturesPurge   = routesPrefix + "/captures/purge"
+	routeRequests        = routesPrefix + "/requests"
+	routeRequestDetail   = routeRequests + "/detail"
+	routeSummary         = routesPrefix + "/summary"
+	routeSettings        = routesPrefix + "/settings"
+	routePrices          = routesPrefix + "/prices"
+	routePricesRefresh   = routesPrefix + "/prices/refresh"
+	routePricesPreview   = routesPrefix + "/prices/preview"
+	routeCompact         = routesPrefix + "/compact"
+	routeUI              = routesPrefix + "/ui"
+	routeUIAlt           = routeUI + "/"
+	routeUIJS            = routesPrefix + "/ui.js"
+	routeUICSS           = routesPrefix + "/ui.css"
+	routeThemeJS         = routesPrefix + "/theme.js"
 
 	// maxJSONBodyBytes bounds every JSON request body accepted by this file.
 	maxJSONBodyBytes = 1 << 20
@@ -85,6 +88,7 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPost, Path: routeKeys, Description: "Create a client key; the plaintext secret is returned once."},
 			{Method: http.MethodPut, Path: routeKeys, Description: "Replace a client key selected by the id query parameter."},
 			{Method: http.MethodDelete, Path: routeKeys, Description: "Revoke a client key selected by the id query parameter."},
+			{Method: http.MethodPost, Path: routeKeyDelete, Description: "Permanently delete a client key selected by the id query parameter."},
 			{Method: http.MethodPost, Path: routeKeyRotate, Description: "Rotate a client key selected by the id query parameter."},
 			{Method: http.MethodPost, Path: routeKeyReset, Description: "Reset selected usage windows for a client key."},
 			{Method: http.MethodPost, Path: routeKeyRecover, Description: "Acknowledge unknown accounting for a client key."},
@@ -96,6 +100,8 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodGet, Path: routePrices, Description: "Current pricing snapshot."},
 			{Method: http.MethodPost, Path: routePricesRefresh, Description: "Refresh the pricing catalog within a bounded interval."},
 			{Method: http.MethodPost, Path: routePricesPreview, Description: "Preview available-model base prices without recording usage."},
+			{Method: http.MethodPost, Path: routeCapturesCleanup, Description: "Remove expired captured content and return counters."},
+			{Method: http.MethodPost, Path: routeCapturesPurge, Description: "Purge all captured content after explicit confirmation."},
 			{Method: http.MethodPost, Path: routeCompact, Description: "Compact storage and return health counters."},
 			{Method: http.MethodGet, Path: routeUI, Description: PluginName + " management UI."},
 			{Method: http.MethodGet, Path: routeUIAlt, Description: PluginName + " management UI with trailing slash."},
@@ -191,7 +197,8 @@ func acceptsManagementBody(req managementRequest) bool {
 			req.Path == managementBasePath+"/keys/rotate" ||
 			req.Path == managementBasePath+"/prices/preview" ||
 			req.Path == managementBasePath+"/keys/reset" ||
-			req.Path == managementBasePath+"/keys/recover"
+			req.Path == managementBasePath+"/keys/recover" ||
+			req.Path == managementBasePath+"/captures/purge"
 	case http.MethodPut:
 		return req.Path == managementBasePath+"/keys" ||
 			req.Path == managementBasePath+"/settings"
@@ -225,10 +232,11 @@ func (m *Manager) dispatchManagementRoute(req managementRequest, route string) p
 	case "/keys":
 		switch req.Method {
 		case http.MethodGet:
-			if len(req.Query) != 0 {
+			includeDeleted, ok := parseKeysQuery(req.Query)
+			if !ok {
 				return invalidQueryResponse()
 			}
-			return m.serveKeys()
+			return m.serveKeys(includeDeleted)
 		case http.MethodPost:
 			if len(req.Query) != 0 {
 				return invalidQueryResponse()
@@ -249,6 +257,16 @@ func (m *Manager) dispatchManagementRoute(req managementRequest, route string) p
 		default:
 			return methodNotAllowedResponse()
 		}
+
+	case "/keys/delete":
+		if !requireMethod(req.Method, http.MethodPost) {
+			return methodNotAllowedResponse()
+		}
+		id, ok := parseIDQuery(req.Query)
+		if !ok {
+			return invalidQueryResponse()
+		}
+		return m.serveDeleteKey(id)
 
 	case "/keys/rotate":
 		if !requireMethod(req.Method, http.MethodPost) {
@@ -342,6 +360,24 @@ func (m *Manager) dispatchManagementRoute(req managementRequest, route string) p
 		}
 		return m.servePriceRefresh()
 
+	case "/captures/cleanup":
+		if len(req.Query) != 0 {
+			return invalidQueryResponse()
+		}
+		if !requireMethod(req.Method, http.MethodPost) {
+			return methodNotAllowedResponse()
+		}
+		return m.serveCapturesCleanup()
+
+	case "/captures/purge":
+		if len(req.Query) != 0 {
+			return invalidQueryResponse()
+		}
+		if !requireMethod(req.Method, http.MethodPost) {
+			return methodNotAllowedResponse()
+		}
+		return m.serveCapturesPurge(req.Body)
+
 	case "/compact":
 		if len(req.Query) != 0 {
 			return invalidQueryResponse()
@@ -405,9 +441,15 @@ type healthResponse struct {
 	SchemaVersion int    `json:"schema_version"`
 }
 
-func (m *Manager) serveKeys() pluginapi.ManagementResponse {
+func (m *Manager) serveKeys(includeDeleted bool) pluginapi.ManagementResponse {
 	return m.withStore(func(store *engine.Store) pluginapi.ManagementResponse {
-		keys, err := store.Keys()
+		var keys []engine.Key
+		var err error
+		if includeDeleted {
+			keys, err = store.KeysIncludingDeleted()
+		} else {
+			keys, err = store.Keys()
+		}
 		if err != nil {
 			return storeFailureResponse(err)
 		}
@@ -479,6 +521,16 @@ func (m *Manager) serveUpdateKey(id string, body []byte) pluginapi.ManagementRes
 func (m *Manager) serveRevokeKey(id string) pluginapi.ManagementResponse {
 	return m.withStore(func(store *engine.Store) pluginapi.ManagementResponse {
 		if err := store.RevokeKey(id); err != nil {
+			return storeFailureResponse(err)
+		}
+		return emptyResponse(http.StatusNoContent)
+	})
+}
+
+// Delete is terminal; revoke remains a separate DELETE operation.
+func (m *Manager) serveDeleteKey(id string) pluginapi.ManagementResponse {
+	return m.withStore(func(store *engine.Store) pluginapi.ManagementResponse {
+		if err := store.DeleteKey(id); err != nil {
 			return storeFailureResponse(err)
 		}
 		return emptyResponse(http.StatusNoContent)
@@ -627,19 +679,269 @@ func (m *Manager) serveSettings() pluginapi.ManagementResponse {
 }
 
 func (m *Manager) serveUpdateSettings(body []byte) pluginapi.ManagementResponse {
-	var settings engine.Settings
-	if err := decodeRequestBody(body, &settings); err != nil {
+	patch, err := parseSettingsPatch(body)
+	if err != nil {
 		return bodyFailureResponse(err)
 	}
-	// UpdateSettings owns validation and applies Settings.Pricing to the
-	// pricing service atomically; this handler must not call Configure itself.
 	return m.withStore(func(store *engine.Store) pluginapi.ManagementResponse {
+		saved, err := store.Settings()
+		if err != nil {
+			return storeFailureResponse(err)
+		}
+		settings, err := mergeSettings(saved, patch)
+		if err != nil {
+			return errorResponse(http.StatusBadRequest, "invalid_request", "capture_mode and capture_enabled conflict")
+		}
+		// UpdateSettings owns validation and applies Settings.Pricing to the
+		// pricing service atomically; this handler must not call Configure itself.
 		updated, err := store.UpdateSettings(settings)
 		if err != nil {
 			return storeFailureResponse(err)
 		}
 		return jsonResponse(http.StatusOK, updated)
 	})
+}
+
+var settingsRequestKeys = map[string]bool{
+	"capture_enabled":           true,
+	"capture_mode":              true,
+	"capture_retention_seconds": true,
+	"max_body_bytes":            true,
+	"max_body_storage_bytes":    true,
+	"raw_retention_hours":       true,
+	"daily_retention_days":      true,
+	"pricing":                   true,
+}
+
+var pricingRequestKeys = map[string]bool{
+	"auto":     true,
+	"prices":   true,
+	"rules":    true,
+	"mappings": true,
+}
+
+// settingsPatch records field presence, not zero values. Absent new optional
+// fields (mode, retention, mappings) and absent sections keep saved values.
+type settingsPatch struct {
+	hasCaptureEnabled bool
+	captureEnabled    bool
+	hasCaptureMode    bool
+	captureMode       string
+	hasRetention      bool
+	retention         int
+	hasMaxBodyBytes   bool
+	maxBodyBytes      int
+	hasMaxStorage     bool
+	maxBodyStorage    int64
+	hasRawRetention   bool
+	rawRetentionHours int
+	hasDailyRetention bool
+	dailyRetention    int
+	hasPricing        bool
+	pricing           pricingPatch
+}
+
+type pricingPatch struct {
+	hasAuto     bool
+	auto        bool
+	hasPrices   bool
+	prices      []pricing.Price
+	hasRules    bool
+	rules       []pricing.Rule
+	hasMappings bool
+	mappings    []pricing.Mapping
+}
+
+func parseSettingsPatch(body []byte) (settingsPatch, error) {
+	var patch settingsPatch
+	trimmed := bytes.TrimSpace(body)
+	if len(body) > maxJSONBodyBytes {
+		return patch, errJSONTooLarge
+	}
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return patch, errJSONInvalid
+	}
+	if err := validateJSONDocument(trimmed, settingsRequestKeys); err != nil {
+		return patch, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &fields); err != nil {
+		return patch, errJSONInvalid
+	}
+	for key, raw := range fields {
+		if jsonNull(raw) {
+			return patch, errJSONInvalid
+		}
+		switch key {
+		case "capture_enabled":
+			if err := decodeStrictJSON(raw, &patch.captureEnabled); err != nil {
+				return patch, err
+			}
+			patch.hasCaptureEnabled = true
+		case "capture_mode":
+			if err := decodeStrictJSON(raw, &patch.captureMode); err != nil {
+				return patch, err
+			}
+			patch.hasCaptureMode = true
+		case "capture_retention_seconds":
+			if err := decodeStrictJSON(raw, &patch.retention); err != nil {
+				return patch, err
+			}
+			patch.hasRetention = true
+		case "max_body_bytes":
+			if err := decodeStrictJSON(raw, &patch.maxBodyBytes); err != nil {
+				return patch, err
+			}
+			patch.hasMaxBodyBytes = true
+		case "max_body_storage_bytes":
+			if err := decodeStrictJSON(raw, &patch.maxBodyStorage); err != nil {
+				return patch, err
+			}
+			patch.hasMaxStorage = true
+		case "raw_retention_hours":
+			if err := decodeStrictJSON(raw, &patch.rawRetentionHours); err != nil {
+				return patch, err
+			}
+			patch.hasRawRetention = true
+		case "daily_retention_days":
+			if err := decodeStrictJSON(raw, &patch.dailyRetention); err != nil {
+				return patch, err
+			}
+			patch.hasDailyRetention = true
+		case "pricing":
+			parsed, err := parsePricingPatch(raw)
+			if err != nil {
+				return patch, err
+			}
+			patch.pricing = parsed
+			patch.hasPricing = true
+		default:
+			return patch, errJSONInvalid
+		}
+	}
+	return patch, nil
+}
+
+func parsePricingPatch(raw []byte) (pricingPatch, error) {
+	var patch pricingPatch
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return patch, errJSONInvalid
+	}
+	if err := validateJSONDocument(trimmed, pricingRequestKeys); err != nil {
+		return patch, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &fields); err != nil {
+		return patch, errJSONInvalid
+	}
+	for key, value := range fields {
+		if jsonNull(value) {
+			return patch, errJSONInvalid
+		}
+		switch key {
+		case "auto":
+			if err := decodeStrictJSON(value, &patch.auto); err != nil {
+				return patch, err
+			}
+			patch.hasAuto = true
+		case "prices":
+			if err := decodeStrictJSON(value, &patch.prices); err != nil {
+				return patch, err
+			}
+			patch.hasPrices = true
+		case "rules":
+			if err := decodeStrictJSON(value, &patch.rules); err != nil {
+				return patch, err
+			}
+			patch.hasRules = true
+		case "mappings":
+			if err := decodeStrictJSON(value, &patch.mappings); err != nil {
+				return patch, err
+			}
+			patch.hasMappings = true
+		default:
+			return patch, errJSONInvalid
+		}
+	}
+	return patch, nil
+}
+
+func jsonNull(raw []byte) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+func decodeStrictJSON(raw []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return errJSONInvalid
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return err
+	}
+	return nil
+}
+
+var errSettingsConflict = errors.New("settings conflict")
+
+// mergeSettings normalizes at the management boundary before engine's own
+// effectiveSettings compatibility pass. A legacy boolean never widens an
+// already enabled header-only mode; an explicit mode and boolean must agree.
+func mergeSettings(saved engine.Settings, patch settingsPatch) (engine.Settings, error) {
+	out := saved
+	if patch.hasMaxBodyBytes {
+		out.MaxBodyBytes = patch.maxBodyBytes
+	}
+	if patch.hasMaxStorage {
+		out.MaxBodyStorageBytes = patch.maxBodyStorage
+	}
+	if patch.hasRawRetention {
+		out.RawRetentionHours = patch.rawRetentionHours
+	}
+	if patch.hasDailyRetention {
+		out.DailyRetentionDays = patch.dailyRetention
+	}
+	if patch.hasPricing {
+		out.Pricing = saved.Pricing
+		if patch.pricing.hasAuto {
+			out.Pricing.Auto = patch.pricing.auto
+		}
+		if patch.pricing.hasPrices {
+			out.Pricing.Prices = patch.pricing.prices
+		}
+		if patch.pricing.hasRules {
+			out.Pricing.Rules = patch.pricing.rules
+		}
+		if patch.pricing.hasMappings {
+			out.Pricing.Mappings = patch.pricing.mappings
+		}
+	}
+	if patch.hasCaptureMode {
+		expected := patch.captureMode != engine.CaptureModeOff
+		if patch.hasCaptureEnabled && patch.captureEnabled != expected {
+			return engine.Settings{}, errSettingsConflict
+		}
+		out.CaptureMode = patch.captureMode
+		out.CaptureEnabled = expected
+	} else if patch.hasCaptureEnabled {
+		if patch.captureEnabled {
+			switch saved.CaptureMode {
+			case engine.CaptureModeHeaders, engine.CaptureModeHeadersAndBody:
+				out.CaptureMode = saved.CaptureMode
+			default:
+				out.CaptureMode = engine.CaptureModeHeadersAndBody
+			}
+			out.CaptureEnabled = true
+		} else {
+			out.CaptureMode = engine.CaptureModeOff
+			out.CaptureEnabled = false
+		}
+	}
+	if patch.hasRetention {
+		out.CaptureRetentionSeconds = patch.retention
+	}
+	return out, nil
 }
 
 func (m *Manager) servePrices() pluginapi.ManagementResponse {
@@ -695,6 +997,35 @@ func (m *Manager) servePriceRefresh() pluginapi.ManagementResponse {
 		snapshot.Error = "price refresh failed"
 	}
 	return jsonResponse(http.StatusOK, snapshot)
+}
+
+func (m *Manager) serveCapturesCleanup() pluginapi.ManagementResponse {
+	return m.withStore(func(store *engine.Store) pluginapi.ManagementResponse {
+		result, err := store.CleanupCaptures()
+		if err != nil {
+			return storeFailureResponse(err)
+		}
+		return jsonResponse(http.StatusOK, result)
+	})
+}
+
+func (m *Manager) serveCapturesPurge(body []byte) pluginapi.ManagementResponse {
+	var request struct {
+		Confirm bool `json:"confirm"`
+	}
+	if err := decodeRequestBody(body, &request); err != nil {
+		return bodyFailureResponse(err)
+	}
+	if !request.Confirm {
+		return errorResponse(http.StatusBadRequest, "invalid_request", "confirm must be true")
+	}
+	return m.withStore(func(store *engine.Store) pluginapi.ManagementResponse {
+		result, err := store.PurgeCaptures()
+		if err != nil {
+			return storeFailureResponse(err)
+		}
+		return jsonResponse(http.StatusOK, result)
+	})
 }
 
 func (m *Manager) serveCompact() pluginapi.ManagementResponse {
@@ -818,6 +1149,29 @@ func parsePageNumber(value string, defaultValue, max int) (int, error) {
 
 // parseIDQuery accepts exactly one query parameter, "id", with exactly one
 // nonempty, decoded identifier. Unknown or repeated parameters are rejected.
+// parseKeysQuery accepts only an optional single include_deleted boolean.
+// Omitting it keeps the historical default of excluding tombstones.
+func parseKeysQuery(values url.Values) (bool, bool) {
+	if len(values) == 0 {
+		return false, true
+	}
+	if len(values) != 1 {
+		return false, false
+	}
+	list, ok := values["include_deleted"]
+	if !ok || len(list) != 1 {
+		return false, false
+	}
+	switch list[0] {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
 func parseIDQuery(values url.Values) (string, bool) {
 	if len(values) != 1 {
 		return "", false
@@ -893,6 +1247,9 @@ var managementFailureStatuses = map[error]managementFailure{
 	engine.ErrConcurrency:  {status: http.StatusTooManyRequests, code: "concurrency_exceeded", message: "concurrency limit exceeded"},
 	engine.ErrBusy:         {status: http.StatusConflict, code: "busy", message: "resource busy"},
 	engine.ErrConflict:     {status: http.StatusConflict, code: "conflict", message: "client key already exists"},
+	engine.ErrDeleted:      {status: http.StatusGone, code: "deleted", message: "client key deleted"},
+	engine.ErrUnsupported:  {status: http.StatusConflict, code: "unsupported", message: "unsupported observer feature version"},
+	engine.ErrMaintenance:  {status: http.StatusConflict, code: "maintenance", message: "maintenance in progress"},
 	engine.ErrAccounting:   {status: http.StatusServiceUnavailable, code: "accounting_unavailable", message: "accounting unavailable"},
 	engine.ErrClosed:       {status: http.StatusServiceUnavailable, code: "unavailable", message: "observer unavailable"},
 }
