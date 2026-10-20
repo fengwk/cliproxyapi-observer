@@ -302,8 +302,8 @@ func TestCaptureConfigCaps(t *testing.T) {
 	}
 }
 
-// Actual metadata bytes are gzip and much smaller, while oversized input is
-// represented by a tiny truncated sentinel, not copied into the queue or lost.
+// Actual metadata bytes are gzip and much smaller, while oversized input keeps
+// headers but never copies a partial body into the queue.
 func TestCompressedRecordsAndTruncatedSentinel(t *testing.T) {
 	s, now, _ := fixture(t)
 	k, _ := key(t, s, KeySpec{Enabled: true})
@@ -313,7 +313,7 @@ func TestCompressedRecordsAndTruncatedSentinel(t *testing.T) {
 	_, e := s.UpdateSettings(v)
 	must(t, e)
 	if !s.Capture(CaptureInput{RequestID: "a", TraceID: "trace", KeyID: k.ID, Body: bytes.Repeat([]byte("x"), 1<<20)}) {
-		t.Fatal("sentinel rejected")
+		t.Fatal("oversized body queue rejected")
 	}
 	drainCapture(s)
 	u := event(k, "compressed", *now)
@@ -334,7 +334,7 @@ func TestCompressedRecordsAndTruncatedSentinel(t *testing.T) {
 	}))
 	d, e := s.Detail(u.RequestID)
 	must(t, e)
-	if d.CaptureStatus != "truncated" || string(d.Body) != "null" {
+	if d.CaptureStatus != captureStatusTooLarge || d.BodyStatus != captureStatusTooLarge || d.HeadersStatus != captureStatusAvailable || string(d.Body) != "null" {
 		t.Fatal(d)
 	}
 }

@@ -65,6 +65,9 @@ func (s *Store) fenceAllLocked() {
 	}
 }
 func (s *Store) RecoverKey(id string, acknowledge bool) (Key, error) {
+	if s.maintenanceActive.Load() {
+		return Key{}, ErrBusy
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e := s.check(); e != nil {

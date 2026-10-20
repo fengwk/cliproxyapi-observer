@@ -477,8 +477,8 @@ func TestUnknownPricingAndTokens(t *testing.T) {
 	must(t, s.Complete("allowed", *now))
 }
 
-// Bounded capture fails immediately under lock contention and rejects over-
-// sized data. Storage limits are independent of the input/body queue limit.
+// Bounded capture fails immediately under lock contention, keeps headers for an
+// oversized body, and reports body size, storage and lock drops separately.
 func TestCaptureBounds(t *testing.T) {
 	s, _, _ := fixture(t)
 	k, _ := key(t, s, KeySpec{Enabled: true})
@@ -495,7 +495,7 @@ func TestCaptureBounds(t *testing.T) {
 		t.Fatal("contended capture accepted")
 	}
 	if !s.Capture(CaptureInput{RequestID: "admission", KeyID: k.ID, TraceID: "t", Body: bytes.Repeat([]byte("x"), 17)}) {
-		t.Fatal("truncated sentinel rejected")
+		t.Fatal("oversized body queue rejected")
 	}
 	drainCapture(s) // nonblocking Capture may legitimately drop during worker I/O
 	if !s.Capture(CaptureInput{RequestID: "admission", KeyID: k.ID, TraceID: "t", Body: []byte("{}")}) {
@@ -506,8 +506,9 @@ func TestCaptureBounds(t *testing.T) {
 	s.captures = make(chan CaptureInput, 64)
 	s.worker.Add(1)
 	go s.captureWorker()
-	if s.Health().DroppedCaptures != 3 {
-		t.Fatal(s.Health())
+	health := s.Health()
+	if health.DroppedCaptures != 4 || health.CaptureDrops["lock_contention"] != 1 || health.CaptureDrops["too_large"] != 1 || health.CaptureDrops["storage_limit"] != 2 {
+		t.Fatal(health)
 	}
 }
 

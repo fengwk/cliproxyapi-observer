@@ -19,6 +19,30 @@ func random() string {
 	}
 	return hex.EncodeToString(b)
 }
+
+// randomSecret returns sk- plus 48 unbiased [A-Za-z0-9] characters. Rejection
+// sampling keeps modulo arithmetic from favouring the first eight symbols.
+func randomSecret() string {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	out := make([]byte, 48)
+	buf := make([]byte, 64)
+	for i := 0; i < len(out); {
+		if _, e := rand.Read(buf); e != nil {
+			panic(e)
+		}
+		for _, b := range buf {
+			if int(b) >= 256-256%len(alphabet) {
+				continue
+			}
+			out[i] = alphabet[int(b)%len(alphabet)]
+			i++
+			if i == len(out) {
+				break
+			}
+		}
+	}
+	return "sk-" + string(out)
+}
 func hash(v string) string { h := sha256.Sum256([]byte(v)); return hex.EncodeToString(h[:]) }
 func validSpec(v KeySpec) bool {
 	if v.MaxConcurrent < 0 || int64(v.MaxConcurrent) > maxSafe || len(v.Label) > 256 {
@@ -72,6 +96,11 @@ func roll(k *Key, t time.Time) {
 		k.Used.Month = 0
 	}
 }
+func (s *Store) decorateStored(k storedKey) Key {
+	view := s.decorate(k.Key)
+	view.Revoked = view.DeletedAt == nil && k.Hash == ""
+	return view
+}
 func (s *Store) decorate(k Key) Key {
 	s.observeInterruption(k.ID)
 	// Effective display only: leave anchors untouched until actual admission.
@@ -99,7 +128,7 @@ func (s *Store) decorate(k Key) Key {
 	return k
 }
 func (s *Store) CreateKey(v KeySpec) (Key, string, error) {
-	return s.CreateKeyWithSecret(v, random())
+	return s.CreateKeyWithSecret(v, randomSecret())
 }
 
 // Use supplied credentials exactly as entered; never silently trim secrets.
@@ -116,6 +145,9 @@ func validSecret(secret string) bool {
 }
 
 func (s *Store) CreateKeyWithSecret(v KeySpec, secret string) (Key, string, error) {
+	if s.maintenanceActive.Load() {
+		return Key{}, "", ErrBusy
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e := s.check(); e != nil {
@@ -138,7 +170,7 @@ func (s *Store) CreateKeyWithSecret(v KeySpec, secret string) (Key, string, erro
 	if e != nil {
 		return Key{}, "", e
 	}
-	return s.decorate(k.Key), secret, nil
+	return s.decorateStored(k), secret, nil
 }
 func (s *Store) mutate(id string, f func(*storedKey) error) (Key, error) {
 	if e := s.check(); e != nil {
@@ -149,6 +181,9 @@ func (s *Store) mutate(id string, f func(*storedKey) error) (Key, error) {
 		b := tx.Bucket([]byte("keys"))
 		if e := get(b, id, &k); e != nil {
 			return e
+		}
+		if k.DeletedAt != nil {
+			return ErrDeleted
 		}
 		old := k.Hash
 		if e := f(&k); e != nil {
@@ -170,21 +205,35 @@ func (s *Store) mutate(id string, f func(*storedKey) error) (Key, error) {
 		}
 		return put(b, id, k)
 	})
-	return s.decorate(k.Key), e
+	return s.decorateStored(k), e
 }
 func (s *Store) UpdateKey(id string, v KeySpec) (Key, error) {
+	if s.maintenanceActive.Load() {
+		return Key{}, ErrBusy
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !validSpec(v) {
 		return Key{}, ErrInvalid
 	}
-	return s.mutate(id, func(k *storedKey) error { k.KeySpec = cleanSpec(v); return nil })
+	return s.mutate(id, func(k *storedKey) error {
+		// A revoked key has no credential. Enabling it directly would create a
+		// non-authenticatable "active" principal; rotation must come first.
+		if v.Enabled && k.Hash == "" {
+			return ErrConflict
+		}
+		k.KeySpec = cleanSpec(v)
+		return nil
+	})
 }
 func (s *Store) RotateKey(id string) (Key, string, error) {
-	return s.RotateKeyWithSecret(id, random())
+	return s.RotateKeyWithSecret(id, randomSecret())
 }
 
 func (s *Store) RotateKeyWithSecret(id, secret string) (Key, string, error) {
+	if s.maintenanceActive.Load() {
+		return Key{}, "", ErrBusy
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !validSecret(secret) {
@@ -204,12 +253,18 @@ func (s *Store) RotateKeyWithSecret(id, secret string) (Key, string, error) {
 	return k, secret, e
 }
 func (s *Store) RevokeKey(id string) error {
+	if s.maintenanceActive.Load() {
+		return ErrBusy
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, e := s.mutate(id, func(k *storedKey) error { k.Hash = ""; k.Enabled = false; return nil })
 	return e
 }
 func (s *Store) ResetKey(id string, windows []string) (Key, error) {
+	if s.maintenanceActive.Load() {
+		return Key{}, ErrBusy
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.mutate(id, func(k *storedKey) error {
@@ -258,7 +313,16 @@ func (s *Store) ResetKey(id string, windows []string) (Key, error) {
 		return nil
 	})
 }
-func (s *Store) Keys() ([]Key, error) {
+
+// Keys returns the default management list, which omits terminal tombstones.
+// History views that must locate a deleted Key use KeysIncludingDeleted.
+func (s *Store) Keys() ([]Key, error) { return s.keys(false) }
+
+// KeysIncludingDeleted exposes tombstones for historical lookup. Callers still
+// see deleted_at and the retained counters/records.
+func (s *Store) KeysIncludingDeleted() ([]Key, error) { return s.keys(true) }
+
+func (s *Store) keys(includeDeleted bool) ([]Key, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := []Key{}
@@ -271,13 +335,65 @@ func (s *Store) Keys() ([]Key, error) {
 			if e := decode(v, &k); e != nil {
 				return e
 			}
-			out = append(out, s.decorate(k.Key))
+			if k.DeletedAt != nil && !includeDeleted {
+				return nil
+			}
+			out = append(out, s.decorateStored(k))
 			return nil
 		})
 	})
 	return out, e
 }
+
+// DeleteKey writes a terminal tombstone, clears the authentication hash and
+// disables the key in one transaction. It is idempotent, but never discards a
+// live request or unsettled accounting event.
+func (s *Store) DeleteKey(id string) error {
+	if s.maintenanceActive.Load() {
+		return ErrBusy
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e := s.check(); e != nil {
+		return e
+	}
+	for _, a := range s.active {
+		if a.KeyID == id {
+			return ErrBusy
+		}
+	}
+	for _, p := range s.pending {
+		if p.Record.KeyID == id {
+			return ErrBusy
+		}
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("keys"))
+		var k storedKey
+		if e := get(b, id, &k); e != nil {
+			return e
+		}
+		if k.DeletedAt != nil {
+			return nil
+		}
+		old := k.Hash
+		t := s.now().UTC()
+		k.DeletedAt = &t
+		k.Hash = ""
+		k.Enabled = false
+		k.Revoked = false
+		if old != "" {
+			if e := tx.Bucket([]byte("hashes")).Delete([]byte(old)); e != nil {
+				return e
+			}
+		}
+		return put(b, id, k)
+	})
+}
 func authorized(k Key, t time.Time, model *string) error {
+	if k.DeletedAt != nil {
+		return ErrDeleted
+	}
 	if !k.Enabled {
 		return ErrUnauthorized
 	}
@@ -304,9 +420,12 @@ func (s *Store) Authenticate(secret string) (Key, error) {
 		return get(tx.Bucket([]byte("keys")), string(id), &k)
 	})
 	if e == nil {
+		if k.DeletedAt != nil {
+			return Key{}, ErrUnauthorized
+		}
 		e = authorized(k.Key, s.now(), nil)
 	}
-	return s.decorate(k.Key), e
+	return s.decorateStored(k), e
 }
 func (s *Store) Authorize(id, model string) error {
 	s.mu.Lock()
@@ -323,6 +442,9 @@ func (s *Store) Authorize(id, model string) error {
 	})
 }
 func (s *Store) Admit(a Admission) error {
+	if s.maintenanceActive.Load() {
+		return ErrMaintenance
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e := s.check(); e != nil {
