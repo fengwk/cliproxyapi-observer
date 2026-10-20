@@ -369,7 +369,7 @@ export function KeysPage({ api, refreshInterval = 0, onDirtyChange }: KeysPagePr
                         )}
                         {isDeleted && (
                           <span style={{ fontSize: '0.78rem', color: 'var(--text-tertiary)' }}>
-                            已于 {formatDateTime(k.deleted_at)} 终态删除
+                            已于 {formatDateTime(k.deleted_at)} 已删除（历史账目已保留）
                           </span>
                         )}
                       </div>

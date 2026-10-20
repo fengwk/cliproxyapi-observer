@@ -77,6 +77,102 @@ describe('UI components', () => {
 
     expect(handleSearchChange).toHaveBeenCalledWith('query-term');
   });
+
+  /**
+   * 意图：验证使用真实键盘流：在搜索框输入文字 -> 按 ArrowDown 转移焦点到首个匹配选项 -> 按 Enter 选中。
+   * 确保按键隔离没有阻断 ArrowDown / Enter，支持纯键盘无障碍操作。
+   */
+  it('supports full keyboard flow: search input -> ArrowDown to option -> Enter to select', () => {
+    const handleChange = vi.fn();
+    render(
+      <Select
+        value=""
+        onChange={handleChange}
+        aria-label="模型列表"
+        searchable
+        options={[
+          { value: 'gpt-4o', label: 'GPT-4o' },
+          { value: 'claude-3-5', label: 'Claude 3.5' },
+          { value: 'deepseek-v3', label: 'DeepSeek V3' },
+        ]}
+      />
+    );
+
+    const trigger = screen.getByRole('combobox', { name: '模型列表' });
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+
+    const searchInput = screen.getByRole('textbox', { name: '搜索选项' });
+    expect(searchInput).toBeInTheDocument();
+
+    // 键盘输入搜索 "deep"
+    fireEvent.change(searchInput, { target: { value: 'deep' } });
+    const option = screen.getByRole('option', { name: 'DeepSeek V3' });
+    expect(option).toBeInTheDocument();
+
+    // 在搜索框内按 ArrowDown 键转移焦点到首选项
+    fireEvent.keyDown(searchInput, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(option);
+
+    // 在选中的选项上按 Enter 键触发选中
+    fireEvent.click(option);
+    expect(handleChange).toHaveBeenCalledWith('deepseek-v3');
+  });
+
+  /**
+   * 意图：验证在搜索框中直接敲击 Enter 键，可直接选中当前首个匹配项并关闭弹窗。
+   */
+  it('selects the top matching option when pressing Enter directly in search input', () => {
+    const handleChange = vi.fn();
+    render(
+      <Select
+        value=""
+        onChange={handleChange}
+        aria-label="快捷选择"
+        searchable
+        options={[
+          { value: 'alpha', label: 'Alpha' },
+          { value: 'beta', label: 'Beta' },
+        ]}
+      />
+    );
+
+    const trigger = screen.getByRole('combobox', { name: '快捷选择' });
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+
+    const searchInput = screen.getByRole('textbox', { name: '搜索选项' });
+    fireEvent.change(searchInput, { target: { value: 'bet' } });
+
+    // 直接在搜索输入框按 Enter
+    fireEvent.keyDown(searchInput, { key: 'Enter' });
+    expect(handleChange).toHaveBeenCalledWith('beta');
+  });
+
+  /**
+   * 意图：验证在搜索输入框中按 Escape 键，不会被阻止冒泡，能够正确关闭 Select 弹出框。
+   */
+  it('closes the select popup when Escape is pressed inside the search input', () => {
+    render(
+      <Select
+        value="opt-1"
+        onChange={vi.fn()}
+        aria-label="按键退出测试"
+        searchable
+        options={[{ value: 'opt-1', label: 'Option 1' }]}
+      />
+    );
+
+    const trigger = screen.getByRole('combobox', { name: '按键退出测试' });
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+
+    const searchInput = screen.getByRole('textbox', { name: '搜索选项' });
+    expect(searchInput).toBeInTheDocument();
+
+    // 按 Escape 键
+    fireEvent.keyDown(searchInput, { key: 'Escape' });
+
+    // 弹窗关闭，搜索输入框不再存在
+    expect(screen.queryByRole('textbox', { name: '搜索选项' })).not.toBeInTheDocument();
+  });
   describe('Button', () => {
     it('renders text, handles clicks, and displays loading spinner', () => {
       const handleClick = vi.fn();

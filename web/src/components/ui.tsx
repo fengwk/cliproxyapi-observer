@@ -177,6 +177,20 @@ export function Select({
           className="cpa-select-content"
           position="popper"
           sideOffset={4}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowUp') {
+              const activeEl = document.activeElement;
+              const container = e.currentTarget;
+              const firstOption = container.querySelector<HTMLElement>('[role="option"]:not([data-disabled])');
+              if (activeEl === firstOption) {
+                const searchInput = container.querySelector<HTMLInputElement>('.cpa-select-search-input');
+                if (searchInput) {
+                  e.preventDefault();
+                  searchInput.focus();
+                }
+              }
+            }
+          }}
         >
           {searchable && (
             <div className="cpa-select-search">
@@ -188,7 +202,27 @@ export function Select({
                 aria-label="搜索选项"
                 onChange={handleSearchChange}
                 onKeyDown={(e) => {
-                  // Prevent Radix item selection / close on space or arrow keys
+                  if (e.key === 'Escape') {
+                    setOpen(false);
+                    return;
+                  }
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const container = e.currentTarget.closest('.cpa-select-content');
+                    const firstOption = container?.querySelector<HTMLElement>('[role="option"]:not([data-disabled])');
+                    firstOption?.focus();
+                    return;
+                  }
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const container = e.currentTarget.closest('.cpa-select-content');
+                    const firstOption = container?.querySelector<HTMLElement>('[role="option"]:not([data-disabled])');
+                    firstOption?.click();
+                    return;
+                  }
+                  // Prevent Radix typeahead from interfering while typing in the input
                   e.stopPropagation();
                 }}
                 autoFocus

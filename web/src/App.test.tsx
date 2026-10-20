@@ -231,13 +231,108 @@ describe('App Component Lifecycle, Remember Login & Polling Integration', () => 
   });
 
   /**
+   * 意图：验证网络错误消息中偶然包含 "401" 字符串（如网关代理日志或错误描述），
+   * 但没有真正的 HTTP status 401 时，绝不误判为凭据失效，必须保留合法凭据。
+   */
+  it('preserves valid credentials when network error message contains "401" without HTTP 401 status', async () => {
+    localStorage.setItem(LOCAL_KEY_STORAGE, 'valid-key-proxy-401-msg');
+
+    // 模拟网络抛错（例如代理层报 401 DNS 或上游文本，但这是一个普通的 TypeError/Error，没有 status: 401）
+    const networkErrorWith401Text = new Error('Network error: proxy gateway upstream error 401 failed to connect');
+    const mockFetch = vi.fn().mockRejectedValue(networkErrorWith401Text);
+    global.fetch = mockFetch;
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: '登录 Observer' })).toBeInTheDocument();
+      expect(screen.getByText(/连接后端服务失败，本地保存的管理凭据已保留/)).toBeInTheDocument();
+    });
+
+    // 凭据绝不删除！
+    expect(localStorage.getItem(LOCAL_KEY_STORAGE)).toBe('valid-key-proxy-401-msg');
+    const input = screen.getByLabelText('管理密钥') as HTMLInputElement;
+    expect(input.value).toBe('valid-key-proxy-401-msg');
+  });
+
+  /**
+   * 意图：验证从 sessionStorage 恢复凭据时，rememberMe 复选框应初始化为 false，
+   * 避免网络失败重试时意外将临时会话凭据持久化到 localStorage。
+   */
+  it('restores credentials from sessionStorage with rememberMe set to false', async () => {
+    sessionStorage.setItem(SESSION_KEY_STORAGE, 'session-only-key');
+
+    const mockFetch = vi.fn().mockRejectedValue(new Error('Connection timeout'));
+    global.fetch = mockFetch;
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: '登录 Observer' })).toBeInTheDocument();
+    });
+
+    const rememberCheckbox = screen.getByLabelText(/记住登录/) as HTMLInputElement;
+    expect(rememberCheckbox.checked).toBe(false);
+  });
+
+  /**
+   * 意图：验证取消持久化登录时，即使 sessionStorage.setItem 失败，
+   * 也必须先清理 localStorage 中的旧持久化凭据，防止残留旧凭据误恢复。
+   */
+  it('clears localStorage even if sessionStorage.setItem fails when rememberMe is false', async () => {
+    // 渲染前 storage 为空以展示登录卡片
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ database_bytes: 1000 }),
+    });
+    global.fetch = mockFetch;
+
+    render(<App />);
+
+    const input = screen.getByLabelText('管理密钥');
+    const rememberCheckbox = screen.getByLabelText(/记住登录/);
+    const submitBtn = screen.getByRole('button', { name: '登录' });
+
+    // 在提交前预设 localStorage 有旧 secret，并让 sessionStorage.setItem 抛出异常
+    localStorage.setItem(LOCAL_KEY_STORAGE, 'old-persistent-secret');
+
+    const sessionSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage) {
+      if (this === window.sessionStorage) {
+        throw new DOMException('Session quota exceeded', 'QuotaExceededError');
+      }
+    });
+
+    // 输入新密钥并取消勾选 rememberMe
+    fireEvent.change(input, { target: { value: 'new-session-key' } });
+    fireEvent.click(rememberCheckbox);
+    expect((rememberCheckbox as HTMLInputElement).checked).toBe(false);
+
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText('RequestsPage Mounted')).toBeInTheDocument();
+    });
+
+    // 核心断言：无论 sessionStorage 是否报错，localStorage 中的旧 persistent secret 必须已被清理！
+    expect(localStorage.getItem(LOCAL_KEY_STORAGE)).toBeNull();
+    // 并且展示诚实通知
+    expect(screen.getByText(/会话存储已被禁用，凭据仅在当前内存生效/)).toBeInTheDocument();
+
+    sessionSpy.mockRestore();
+  });
+
+  /**
    * 意图：验证 localStorage 抛异常（storageblock，如无痕浏览配额限制）时诚实提示，回退到当前会话。
    */
   it('honestly warns user when storage is blocked and falls back to session/memory', async () => {
-    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation((key: string) => {
-      if (key === LOCAL_KEY_STORAGE) {
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key: string, value: string) {
+      if (this === window.localStorage) {
         throw new DOMException('QuotaExceededError or security block', 'QuotaExceededError');
       }
+      // sessionStorage behaves normally
+      Object.defineProperty(this, key, { value, configurable: true, writable: true });
     });
 
     const mockFetch = vi.fn().mockResolvedValue({
@@ -261,7 +356,7 @@ describe('App Component Lifecycle, Remember Login & Polling Integration', () => 
     });
 
     // 诚实展示警告，不谎报已记住
-    expect(screen.getByText('存储已被禁用，无法记住登录，仅在当前会话生效。')).toBeInTheDocument();
+    expect(screen.getByText('本地存储已被禁用，无法记住登录，仅在当前会话生效。')).toBeInTheDocument();
 
     setItemSpy.mockRestore();
   });
