@@ -489,7 +489,7 @@ describe('KeysPage & ModelPicker Behavior Acceptance Tests', () => {
       expect(screen.getByText('生产环境网关')).toBeInTheDocument();
     });
 
-    const copyBtn = screen.getByTitle('复制完整 ID');
+    const copyBtn = screen.getByTitle('复制内部 ID');
     fireEvent.click(copyBtn);
 
     // 验证出现可见的失败提示

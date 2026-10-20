@@ -97,6 +97,9 @@ export interface SelectProps {
   disabled?: boolean;
   'aria-label'?: string;
   className?: string;
+  searchable?: boolean;
+  onSearchChange?: (query: string) => void;
+  searchPlaceholder?: string;
 }
 
 export function Select({
@@ -107,7 +110,27 @@ export function Select({
   disabled,
   'aria-label': ariaLabel,
   className = '',
+  searchable = false,
+  onSearchChange,
+  searchPlaceholder = '搜索选项...',
 }: SelectProps) {
+  const [open, setOpen] = React.useState(false);
+  const [searchQuery, setSearchQuery] = React.useState('');
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    setOpen(nextOpen);
+    if (!nextOpen) {
+      setSearchQuery('');
+      onSearchChange?.('');
+    }
+  };
+
+  const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = e.target.value;
+    setSearchQuery(next);
+    onSearchChange?.(next);
+  };
+
   const selectedOption = options.find((opt) => opt.value === value);
   const displayLabel = selectedOption ? selectedOption.label : value;
   // Radix reserves "" for clearing its value; our API uses it for "all".
@@ -115,9 +138,27 @@ export function Select({
   let emptyValue = '__observer_all__';
   while (options.some(option => option.value === emptyValue)) emptyValue += '_';
 
+  const visibleOptions = React.useMemo(() => {
+    if (!searchable || onSearchChange) {
+      return options;
+    }
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter(
+      (opt) =>
+        opt.label.toLowerCase().includes(q) ||
+        opt.value.toLowerCase().includes(q)
+    );
+  }, [searchable, onSearchChange, searchQuery, options]);
+
   return (
-    <SelectPrimitive.Root value={value || emptyValue}
-      onValueChange={next => onChange(next === emptyValue ? '' : next)} disabled={disabled}>
+    <SelectPrimitive.Root
+      value={value || emptyValue}
+      open={open}
+      onOpenChange={handleOpenChange}
+      onValueChange={(next) => onChange(next === emptyValue ? '' : next)}
+      disabled={disabled}
+    >
       <SelectPrimitive.Trigger
         id={id}
         className={`cpa-select-trigger ${className}`}
@@ -137,17 +178,38 @@ export function Select({
           position="popper"
           sideOffset={4}
         >
+          {searchable && (
+            <div className="cpa-select-search">
+              <input
+                type="text"
+                className="cpa-input cpa-select-search-input"
+                value={searchQuery}
+                placeholder={searchPlaceholder}
+                aria-label="搜索选项"
+                onChange={handleSearchChange}
+                onKeyDown={(e) => {
+                  // Prevent Radix item selection / close on space or arrow keys
+                  e.stopPropagation();
+                }}
+                autoFocus
+              />
+            </div>
+          )}
           <SelectPrimitive.Viewport className="cpa-select-viewport">
-            {options.map((opt) => (
-              <SelectPrimitive.Item
-                key={opt.value}
-                value={opt.value || emptyValue}
-                disabled={opt.disabled}
-                className="cpa-select-item"
-              >
-                <SelectPrimitive.ItemText>{opt.label}</SelectPrimitive.ItemText>
-              </SelectPrimitive.Item>
-            ))}
+            {visibleOptions.length === 0 ? (
+              <div className="cpa-select-empty">无匹配项</div>
+            ) : (
+              visibleOptions.map((opt) => (
+                <SelectPrimitive.Item
+                  key={opt.value}
+                  value={opt.value || emptyValue}
+                  disabled={opt.disabled}
+                  className="cpa-select-item"
+                >
+                  <SelectPrimitive.ItemText>{opt.label}</SelectPrimitive.ItemText>
+                </SelectPrimitive.Item>
+              ))
+            )}
           </SelectPrimitive.Viewport>
         </SelectPrimitive.Content>
       </SelectPrimitive.Portal>

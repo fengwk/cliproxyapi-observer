@@ -607,7 +607,7 @@ export function DetailsModal({ keyData, onClose, onCopy, copiedId, copyError }: 
         {copyError && <Notice tone="danger">{copyError}</Notice>}
 
         <div>
-          <span style={{ color: 'var(--text-secondary)' }}>完整 Key ID:</span>
+          <span style={{ color: 'var(--text-secondary)' }}>完整内部 ID（用于记账关联，不可用于 API 认证）:</span>
           <div className="cpa-secret-box" style={{ marginTop: '0.35rem' }}>
             <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.85rem' }}>{keyData.id}</span>
             <Button
@@ -615,7 +615,7 @@ export function DetailsModal({ keyData, onClose, onCopy, copiedId, copyError }: 
               style={{ padding: '0.25rem 0.6rem', minHeight: 'auto', fontSize: '0.8rem' }}
               onClick={() => onCopy(keyData.id, 'details-id')}
             >
-              {copiedId === 'details-id' ? '已复制' : '复制'}
+              {copiedId === 'details-id' ? '已复制 ID' : '复制内部 ID'}
             </Button>
           </div>
         </div>
@@ -683,6 +683,132 @@ export function DetailsModal({ keyData, onClose, onCopy, copiedId, copyError }: 
 }
 
 /* ==========================================================================
+   DeleteKeyModal
+   ========================================================================== */
+
+export interface DeleteKeyModalProps {
+  keyData: Key;
+  api: ApiClient;
+  onClose: () => void;
+  onSuccess: () => void;
+}
+
+export function DeleteKeyModal({ keyData, api, onClose, onSuccess }: DeleteKeyModalProps) {
+  const [submitting, setSubmitting] = useState<boolean>(false);
+  const [error, setError] = useState<string>('');
+
+  const isSubmittingRef = useRef<boolean>(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef<boolean>(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
+
+  const handleSafeClose = useCallback(() => {
+    if (isSubmittingRef.current || submitting) {
+      return;
+    }
+    onClose();
+  }, [submitting, onClose]);
+
+  const handleDelete = async () => {
+    if (isSubmittingRef.current) {
+      return;
+    }
+
+    isSubmittingRef.current = true;
+    setSubmitting(true);
+    setError('');
+    abortControllerRef.current = new AbortController();
+
+    try {
+      // POST /keys/delete?id=... -> 204
+      await api.request(`/keys/delete?id=${encodeURIComponent(keyData.id)}`, {
+        method: 'POST',
+        signal: abortControllerRef.current.signal,
+      });
+
+      if (mountedRef.current) {
+        onSuccess();
+      }
+    } catch (err: unknown) {
+      if (abortControllerRef.current?.signal.aborted) {
+        return;
+      }
+      if (!mountedRef.current) {
+        return;
+      }
+      const msg = errorMessage(err);
+      if (
+        msg.includes('busy') ||
+        msg.includes('409') ||
+        msg.includes('503') ||
+        msg.includes('在处理') ||
+        msg.includes('正在处理')
+      ) {
+        setError('当前仍有活跃请求或待记账操作正在处理中，暂无法删除，请稍后重试');
+      } else {
+        setError(msg || '删除 Key 失败');
+      }
+      // Per contract: pending/busy 错误不关闭弹窗
+    } finally {
+      if (mountedRef.current) {
+        setSubmitting(false);
+      }
+      isSubmittingRef.current = false;
+    }
+  };
+
+  return (
+    <Modal
+      title={`删除 Key: ${keyData.label || keyData.id}`}
+      onClose={handleSafeClose}
+      size="md"
+      footer={
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <Button variant="ghost" onClick={handleSafeClose} disabled={submitting}>
+            取消
+          </Button>
+          <Button variant="danger" onClick={handleDelete} loading={submitting}>
+            确认永久删除
+          </Button>
+        </div>
+      }
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+        {error && <Notice tone="danger">{error}</Notice>}
+
+        <Notice tone="danger">
+          <strong>终态操作警告：</strong>
+          删除为终态操作，将清除该客户端 Key 的认证索引并永久终止其调用权限。删除后不可恢复，且无法再次启用或轮换密钥。
+        </Notice>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', fontSize: '0.9rem' }}>
+          <div>
+            <span style={{ color: 'var(--text-secondary)' }}>Key 名称：</span>
+            <strong>{keyData.label || '(未命名)'}</strong>
+          </div>
+          <div>
+            <span style={{ color: 'var(--text-secondary)' }}>内部 ID：</span>
+            <span style={{ fontFamily: 'var(--font-mono)' }}>{keyData.id}</span>
+          </div>
+          <p style={{ margin: '0.5rem 0 0', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+            该 Key 既往产生的用量、费用明细与统计记录将作为最小审计账目予以保留，原有历史数据与累计金额不受影响。
+          </p>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ==========================================================================
    SecretRevealedModal
    ========================================================================== */
 
@@ -695,6 +821,9 @@ export interface SecretRevealedModalProps {
 }
 
 export function SecretRevealedModal({ data, onClose, onCopy, copiedId, copyError }: SecretRevealedModalProps) {
+  const [hidden, setHidden] = useState(false);
+  const secretSpanRef = useRef<HTMLSpanElement | null>(null);
+
   return (
     <Modal
       title={data.action === 'create' ? 'Key 创建成功' : 'Key 轮转成功'}
@@ -711,24 +840,63 @@ export function SecretRevealedModal({ data, onClose, onCopy, copiedId, copyError
 
         <Notice tone="warning">
           <strong>重要安全提示：</strong>
-          客户端明文密钥仅在本次关闭前展示一次，关闭后将无法再次查看或找回！请立即妥善保存。
+          客户端明文密钥仅在本次展示一次，关闭后将无法再次查看或找回！请立即妥善保存。关闭后立即清除内存。
         </Notice>
 
         <div>
-          <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-            客户端密钥 ({data.label}):
-          </span>
-          <div className="cpa-secret-box">
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.95rem', fontWeight: 600 }}>
-              {data.secret}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.35rem' }}>
+            <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+              客户端密钥 ({data.label}):
             </span>
-            <Button
-              variant="primary"
-              style={{ padding: '0.35rem 0.8rem', minHeight: 'auto' }}
-              onClick={() => onCopy(data.secret, 'revealed-secret')}
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-tertiary)' }}>
+              格式为 sk-... (共 51 位)
+            </span>
+          </div>
+          <div className="cpa-secret-box">
+            <span
+              ref={secretSpanRef}
+              style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: '0.95rem',
+                fontWeight: 600,
+                userSelect: 'all',
+                wordBreak: 'break-all',
+              }}
+              aria-label="客户端明文密钥"
             >
-              {copiedId === 'revealed-secret' ? '已复制' : '复制密钥'}
-            </Button>
+              {hidden ? '•••••••••••••••••••••••••••••••••••••••••••••••••••' : data.secret}
+            </span>
+            <div style={{ display: 'flex', gap: '0.35rem', flexShrink: 0 }}>
+              <Button
+                variant="ghost"
+                style={{ padding: '0.3rem 0.6rem', minHeight: 'auto', fontSize: '0.8rem' }}
+                onClick={() => setHidden(!hidden)}
+              >
+                {hidden ? '显示' : '隐藏'}
+              </Button>
+              <Button
+                variant="ghost"
+                style={{ padding: '0.3rem 0.6rem', minHeight: 'auto', fontSize: '0.8rem' }}
+                onClick={() => {
+                  if (secretSpanRef.current && typeof window !== 'undefined') {
+                    const range = document.createRange();
+                    range.selectNodeContents(secretSpanRef.current);
+                    const sel = window.getSelection();
+                    sel?.removeAllRanges();
+                    sel?.addRange(range);
+                  }
+                }}
+              >
+                全选文本
+              </Button>
+              <Button
+                variant="primary"
+                style={{ padding: '0.35rem 0.8rem', minHeight: 'auto' }}
+                onClick={() => onCopy(data.secret, 'revealed-secret')}
+              >
+                {copiedId === 'revealed-secret' ? '已复制' : '复制密钥'}
+              </Button>
+            </div>
           </div>
         </div>
 
