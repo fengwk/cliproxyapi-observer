@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fengwk/cliproxyapi-observer/internal/pricing"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -898,6 +899,35 @@ func statuses(c capture, st captureState) (headers, body, aggregate, reason stri
 	return
 }
 
+func cloneRates(v pricing.Rates) pricing.Rates {
+	if v.Reasoning != nil {
+		r := *v.Reasoning
+		v.Reasoning = &r
+	}
+	return v
+}
+
+// clonePriceQuote deep-copies every slice and pointer so callers can never
+// mutate the immutable quote retained in bbolt.
+func clonePriceQuote(q pricing.Quote) pricing.Quote {
+	q.Rates = cloneRates(q.Rates)
+	if q.CatalogTime != nil {
+		t := *q.CatalogTime
+		q.CatalogTime = &t
+	}
+	q.MissingRates = append([]string(nil), q.MissingRates...)
+	if q.Candidates != nil {
+		candidates := make([]pricing.Candidate, len(q.Candidates))
+		for i, candidate := range q.Candidates {
+			candidates[i] = candidate
+			candidates[i].Rates = cloneRates(candidate.Rates)
+			candidates[i].MissingRates = append([]string(nil), candidate.MissingRates...)
+		}
+		q.Candidates = candidates
+	}
+	return q
+}
+
 func (s *Store) Detail(id string) (Detail, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -911,6 +941,7 @@ func (s *Store) Detail(id string) (Detail, error) {
 			return e
 		}
 		d.Record = stored.Record
+		d.PriceQuote = clonePriceQuote(stored.Quote)
 		cut := s.now().Add(-time.Duration(s.settings.RawRetentionHours) * time.Hour)
 		if d.Record.Time.Before(cut) {
 			return ErrNotFound

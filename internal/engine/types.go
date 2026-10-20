@@ -132,9 +132,36 @@ type Health struct {
 	MaintenanceActive      bool             `json:"maintenance_active"`
 }
 type Query struct {
-	From, To                                  time.Time
-	KeyID, Model, Provider, AuthIndex, Status string // status empty/success/failed
-	Page, PageSize                            int    // 1-based, <=100
+	From                                      time.Time `json:"from,omitempty"` // legacy RFC3339 half-open range
+	To                                        time.Time `json:"to,omitempty"`
+	KeyID, Model, Provider, AuthIndex, Status string    // status empty/success/failed
+	Page, PageSize                            int       // 1-based, <=100
+}
+
+// ViewQuery is the stable input for RequestView. Date-only fields are inclusive
+// UTC calendar dates; View is one of requests/model/key/account/provider.
+type ViewQuery struct {
+	Query
+	FromDate string `json:"from_date,omitempty"` // YYYY-MM-DD
+	ToDate   string `json:"to_date,omitempty"`   // YYYY-MM-DD, inclusive
+	View     string `json:"view,omitempty"`
+}
+
+type FacetQuery struct {
+	Field  string `json:"field"`
+	Search string `json:"search,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+}
+
+type FacetItem struct {
+	Value string `json:"value"`
+	Label string `json:"label,omitempty"`
+}
+
+type FacetPage struct {
+	Items      []FacetItem `json:"items"`
+	NextCursor string      `json:"next_cursor,omitempty"`
 }
 type Record struct {
 	ID                string                `json:"id"`
@@ -162,20 +189,83 @@ type RequestPage struct {
 	PageSize int      `json:"page_size"`
 	HasMore  bool     `json:"has_more"`
 }
+
+// Aggregate is flat by contract: the original four fields remain and detailed
+// fields are additive. detailed_requests tells callers how many requests have
+// observations for the new fields; old history must not be rendered as zero.
+type Aggregate struct {
+	Requests         int64 `json:"requests"`
+	Failures         int64 `json:"failures"`
+	CostMicroUSD     int64 `json:"cost_micro_usd"`
+	Tokens           int64 `json:"tokens"`
+	InputTokens      int64 `json:"input_tokens"`
+	OutputTokens     int64 `json:"output_tokens"`
+	CacheReadTokens  int64 `json:"cache_read_tokens"`
+	CacheWriteTokens int64 `json:"cache_write_tokens"`
+	ReasoningTokens  int64 `json:"reasoning_tokens"`
+	CompleteRequests int64 `json:"complete_requests"`
+	LatencyMS        int64 `json:"latency_ms"`
+	LatencySamples   int64 `json:"latency_samples"`
+	TTFTMS           int64 `json:"ttft_ms"`
+	TTFTSamples      int64 `json:"ttft_samples"`
+	UnpricedRequests int64 `json:"unpriced_requests"`
+	DetailedRequests int64 `json:"detailed_requests"`
+}
+
 type Bucket struct {
-	Time         time.Time `json:"time"`
-	Requests     int64     `json:"requests"`
-	Failures     int64     `json:"failures"`
-	CostMicroUSD int64     `json:"cost_micro_usd"`
-	Tokens       int64     `json:"tokens"`
+	Time time.Time `json:"time"`
+	Aggregate
 }
 type Summary struct {
-	Requests     int64    `json:"requests"`
-	Failures     int64    `json:"failures"`
-	CostMicroUSD int64    `json:"cost_micro_usd"`
-	Tokens       int64    `json:"tokens"`
-	Granularity  string   `json:"granularity"`
-	Buckets      []Bucket `json:"buckets"`
+	Aggregate
+	Granularity string   `json:"granularity"`
+	Buckets     []Bucket `json:"buckets"`
+}
+
+type ViewRange struct {
+	From     time.Time `json:"from"`
+	To       time.Time `json:"to"`
+	AsOf     time.Time `json:"as_of"`
+	Timezone string    `json:"timezone"`
+}
+
+type Series struct {
+	Granularity string   `json:"granularity"`
+	Buckets     []Bucket `json:"buckets"`
+}
+
+type Group struct {
+	Aggregate
+	Key       string `json:"key"`
+	Label     string `json:"label,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	KeyID     string `json:"key_id,omitempty"`
+	AuthIndex string `json:"auth_index,omitempty"`
+}
+
+type Pagination struct {
+	Page     int  `json:"page"`
+	PageSize int  `json:"page_size"`
+	HasMore  bool `json:"has_more"`
+}
+
+type Coverage struct {
+	RawFrom          *time.Time `json:"raw_from"`
+	DailyFrom        *time.Time `json:"daily_from"`
+	DetailedRequests int64      `json:"detailed_requests"`
+	Requests         int64      `json:"requests"`
+	BackfillPending  bool       `json:"backfill_pending"`
+}
+
+type RequestView struct {
+	Range      ViewRange  `json:"range"`
+	Summary    Aggregate  `json:"summary"`
+	Series     Series     `json:"series"`
+	Records    []Record   `json:"records"`
+	Groups     []Group    `json:"groups"`
+	Pagination Pagination `json:"pagination"`
+	Coverage   Coverage   `json:"coverage"`
 }
 type Detail struct {
 	Record          Record          `json:"record"`
@@ -189,6 +279,8 @@ type Detail struct {
 	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
 	OriginalBytes   int64           `json:"original_bytes"`
 	CompressedBytes int64           `json:"compressed_bytes"`
+	// PriceQuote is an immutable deep copy of the quote saved with the record.
+	PriceQuote pricing.Quote `json:"price_quote"`
 }
 type CleanupResult struct {
 	RemovedRecords int64 `json:"removed_records"`
