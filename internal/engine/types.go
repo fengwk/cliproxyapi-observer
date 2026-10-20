@@ -36,14 +36,16 @@ type KeySpec struct {
 	Limits        Limits     `json:"limits"`
 }
 type Key struct {
-	ID            string    `json:"id"`
-	KeySpec                 // embedded flat JSON
-	Used          Limits    `json:"used"`
-	Starts        Windows   `json:"starts"`
-	Resets        Windows   `json:"resets"`
-	Active        int       `json:"active"`
-	BlockedReason string    `json:"blocked_reason,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID            string     `json:"id"`
+	KeySpec                  // embedded flat JSON
+	Used          Limits     `json:"used"`
+	Starts        Windows    `json:"starts"`
+	Resets        Windows    `json:"resets"`
+	Active        int        `json:"active"`
+	BlockedReason string     `json:"blocked_reason,omitempty"`
+	DeletedAt     *time.Time `json:"deleted_at,omitempty"`
+	Revoked       bool       `json:"revoked,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
 }
 type Admission struct {
 	RequestID, TraceID, KeyID, Model string
@@ -54,21 +56,80 @@ type CaptureInput struct {
 	Headers                   http.Header
 	Body                      []byte
 	At                        time.Time
+
+	// Queue snapshot fields. They are internal so plugin callers keep using the
+	// stable exported shape while the worker can re-check the accepted policy.
+	mode           string
+	generation     uint64
+	bodyTooLarge   bool
+	headersTooWide bool
+	headersRedact  bool
+	originalBytes  int64
 }
 type Settings struct {
-	CaptureEnabled      bool           `json:"capture_enabled"`
-	MaxBodyBytes        int            `json:"max_body_bytes"`         // default 1MiB
-	MaxBodyStorageBytes int64          `json:"max_body_storage_bytes"` // default 256MiB
-	RawRetentionHours   int            `json:"raw_retention_hours"`    // default24, 1..168
-	DailyRetentionDays  int            `json:"daily_retention_days"`   // default365, 1..3650
-	Pricing             pricing.Config `json:"pricing"`
+	CaptureEnabled          bool           `json:"capture_enabled"`
+	CaptureMode             string         `json:"capture_mode"`
+	CaptureRetentionSeconds int            `json:"capture_retention_seconds"`
+	MaxBodyBytes            int            `json:"max_body_bytes"`         // default 1MiB
+	MaxBodyStorageBytes     int64          `json:"max_body_storage_bytes"` // default 256MiB
+	RawRetentionHours       int            `json:"raw_retention_hours"`    // default24, 1..168
+	DailyRetentionDays      int            `json:"daily_retention_days"`   // default365, 1..3650
+	Pricing                 pricing.Config `json:"pricing"`
 }
+
+// Capture modes are explicit; capture_enabled is retained only as a compatible
+// projection of the same decision.
+const (
+	CaptureModeOff            = "off"
+	CaptureModeHeaders        = "headers"
+	CaptureModeHeadersAndBody = "headers_and_body"
+	captureStatusAvailable    = "available"
+	captureStatusRedacted     = "redacted"
+	captureStatusDisabled     = "disabled"
+	captureStatusPending      = "pending"
+	captureStatusTooLarge     = "too_large"
+	captureStatusUnsupported  = "unsupported"
+	captureStatusExpired      = "expired"
+	captureStatusEvicted      = "evicted"
+	captureStatusPurged       = "purged"
+	captureStatusMissing      = "missing"
+	captureStatusTruncated    = "truncated" // legacy schema2 display value
+	captureReasonOff          = "capture_off"
+	captureReasonHeadersOnly  = "headers_only"
+	captureReasonBodyTooLarge = "body_too_large"
+	captureReasonHeadersLarge = "headers_too_large"
+	captureReasonUnsupported  = "unsupported_body"
+	captureReasonStorageLimit = "storage_limit"
+	captureReasonCapacity     = "capacity"
+	captureReasonExpired      = "expired"
+	captureReasonPurged       = "purged"
+	captureReasonMissing      = "missing"
+	captureReasonRedacted     = "redacted"
+	captureReasonCorrelation  = "trace_collision"
+	captureHeaderLimit        = 16 << 10
+	captureEnvelopeVersion    = 1
+	supportedObserverFeature  = 1
+)
+
 type Health struct {
-	DatabaseBytes   int64  `json:"database_bytes"`
-	DroppedCaptures uint64 `json:"dropped_captures"`
-	PendingUsage    int    `json:"pending_usage"`
-	ActiveRequests  int    `json:"active_requests"`
-	LastError       string `json:"last_error,omitempty"`
+	DatabaseBytes          int64            `json:"database_bytes"`
+	DroppedCaptures        uint64           `json:"dropped_captures"`
+	CaptureDrops           map[string]int64 `json:"capture_drops"`
+	CountersSince          time.Time        `json:"counters_since"`
+	CaptureBytes           int64            `json:"capture_bytes"`
+	CaptureLimitBytes      int64            `json:"capture_limit_bytes"`
+	ReclaimableBytes       int64            `json:"reclaimable_bytes"`
+	PendingUsage           int              `json:"pending_usage"`
+	ActiveRequests         int              `json:"active_requests"`
+	LastError              string           `json:"last_error,omitempty"`
+	MaintenanceError       string           `json:"maintenance_error,omitempty"`
+	LastCleanupAt          *time.Time       `json:"last_cleanup_at,omitempty"`
+	LastCompactAt          *time.Time       `json:"last_compact_at,omitempty"`
+	LastCleanupRecords     int64            `json:"last_cleanup_records"`
+	LastCleanupBytes       int64            `json:"last_cleanup_bytes"`
+	LastCompactBeforeBytes int64            `json:"last_compact_before_bytes"`
+	LastCompactAfterBytes  int64            `json:"last_compact_after_bytes"`
+	MaintenanceActive      bool             `json:"maintenance_active"`
 }
 type Query struct {
 	From, To                                  time.Time
@@ -117,10 +178,21 @@ type Summary struct {
 	Buckets      []Bucket `json:"buckets"`
 }
 type Detail struct {
-	Record        Record          `json:"record"`
-	Headers       http.Header     `json:"headers"`
-	Body          json.RawMessage `json:"body"`           // null if unavailable
-	CaptureStatus string          `json:"capture_status"` // available/disabled/expired/missing/truncated/redacted
+	Record          Record          `json:"record"`
+	Headers         http.Header     `json:"headers"`
+	Body            json.RawMessage `json:"body"`           // null if unavailable
+	CaptureStatus   string          `json:"capture_status"` // legacy aggregate status
+	HeadersStatus   string          `json:"headers_status"` // independent header state
+	BodyStatus      string          `json:"body_status"`    // independent body state
+	CaptureReason   string          `json:"capture_reason,omitempty"`
+	CapturedAt      *time.Time      `json:"captured_at,omitempty"`
+	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
+	OriginalBytes   int64           `json:"original_bytes"`
+	CompressedBytes int64           `json:"compressed_bytes"`
+}
+type CleanupResult struct {
+	RemovedRecords int64 `json:"removed_records"`
+	RemovedBytes   int64 `json:"removed_bytes"`
 }
 
 var (
@@ -135,4 +207,7 @@ var (
 	ErrInvalid      = errors.New("invalid")
 	ErrBusy         = errors.New("busy")
 	ErrConflict     = errors.New("conflict")
+	ErrDeleted      = errors.New("deleted")
+	ErrUnsupported  = errors.New("unsupported")
+	ErrMaintenance  = errors.New("maintenance")
 )
