@@ -1,15 +1,20 @@
 package plugin
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/fengwk/cliproxyapi-observer/internal/engine"
+	"github.com/fengwk/cliproxyapi-observer/internal/pricing"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"go.etcd.io/bbolt"
 )
 
 // Only the verified v8.0.30 model execution, count, and directory routes are
@@ -158,7 +163,9 @@ func TestBeforeOwnershipAndStoreFailure(t *testing.T) {
 		deny bool
 	}{
 		{"own generation", metadata(generation.Principal, "/v1/chat/completions"), true},
+		{"own generation template", metadata(generation.Principal, "/v1beta/models/*action"), true},
 		{"own count", metadata(count.Principal, "/v1/messages/count_tokens"), true},
+		{"own count template", metadata(count.Principal, "/v1beta/models/*action"), true},
 		{"own directory", metadata(directory.Principal, "/v1/models"), false},
 		{"own missing path", metadata(generation.Principal, ""), false},
 		{"own unsupported path", metadata(generation.Principal, "/v1/images/generations"), false},
@@ -189,8 +196,8 @@ func TestBeforeOwnershipAndStoreFailure(t *testing.T) {
 	// The host replaces the native instance while this process keeps serving.
 	// Reopening the same database restores owned admission for existing scopes.
 	call(t, m, "plugin.reconfigure", lifecycleRequest{[]byte("db: " + m.cfg.DB), 6})
-	if r := before(metadata(generation.Principal, "/v1/chat/completions")); r.Terminate {
-		t.Fatal("recovered store rejected owned generation")
+	if r := before(metadata(generation.Principal, "/v1beta/models/*action")); r.Terminate {
+		t.Fatal("recovered store rejected owned generation template")
 	}
 	call(t, m, "request.complete", pluginapi.RequestCompletion{RequestID: "request", CompletedAt: time.Now()})
 }
@@ -241,5 +248,236 @@ func TestOwnScopeDisabledAndExpired(t *testing.T) {
 	}
 	if authenticate().Authenticated {
 		t.Fatal("expired Key authenticated")
+	}
+}
+
+// Gin's Gemini interceptor metadata is the FullPath template, not the exact
+// action. The authenticated operation must still enforce quota/concurrency and
+// keep count free of admission, charging, and capture.
+func TestGeminiWildcardAdmissionEnforcement(t *testing.T) {
+	t.Run("quota", func(t *testing.T) {
+		m := liveManager(t)
+		settings, err := m.store.Settings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		settings.Pricing = pricing.Config{Prices: []pricing.Price{{Model: "model", Rates: pricing.Rates{Input: 1_000_000}}}, Rules: []pricing.Rule{}}
+		if _, err = m.store.UpdateSettings(settings); err != nil {
+			t.Fatal(err)
+		}
+		k, secret, err := m.store.CreateKey(engine.KeySpec{Enabled: true, Limits: engine.Limits{Total: 1}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		headers := http.Header{"Authorization": {"Bearer " + secret}}
+		generation := authenticateTest(t, m, pluginapi.FrontendAuthRequest{Method: "POST", Path: "/v1beta/models/model:generateContent", Headers: headers})
+		count := authenticateTest(t, m, pluginapi.FrontendAuthRequest{Method: "POST", Path: "/v1beta/models/model:countTokens", Headers: headers})
+		call(t, m, "usage.handle", pluginapi.UsageRecord{RequestID: "full", APIKey: "observer:" + k.ID, AccessProvider: AccessProvider, Generate: true, Provider: "openai", Model: "model", RequestedAt: time.Now(), Detail: pluginapi.UsageDetail{InputTokens: 1}})
+		before := func(principal, id string) pluginapi.RequestInterceptResponse {
+			var r pluginapi.RequestInterceptResponse
+			_ = json.Unmarshal(call(t, m, "request.intercept_before", pluginapi.RequestInterceptRequest{RequestID: id, RequestedModel: "model", Metadata: map[string]any{
+				coreexecutor.CallerScopeMetadataKey: session.CallerScope(principal),
+				coreexecutor.GenerateMetadataKey:    true,
+				coreexecutor.RequestPathMetadataKey: "/v1beta/models/*action",
+			}}), &r)
+			return r
+		}
+		if r := before(generation.Principal, "generation"); !r.Terminate || r.StatusCode != 429 {
+			t.Fatalf("wildcard generation bypassed quota: %+v", r)
+		}
+		if r := before(count.Principal, "count"); r.Terminate || m.store.Health().ActiveRequests != 0 {
+			t.Fatalf("wildcard count entered admission: %+v", r)
+		}
+		if _, ok := m.admitted.Load("count"); ok {
+			t.Fatal("count was recorded as an admission")
+		}
+		// Count usage is never billable, even when the host sets Generate=true.
+		call(t, m, "usage.handle", pluginapi.UsageRecord{RequestID: "count-usage", Generate: true, AccessProvider: AccessProvider, APIKey: count.Principal, Provider: "openai", Model: "model", RequestedAt: time.Now(), Detail: pluginapi.UsageDetail{InputTokens: 100}})
+		if page, err := m.store.Requests(engine.Query{From: time.Now().Add(-time.Hour), To: time.Now().Add(time.Hour), Page: 1, PageSize: 25}); err != nil || len(page.Items) != 1 || page.Items[0].ID != "full" {
+			t.Fatalf("count usage was billed: %+v %v", page, err)
+		}
+	})
+
+	t.Run("model and concurrency", func(t *testing.T) {
+		m := liveManager(t)
+		_, secret, err := m.store.CreateKey(engine.KeySpec{Enabled: true, MaxConcurrent: 1, AllowedModels: []string{"model"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		headers := http.Header{"Authorization": {"Bearer " + secret}}
+		generation := authenticateTest(t, m, pluginapi.FrontendAuthRequest{Method: "POST", Path: "/v1beta/models/model:generateContent", Headers: headers})
+		count := authenticateTest(t, m, pluginapi.FrontendAuthRequest{Method: "POST", Path: "/v1beta/models/model:countTokens", Headers: headers})
+		before := func(principal, model, id string) pluginapi.RequestInterceptResponse {
+			var r pluginapi.RequestInterceptResponse
+			_ = json.Unmarshal(call(t, m, "request.intercept_before", pluginapi.RequestInterceptRequest{RequestID: id, TraceID: "trace-" + id, RequestedModel: model, Metadata: map[string]any{
+				coreexecutor.CallerScopeMetadataKey: session.CallerScope(principal),
+				coreexecutor.GenerateMetadataKey:    true,
+				coreexecutor.RequestPathMetadataKey: "/v1beta/models/*action",
+			}}), &r)
+			return r
+		}
+		if r := before(generation.Principal, "other", "restricted"); !r.Terminate {
+			t.Fatal("wildcard generation bypassed model restriction")
+		}
+		if r := before(generation.Principal, "model", "generation-1"); r.Terminate || m.store.Health().ActiveRequests != 1 {
+			t.Fatal("wildcard generation was not admitted")
+		}
+		if r := before(count.Principal, "model", "count-1"); r.Terminate || m.store.Health().ActiveRequests != 1 {
+			t.Fatal("wildcard count reserved concurrency")
+		}
+		if _, ok := m.admitted.Load("count-1"); ok {
+			t.Fatal("count was recorded as an admission")
+		}
+		if r := before(generation.Principal, "model", "generation-2"); !r.Terminate || r.StatusCode != 429 {
+			t.Fatal("wildcard generation bypassed concurrency")
+		}
+		call(t, m, "request.complete", pluginapi.RequestCompletion{RequestID: "generation-1", CompletedAt: time.Now()})
+	})
+}
+
+// A caller scope may only perform the operation authenticated on its original
+// exact path. This prevents generation->count bypass and directory execution.
+func TestScopeOperationCoordination(t *testing.T) {
+	m := liveManager(t)
+	_, secret, err := m.store.CreateKey(engine.KeySpec{Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := http.Header{"Authorization": {"Bearer " + secret}}
+	generation := authenticateTest(t, m, pluginapi.FrontendAuthRequest{Method: "POST", Path: "/v1beta/models/model:generateContent", Headers: headers})
+	count := authenticateTest(t, m, pluginapi.FrontendAuthRequest{Method: "POST", Path: "/v1beta/models/model:countTokens", Headers: headers})
+	directory := authenticateTest(t, m, pluginapi.FrontendAuthRequest{Method: "GET", Path: "/v1beta/models/model", Headers: headers})
+	before := func(principal, path string) pluginapi.RequestInterceptResponse {
+		var r pluginapi.RequestInterceptResponse
+		_ = json.Unmarshal(call(t, m, "request.intercept_before", pluginapi.RequestInterceptRequest{RequestID: "request", RequestedModel: "model", Metadata: map[string]any{
+			coreexecutor.CallerScopeMetadataKey: session.CallerScope(principal), coreexecutor.RequestPathMetadataKey: path,
+		}}), &r)
+		return r
+	}
+	for _, test := range []struct{ name, principal, path string }{
+		{"generation as count", generation.Principal, "/v1/messages/count_tokens"},
+		{"count as generation", count.Principal, "/v1/chat/completions"},
+		{"directory as generation", directory.Principal, "/v1/chat/completions"},
+		{"directory as template", directory.Principal, "/v1beta/models/*action"},
+	} {
+		if r := before(test.principal, test.path); !r.Terminate || r.StatusCode != 403 {
+			t.Fatalf("%s: %+v", test.name, r)
+		}
+	}
+	if r := before(generation.Principal, "/v1beta/models/*action"); r.Terminate || m.store.Health().ActiveRequests != 1 {
+		t.Fatal("generation template was not admitted")
+	}
+	if r := before(count.Principal, "/v1beta/models/*action"); r.Terminate || m.store.Health().ActiveRequests != 1 {
+		t.Fatal("count template reserved admission")
+	}
+	if r := before("native-host-scope", "/v1beta/models/*action"); r.Terminate {
+		t.Fatal("unknown host scope was rejected")
+	}
+	call(t, m, "request.complete", pluginapi.RequestCompletion{RequestID: "request", CompletedAt: time.Now()})
+}
+
+// Concurrent authentication for different operations must not rewrite the
+// caller scope's recorded operation.
+func TestConcurrentScopesKeepAuthenticatedOperation(t *testing.T) {
+	m := liveManager(t)
+	_, secret, err := m.store.CreateKey(engine.KeySpec{Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := http.Header{"Authorization": {"Bearer " + secret}}
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 16; i++ {
+		for _, spec := range []struct{ method, path string }{
+			{"POST", "/v1beta/models/model:generateContent"},
+			{"POST", "/v1beta/models/model:countTokens"},
+			{"GET", "/v1beta/models/model"},
+		} {
+			wg.Add(1)
+			go func(method, path string) {
+				defer wg.Done()
+				<-start
+				authenticateTest(t, m, pluginapi.FrontendAuthRequest{Method: method, Path: path, Headers: headers})
+			}(spec.method, spec.path)
+		}
+	}
+	close(start)
+	wg.Wait()
+	for principal, want := range map[string]requestOperation{
+		"observer:" + mustKeyID(t, m):           operationGeneration,
+		"observer-count:" + mustKeyID(t, m):     operationCount,
+		"observer-directory:" + mustKeyID(t, m): operationDirectory,
+	} {
+		v, ok := m.scopes.Load(session.CallerScope(principal))
+		if !ok {
+			t.Fatalf("missing scope for %s", principal)
+		}
+		if got := v.(callerScope).Operation; got != want {
+			t.Fatalf("%s operation: %v", principal, got)
+		}
+	}
+}
+
+func mustKeyID(t *testing.T, m *Manager) string {
+	t.Helper()
+	keys, err := m.store.Keys()
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("keys: %v %v", keys, err)
+	}
+	return keys[0].ID
+}
+
+// Count bodies and correlation entries must never be captured, even with
+// Generate=true and capture enabled. The correlation bucket is written by the
+// engine's capture worker, so its absence after a joined close is deterministic.
+func TestCountDoesNotCapture(t *testing.T) {
+	m := liveManager(t)
+	settings, err := m.store.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.CaptureEnabled = true
+	if _, err = m.store.UpdateSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	_, secret, err := m.store.CreateKey(engine.KeySpec{Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := authenticateTest(t, m, pluginapi.FrontendAuthRequest{Method: "POST", Path: "/v1beta/models/model:countTokens", Headers: http.Header{"Authorization": {"Bearer " + secret}}})
+	var r pluginapi.RequestInterceptResponse
+	_ = json.Unmarshal(call(t, m, "request.intercept_before", pluginapi.RequestInterceptRequest{RequestID: "count-capture", TraceID: "trace-capture", RequestedModel: "model", Body: []byte(`{"contents":[]}`), Metadata: map[string]any{
+		coreexecutor.CallerScopeMetadataKey: session.CallerScope(count.Principal),
+		coreexecutor.GenerateMetadataKey:    true,
+		coreexecutor.RequestPathMetadataKey: "/v1beta/models/*action",
+	}}), &r)
+	if r.Terminate {
+		t.Fatal("count rejected")
+	}
+	m.mu.Lock()
+	if err := m.closeLocked(); err != nil {
+		m.mu.Unlock()
+		t.Fatal(err)
+	}
+	m.mu.Unlock()
+	database, err := bbolt.Open(m.cfg.DB, 0600, &bbolt.Options{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	err = database.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte("correlations"))
+		if bucket == nil {
+			return nil
+		}
+		return bucket.ForEach(func(_, value []byte) error {
+			if bytes.Contains(value, []byte("count-capture")) {
+				return errors.New("count capture correlation persisted")
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

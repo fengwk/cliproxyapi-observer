@@ -5,6 +5,11 @@ import (
 	"strings"
 )
 
+// Gemini's RequestInterceptor metadata uses Gin's FullPath template, so the
+// exact action (generateContent vs countTokens) is not recoverable there. The
+// authenticated operation is authoritative for this template.
+const geminiActionPathTemplate = "/v1beta/models/*action"
+
 // requestOperation is derived from the host's original HTTP method and path,
 // never from body fields or the Generate usage flag (count_tokens also sets it).
 type requestOperation uint8
@@ -89,6 +94,16 @@ func directoryPath(path string) bool {
 		return safeModelDetail(detail) && !strings.Contains(detail, ":")
 	}
 	return false
+}
+
+// beforeOperation classifies the host interceptor path. The boolean reports the
+// Gemini wildcard template, where only the authenticated operation can decide
+// between generation and counting.
+func beforeOperation(path string) (operation requestOperation, template bool) {
+	if path == geminiActionPathTemplate {
+		return operationUnknown, true
+	}
+	return operationFor(http.MethodPost, path), false
 }
 
 // countTokenPath is kept as the narrow operation predicate used by tests; it

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -96,10 +95,11 @@ type Manager struct {
 }
 
 // A host caller_scope is owned only after this plugin authenticated that exact
-// request shape. Operation and credentials are reclassified from host metadata,
-// so a count scope can never masquerade as a billable generation.
+// request shape. The authenticated operation is authoritative for Gemini's
+// FullPath wildcard, which cannot reveal generateContent vs countTokens.
 type callerScope struct {
-	KeyID string
+	KeyID     string
+	Operation requestOperation
 }
 
 func NewManager(assets AssetFunc) *Manager { return &Manager{assets: assets, now: time.Now} }
@@ -276,6 +276,10 @@ func (m *Manager) closeLocked() error {
 		m.admitted.Delete(id)
 		return true
 	})
+	// Keep caller scopes across store replacement. Clearing them would turn an
+	// already authenticated request into pass-through; while the store stays
+	// closed, owned scopes fail closed, and after reopen Authorize revalidates
+	// the Key. Scopes are hashed principals, never credentials.
 	if m.cancel != nil {
 		m.cancel()
 		m.workers.Wait()
@@ -382,8 +386,10 @@ func (m *Manager) authenticate(raw []byte) ([]byte, error) {
 		principal = "observer-directory:" + k.ID
 	}
 	// handlers.requestCallerScope hashes Gin userApiKey via the pinned SDK helper.
-	// userApiKey itself is NOT present in RequestInterceptRequest.Metadata.
-	m.scopes.Store(session.CallerScope(principal), callerScope{KeyID: k.ID})
+	// userApiKey itself is NOT present in RequestInterceptRequest.Metadata. The
+	// principal already separates operations; LoadOrStore also prevents a
+	// concurrent request from replacing the first recorded operation.
+	m.scopes.LoadOrStore(session.CallerScope(principal), callerScope{KeyID: k.ID, Operation: operation})
 	return okEnvelope(pluginapi.FrontendAuthResponse{Authenticated: true, Principal: principal})
 }
 func denied(status int) pluginapi.RequestInterceptResponse {
@@ -418,13 +424,30 @@ func (m *Manager) before(raw []byte) (out []byte, err error) {
 	if !ok || caller.KeyID == "" {
 		return okEnvelope(pluginapi.RequestInterceptResponse{})
 	}
-	// The original HTTP path decides the operation. Body fields and the Generate
-	// usage flag are not trusted because count_tokens also sets Generate=true.
+	// The host supplies an exact path for most routes, but Gin's FullPath for
+	// Gemini is "/v1beta/models/*action". That template cannot distinguish
+	// generateContent from countTokens, so the authenticated operation governs.
 	path, _ := r.Metadata[coreexecutor.RequestPathMetadataKey].(string)
-	operation := operationFor(http.MethodPost, path)
-	// Only supported execution/count routes are admitted. Directory reads and
-	// every unrecognized or absent path remain unhandled.
-	if operation != operationGeneration && operation != operationCount {
+	operation, template := beforeOperation(path)
+	if template {
+		switch caller.Operation {
+		case operationGeneration, operationCount:
+			operation = caller.Operation
+		default:
+			// A directory (or otherwise non-execution) scope never enters a
+			// model execution, even if a path was rewritten upstream.
+			return okEnvelope(denied(403))
+		}
+	} else if operation == operationGeneration || operation == operationCount {
+		// Exact routes must agree with the scope's authenticated operation:
+		// generation cannot masquerade as count, and count cannot bypass
+		// generation quota/concurrency.
+		if caller.Operation != operation {
+			return okEnvelope(denied(403))
+		}
+	} else {
+		// Unknown, absent, directory, or unsupported paths are not execution
+		// operations Observer owns. Native/unowned scopes were already returned.
 		return okEnvelope(pluginapi.RequestInterceptResponse{})
 	}
 	owned = true

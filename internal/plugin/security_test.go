@@ -76,7 +76,7 @@ func TestNoGlobalExclusivityAndUnavailable(t *testing.T) {
 	// A scope issued by this plugin still fails closed when storage is absent.
 	id := strings.Repeat("a", 64)
 	own := session.CallerScope("observer:" + id)
-	m.scopes.Store(own, callerScope{KeyID: id})
+	m.scopes.Store(own, callerScope{KeyID: id, Operation: operationGeneration})
 	_ = json.Unmarshal(call(t, m, "request.intercept_before", pluginapi.RequestInterceptRequest{RequestID: "own", Metadata: map[string]any{
 		coreexecutor.CallerScopeMetadataKey: own, coreexecutor.RequestPathMetadataKey: "/v1/chat/completions",
 	}}), &before)
