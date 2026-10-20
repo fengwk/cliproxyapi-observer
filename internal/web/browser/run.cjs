@@ -60,7 +60,26 @@ async function step(name, action) {
 }
 async function shot(page, name) {
   const file = path.join('screenshots', name + '.png');
-  await page.screenshot({ path: path.join(args.reportDir, file), fullPage: true });
+  if (name.startsWith('native-zoom-200')) {
+    // Playwright's CSS-sized default screenshot clips the physical surface at
+    // native browser zoom. Capture the actual layout viewport in physical
+    // coordinates; do not scale up an already clipped screenshot.
+    const session = await page.context().newCDPSession(page);
+    try {
+      const metrics = await session.send('Page.getLayoutMetrics');
+      const viewport = metrics.layoutViewport;
+      const { data } = await session.send('Page.captureScreenshot', {
+        format: 'png', fromSurface: true, captureBeyondViewport: false,
+        clip: { x: viewport.pageX, y: viewport.pageY, width: viewport.clientWidth, height: viewport.clientHeight, scale: 1 },
+      });
+      const image = Buffer.from(data, 'base64');
+      check(name + ': full physical zoom screenshot',
+        image.readUInt32BE(16) === viewport.clientWidth && image.readUInt32BE(20) === viewport.clientHeight);
+      await fs.writeFile(path.join(args.reportDir, file), image);
+    } finally { await session.detach(); }
+  } else {
+    await page.screenshot({ path: path.join(args.reportDir, file), fullPage: true });
+  }
   const info = await fs.stat(path.join(args.reportDir, file));
   report.screenshots.push({ file, bytes: info.size });
 }
