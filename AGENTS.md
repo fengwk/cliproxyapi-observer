@@ -1,10 +1,10 @@
 # Development rules
 
 - Keep this an independent CLIProxyAPI v8 native plugin. Never change CPA core.
-- Own client Key authentication and admission only. Never modify bodies, headers, model routing, retries or sessions.
+- Own only explicitly supported model calls authenticated with Observer client Keys. Do not use exclusive frontend authentication or reject unrelated/native CPA scopes. Never modify bodies, headers, model routing, retries or sessions.
 - Request content is sensitive: capture is opt-in, bounded and management-authenticated.
 - Keep content separate from metadata; enforce expiry on reads, not just background cleanup.
-- Store only hashes of generated or administrator-supplied client Keys. Never store authorization headers, upstream secrets, failure response bodies or browser credentials.
+- Store only hashes of generated or administrator-supplied client Keys. Never store authorization headers, upstream secrets or failure response bodies. The sole browser-credential exception is the user's explicit "remember management login" choice in Observer-owned storage; never persist client secrets or read host credentials.
 - Diagnostic capture is bounded and nonblocking. Accounting is transactional; a failed usage write pauses that Key's subsequent admissions, not an in-flight response.
 - Preserve complete model identities and persist normalized token accounting.
 - Fix integer micro-USD costs at ingestion; keep independent Key accumulators, daily rollups and short-lived request details. No legacy migration or query-time repricing.
