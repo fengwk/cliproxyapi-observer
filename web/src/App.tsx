@@ -5,6 +5,7 @@ import {
   LOCAL_KEY_STORAGE,
   getStoredManagementKey,
   clearStoredManagementCredentials,
+  ApiError,
   type ApiClient,
 } from './lib/api';
 import { errorMessage } from './lib/format';
@@ -32,7 +33,13 @@ export function App() {
   const [destination, setDestination] = useState<Tab | 'logout' | null>(null);
 
   const [loginKey, setLoginKey] = useState('');
-  const [rememberMe, setRememberMe] = useState(true);
+  const [rememberMe, setRememberMe] = useState<boolean>(() => {
+    const stored = getStoredManagementKey();
+    if (stored.key) {
+      return stored.isPersistent;
+    }
+    return true;
+  });
   const [loginError, setLoginError] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
   const [storageWarning, setStorageWarning] = useState('');
@@ -67,9 +74,18 @@ export function App() {
       return;
     }
 
+    // Reflect source: session credentials must NOT set rememberMe to true
+    setRememberMe(stored.isPersistent);
+
     const controller = new AbortController();
     restoreController.current = controller;
-    const temporary = createApiClient({ getKey: () => stored.key });
+    let is401FromCallback = false;
+    const temporary = createApiClient({
+      getKey: () => stored.key,
+      onUnauthorized: () => {
+        is401FromCallback = true;
+      },
+    });
 
     temporary
       .request('/health', { signal: controller.signal })
@@ -81,11 +97,12 @@ export function App() {
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return;
-        const msg = errorMessage(err);
+        // Strictly determine 401 via structured ApiError.status or onUnauthorized callback.
+        // DO NOT guess from err.message text (which could be a proxy or network error containing "401").
         const is401 =
-          msg.includes('401') ||
-          msg.toLowerCase().includes('unauthorized') ||
-          (err && typeof err === 'object' && 'status' in err && (err as { status: number }).status === 401);
+          is401FromCallback ||
+          (err instanceof ApiError && err.status === 401) ||
+          (typeof err === 'object' && err !== null && 'status' in err && (err as { status: unknown }).status === 401);
 
         if (is401) {
           clearStoredManagementCredentials();
@@ -95,6 +112,7 @@ export function App() {
           // 网络失败不删合法凭据，诚实显示错误并允许用户重试
           setLoginError('连接后端服务失败，本地保存的管理凭据已保留。请检查服务后重试。');
           setLoginKey(stored.key!);
+          setRememberMe(stored.isPersistent);
         }
         setRestoring(false);
       })
@@ -161,32 +179,34 @@ export function App() {
       if (controller.signal.aborted) return;
 
       if (rememberMe) {
+        // 先清理另一副本
+        try {
+          sessionStorage.removeItem(SESSION_KEY_STORAGE);
+        } catch {
+          /* ignore */
+        }
         try {
           localStorage.setItem(LOCAL_KEY_STORAGE, entered);
-          try {
-            sessionStorage.removeItem(SESSION_KEY_STORAGE);
-          } catch {
-            /* ignore */
-          }
         } catch {
           // Storage failed / blocked: honest warning
-          setStorageWarning('存储已被禁用，无法记住登录，仅在当前会话生效。');
+          setStorageWarning('本地存储已被禁用，无法记住登录，仅在当前会话生效。');
           try {
             sessionStorage.setItem(SESSION_KEY_STORAGE, entered);
           } catch {
-            /* in-memory only fallback */
+            setStorageWarning('本地与会话存储均已被禁用，凭据仅在当前内存生效。');
           }
         }
       } else {
+        // 先清理持久化副本，无论随后 sessionStorage 是否成功，确保绝不残留持久化密钥
+        try {
+          localStorage.removeItem(LOCAL_KEY_STORAGE);
+        } catch {
+          /* ignore */
+        }
         try {
           sessionStorage.setItem(SESSION_KEY_STORAGE, entered);
-          try {
-            localStorage.removeItem(LOCAL_KEY_STORAGE);
-          } catch {
-            /* ignore */
-          }
         } catch {
-          /* in-memory only fallback */
+          setStorageWarning('会话存储已被禁用，凭据仅在当前内存生效。');
         }
       }
 

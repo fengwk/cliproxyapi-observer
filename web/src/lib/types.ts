@@ -229,6 +229,11 @@ export interface Summary extends Aggregate {
   buckets: SummaryBucket[];
 }
 
+export interface PriceQuote extends Price {
+  cost_micro_usd?: number;
+  rule_id?: string;
+}
+
 export interface Detail {
   record: RequestRecord;
   headers: Record<string, string[]>;
@@ -241,6 +246,7 @@ export interface Detail {
   expires_at?: string;
   original_bytes?: number;
   compressed_bytes?: number;
+  price_quote?: PriceQuote;
 }
 
 export interface ModelInfo {
