@@ -25,6 +25,12 @@
   --primary-hover: #7f7a74;
   --primary-active: #726d67;
   --primary-contrast: #ffffff;
+
+  /* Neutral high-contrast action colors (WCAG AAA >= 7:1) */
+  --action-primary-bg: #2d2a26;
+  --action-primary-hover: #45403b;
+  --action-primary-active: #1c1a17;
+  --action-primary-text: #ffffff;
   --success-color: #10b981;
   --warning-color: #c65746;
   --error-color: #c65746;
@@ -61,6 +67,10 @@
   --border-color: #e5e5e5;
   --border-primary: #d9d9d9;
   --border-hover: #cccccc;
+  --action-primary-bg: #1f1f1f;
+  --action-primary-hover: #383838;
+  --action-primary-active: #0a0a0a;
+  --action-primary-text: #ffffff;
 }
 
 [data-theme="dark"] {
@@ -80,6 +90,10 @@
   --border-hover: #5a544d;
   --primary-hover: #9a948e;
   --primary-active: #a6a099;
+  --action-primary-bg: #f6f4f1;
+  --action-primary-hover: #e8e3dc;
+  --action-primary-active: #dad3c9;
+  --action-primary-text: #151412;
   --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.3);
   --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.3);
   --warning-bg: rgba(198, 87, 70, 0.22);
@@ -113,6 +127,10 @@
     --border-hover: #5a544d;
     --primary-hover: #9a948e;
     --primary-active: #a6a099;
+    --action-primary-bg: #f6f4f1;
+    --action-primary-hover: #e8e3dc;
+    --action-primary-active: #dad3c9;
+    --action-primary-text: #151412;
     --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.3);
     --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.3);
   }
@@ -163,9 +181,23 @@ input[type="number"] {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-  padding: 0 1.25rem 2.5rem;
-  max-width: 1440px;
-  margin: 0 auto;
+  padding: 0 1.5rem 2.5rem;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  box-sizing: border-box;
+}
+
+@media (max-width: 1024px) {
+  .cpa-app-layout {
+    padding: 0 1rem 2rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .cpa-app-layout {
+    padding: 0 0.75rem 1.5rem;
+  }
 }
 
 /* Keep both the scrolling viewport and portals below CPA floating actions.
@@ -314,16 +346,16 @@ input[type="number"] {
 }
 
 .cpa-btn-primary {
-  background-color: var(--primary-color);
-  color: var(--primary-contrast);
-  border-color: var(--primary-color);
+  background-color: var(--action-primary-bg);
+  color: var(--action-primary-text);
+  border-color: var(--action-primary-bg);
 }
 .cpa-btn-primary:not(:disabled):hover {
-  background-color: var(--primary-hover);
-  border-color: var(--primary-hover);
+  background-color: var(--action-primary-hover);
+  border-color: var(--action-primary-hover);
 }
 .cpa-btn-primary:not(:disabled):active {
-  background-color: var(--primary-active);
+  background-color: var(--action-primary-active);
 }
 
 .cpa-btn-secondary {
@@ -372,7 +404,7 @@ input[type="number"] {
 
 .cpa-input {
   width: 100%;
-  padding: 0.5rem 0.75rem;
+  padding: 0.45rem 0.75rem;
   font-size: 0.9rem;
   font-family: inherit;
   color: var(--text-primary);
@@ -380,7 +412,7 @@ input[type="number"] {
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   transition: border-color 150ms ease, background-color 150ms ease;
-  min-height: 38px;
+  min-height: 36px;
 }
 
 .cpa-input:focus {
@@ -431,14 +463,14 @@ input[type="number"] {
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  padding: 0.5rem 0.75rem;
+  padding: 0.45rem 0.75rem;
   font-size: 0.9rem;
   color: var(--text-primary);
   background-color: var(--bg-primary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   cursor: pointer;
-  min-height: 38px;
+  min-height: 36px;
 }
 
 .cpa-select-trigger:focus {
@@ -461,6 +493,36 @@ input[type="number"] {
   min-width: 140px;
   max-height: min(320px, var(--radix-select-content-available-height));
   overflow-y: auto;
+}
+
+.cpa-select-search {
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border-color);
+  background-color: var(--bg-primary);
+}
+
+.cpa-select-search-input {
+  width: 100%;
+  min-height: 30px !important;
+  height: 30px;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.85rem;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.cpa-select-search-input:focus {
+  border-color: var(--action-primary-bg);
+  outline: none;
+}
+
+.cpa-select-empty {
+  padding: 0.75rem 0.5rem;
+  font-size: 0.85rem;
+  color: var(--text-tertiary);
+  text-align: center;
 }
 
 .cpa-select-viewport {
@@ -840,16 +902,29 @@ input[type="number"] {
   align-items: center;
   justify-content: space-between;
   background-color: var(--bg-secondary);
-  border: 1px dashed var(--border-primary);
+  border: 1px solid var(--border-primary);
   border-radius: var(--radius-md);
   padding: 0.75rem 1rem;
   gap: 0.75rem;
-  margin: 1rem 0;
+  margin: 0.75rem 0;
   word-break: break-all;
 }
 
+.cpa-secret-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  min-height: auto !important;
+  padding: 0;
+}
+
 input[type="radio"], input[type="checkbox"] {
-  accent-color: var(--primary-color);
+  accent-color: var(--action-primary-bg);
   width: 16px;
   height: 16px;
   flex-shrink: 0;
@@ -857,6 +932,7 @@ input[type="radio"], input[type="checkbox"] {
 button, input, select { font-family: inherit; }
 @media (max-width: 640px) {
   .cpa-app-layout { padding-inline: 12px; }
+  .cpa-btn, .cpa-input, .cpa-select-trigger { min-height: 44px; }
   .cpa-card { padding: 14px; }
   .cpa-tabs { gap: 0; }
   .cpa-tab-item { flex: 1; padding-inline: 8px; }

@@ -311,7 +311,7 @@ export function KeyEditor({ keyData, api, onClose, onSuccess }: KeyEditorProps) 
                     checked={secretType === 'auto'}
                     onChange={() => setSecretType('auto')}
                   />
-                  自动生成高强度密钥 (推荐 32+ 位)
+                  自动生成密钥（服务端生成 sk-... 格式）
                 </label>
                 <label className="cpa-radio-label">
                   <input

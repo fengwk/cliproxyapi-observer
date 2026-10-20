@@ -21,6 +21,25 @@ export interface ApiClientOptions {
 }
 
 export const SESSION_KEY_STORAGE = 'observer.management-key';
+export const LOCAL_KEY_STORAGE = 'observer.management-key';
+
+export function getStoredManagementKey(): { key: string | null; isPersistent: boolean } {
+  try {
+    const local = localStorage.getItem(LOCAL_KEY_STORAGE);
+    if (local) return { key: local, isPersistent: true };
+  } catch { /* storage may be disabled */ }
+  try {
+    const session = sessionStorage.getItem(SESSION_KEY_STORAGE);
+    if (session) return { key: session, isPersistent: false };
+  } catch { /* storage may be disabled */ }
+  return { key: null, isPersistent: false };
+}
+
+export function clearStoredManagementCredentials(): void {
+  try { localStorage.removeItem(LOCAL_KEY_STORAGE); } catch { /* storage may be disabled */ }
+  try { sessionStorage.removeItem(SESSION_KEY_STORAGE); } catch { /* storage may be disabled */ }
+}
+
 const unauthorizedMessage = '未授权或管理密钥无效 (401)';
 const errorMessages: Record<string, string> = {
   conflict: '该客户端密钥已存在，请使用不同的密钥',
@@ -42,7 +61,7 @@ export function deriveBasePath(pathname = window.location.pathname): string {
 }
 
 function storedKey(): string | null {
-  try { return sessionStorage.getItem(SESSION_KEY_STORAGE); } catch { return null; }
+  return getStoredManagementKey().key;
 }
 
 /** Each client owns exactly one session, its requests and its in-memory catalog. */
@@ -90,7 +109,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         dispose();
         // An old client cannot remove credentials belonging to a new session.
         try {
-          if (storedKey() === sessionKey) sessionStorage.removeItem(SESSION_KEY_STORAGE);
+          if (storedKey() === sessionKey) clearStoredManagementCredentials();
         } catch { /* storage may be disabled */ }
         options.onUnauthorized?.();
         throw new ApiError(401, 'unauthorized', unauthorizedMessage);

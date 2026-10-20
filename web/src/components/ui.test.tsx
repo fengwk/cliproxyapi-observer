@@ -13,6 +13,70 @@ describe('UI components', () => {
     fireEvent.keyDown(trigger, { key: 'ArrowDown' });
     expect(screen.getByRole('option', { name: '全部' })).toBeInTheDocument();
   });
+
+  /**
+   * 意图：验证 Select 组件在 searchable 模式下的本地搜索过滤功能。
+   * 打开后输入搜索关键词，匹配项可见，不匹配项过滤隐藏；清空或无匹配时展示无匹配项。
+   */
+  it('supports local search filtering when searchable is true', () => {
+    const handleChange = vi.fn();
+    render(
+      <Select
+        value="gpt-4o"
+        onChange={handleChange}
+        aria-label="选择模型"
+        searchable
+        options={[
+          { value: 'gpt-4o', label: 'GPT-4o' },
+          { value: 'claude-3-5', label: 'Claude 3.5' },
+          { value: 'deepseek-chat', label: 'DeepSeek Chat' },
+        ]}
+      />
+    );
+
+    const trigger = screen.getByRole('combobox', { name: '选择模型' });
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+
+    // 搜索输入框出现
+    const searchInput = screen.getByRole('textbox', { name: '搜索选项' });
+    expect(searchInput).toBeInTheDocument();
+
+    // 输入 "claude"
+    fireEvent.change(searchInput, { target: { value: 'claude' } });
+
+    expect(screen.getByRole('option', { name: 'Claude 3.5' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'GPT-4o' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'DeepSeek Chat' })).not.toBeInTheDocument();
+
+    // 输入无匹配文本
+    fireEvent.change(searchInput, { target: { value: 'nonexistent-model' } });
+    expect(screen.getByText('无匹配项')).toBeInTheDocument();
+  });
+
+  /**
+   * 意图：验证 Select 组件在提供 onSearchChange 时的远端搜索回调能力。
+   */
+  it('calls onSearchChange when provided in searchable mode', () => {
+    const handleSearchChange = vi.fn();
+    render(
+      <Select
+        value="opt-1"
+        onChange={vi.fn()}
+        aria-label="远端搜索"
+        searchable
+        onSearchChange={handleSearchChange}
+        options={[{ value: 'opt-1', label: 'Option 1' }]}
+      />
+    );
+
+    const trigger = screen.getByRole('combobox', { name: '远端搜索' });
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+
+    const searchInput = screen.getByRole('textbox', { name: '搜索选项' });
+    fireEvent.change(searchInput, { target: { value: 'query-term' } });
+
+    expect(handleSearchChange).toHaveBeenCalledWith('query-term');
+  });
   describe('Button', () => {
     it('renders text, handles clicks, and displays loading spinner', () => {
       const handleClick = vi.fn();

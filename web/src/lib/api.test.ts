@@ -1,13 +1,23 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { deriveBasePath, createApiClient, ApiError, SESSION_KEY_STORAGE } from './api';
+import {
+  deriveBasePath,
+  createApiClient,
+  ApiError,
+  SESSION_KEY_STORAGE,
+  LOCAL_KEY_STORAGE,
+  getStoredManagementKey,
+  clearStoredManagementCredentials,
+} from './api';
 
 describe('api client', () => {
   beforeEach(() => {
+    localStorage.clear();
     sessionStorage.clear();
     vi.restoreAllMocks();
   });
 
   afterEach(() => {
+    localStorage.clear();
     sessionStorage.clear();
     vi.restoreAllMocks();
   });
@@ -588,6 +598,55 @@ describe('api client', () => {
       // 核心断言：由于 generation 不匹配，旧请求绝不能覆盖新请求建立的缓存！
       const cached = await client.models();
       expect(cached).toEqual([{ id: 'new-model-v2' }]);
+    });
+  });
+
+  describe('management credentials persistence and clear', () => {
+    /**
+     * 意图：验证优先读取 localStorage（记住登录），若无则读取 sessionStorage（会话有效）
+     */
+    it('reads localStorage first for remembered login, then sessionStorage', () => {
+      expect(getStoredManagementKey()).toEqual({ key: null, isPersistent: false });
+
+      sessionStorage.setItem(SESSION_KEY_STORAGE, 'session-mgmt-key');
+      expect(getStoredManagementKey()).toEqual({ key: 'session-mgmt-key', isPersistent: false });
+
+      localStorage.setItem(LOCAL_KEY_STORAGE, 'local-mgmt-key');
+      expect(getStoredManagementKey()).toEqual({ key: 'local-mgmt-key', isPersistent: true });
+    });
+
+    /**
+     * 意图：验证 clearStoredManagementCredentials 能一并清理两种存储
+     */
+    it('clears both local and session storage credentials safely', () => {
+      localStorage.setItem(LOCAL_KEY_STORAGE, 'key-1');
+      sessionStorage.setItem(SESSION_KEY_STORAGE, 'key-2');
+
+      clearStoredManagementCredentials();
+
+      expect(localStorage.getItem(LOCAL_KEY_STORAGE)).toBeNull();
+      expect(sessionStorage.getItem(SESSION_KEY_STORAGE)).toBeNull();
+    });
+
+    /**
+     * 意图：验证 401 会同时清理 localStorage 和 sessionStorage 中的凭据
+     */
+    it('401 clears both localStorage and sessionStorage credentials', async () => {
+      localStorage.setItem(LOCAL_KEY_STORAGE, 'bad-local-key');
+      sessionStorage.setItem(SESSION_KEY_STORAGE, 'bad-local-key');
+
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        headers: new Headers(),
+      });
+      global.fetch = mockFetch;
+
+      const client = createApiClient({ basePath: '/mgmt' });
+      await expect(client.request('/test-401')).rejects.toThrow('未授权或管理密钥无效 (401)');
+
+      expect(localStorage.getItem(LOCAL_KEY_STORAGE)).toBeNull();
+      expect(sessionStorage.getItem(SESSION_KEY_STORAGE)).toBeNull();
     });
   });
 });
