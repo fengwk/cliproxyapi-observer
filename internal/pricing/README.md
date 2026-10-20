@@ -35,6 +35,14 @@ There is no generic "remove the first slash" or alias normalization. A trusted
 provider that disagrees with the namespace produces a `provider_conflict`, not
 an arbitrary selection. `owned_by` is not a billing provider.
 
+A trusted provider is a channel boundary: if that channel has neither an exact
+entry nor same-channel canonical evidence, another channel's identically named
+model is only a candidate, never an automatic price. Provider-less exact
+fallback (unique or complete-rate-consistent) is valid only when the request
+did not supply a provider. If a known namespace and a different trusted
+provider both appear, they conflict even when the full public model exists
+under the wrong provider.
+
 A canonical relationship is catalog evidence, not a channel price. It may be
 used only inside the same trusted provider and never substitutes a distinct
 `-free`/`:free`/`-paid`/`:paid` pricing variant. Without a trusted provider,
@@ -59,8 +67,11 @@ they matter.
 ## Context tiers
 
 Nested `cost.tiers` are parsed only when every tier is a positive, sorted
-`context` threshold with valid rates. Reliable tiers are applied to a quote by
-the complete prompt size; the base rates apply through the first threshold.
+`context` threshold with valid rates. The tier object and its metadata use a
+strict schema: unknown pricing dimensions (for example audio rates) or unknown
+tier metadata invalidate the whole tier table instead of being silently
+ignored. Reliable tiers are applied to a quote by the complete prompt size; the
+base rates apply through the first threshold.
 Quotes never flatten a tiered price into the base rate. If the published tier
 shape cannot be represented safely, the entry is `unpriced` with
 `reason: "tiers_unsupported"` and requires a manual override. `Preview` and

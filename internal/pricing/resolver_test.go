@@ -419,3 +419,126 @@ func TestCatalogCacheRoundTripDiagnostics(t *testing.T) {
 		t.Fatal(q, err)
 	}
 }
+
+// A trusted provider is a channel boundary, not a hint. If that channel has no
+// exact entry (and no same-channel canonical evidence), another channel's
+// identical model name must never become an automatic price.
+func TestTrustedProviderDoesNotFallBackToAnotherChannel(t *testing.T) {
+	s, err := NewService(DefaultConfig(), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.catalog = indexCatalog([]entry{
+		{Model: "only", Provider: "other", Rates: Rates{Input: 1_000_000}},
+		{Model: "same", Provider: "a", Rates: Rates{Input: 2_000_000}},
+		{Model: "same", Provider: "b", Rates: Rates{Input: 2_000_000}},
+	})
+	p := previewOne(t, s, "only", "unrelated")
+	if p.Source != "unpriced" || p.Reason != reasonNotFound || p.Match != matchNone ||
+		len(p.Candidates) != 1 || p.Candidates[0].Provider != "other" || len(p.MissingRates) != 4 {
+		t.Fatal(p)
+	}
+	q, err := s.Quote("only", "unrelated", Tokens{Input: 1_000_000}, time.Now())
+	if err != nil || q.Source != "unpriced" || q.CostMicroUSD != 0 || q.Reason != reasonNotFound {
+		t.Fatal(q, err)
+	}
+	// The same identity is auto-priced only without a trusted channel or with
+	// the exact owning channel.
+	if p = previewOne(t, s, "only", ""); p.Source != "auto" || p.Match != matchExact || p.Rates.Input != 1_000_000 {
+		t.Fatal(p)
+	}
+	if p = previewOne(t, s, "only", "other"); p.Source != "auto" || p.Match != matchProvider {
+		t.Fatal(p)
+	}
+	// Complete-rate equality remains the only provider-less multi-channel case.
+	if p = previewOne(t, s, "same", ""); p.Source != "auto" || p.Match != matchExact {
+		t.Fatal(p)
+	}
+}
+
+// A full public model that happens to exist under a different provider is not
+// allowed to override the verified namespace clue. Both trusted clues conflict.
+func TestNamespaceConflictIgnoresWrongProviderExact(t *testing.T) {
+	s, err := NewService(DefaultConfig(), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.catalog = indexCatalog([]entry{
+		{Model: "commandcode/foo", Provider: "other", Rates: Rates{Input: 1_000_000}},
+		{Model: "foo", Provider: "commandcode", Rates: Rates{Input: 2_000_000}},
+	})
+	p := previewOne(t, s, "commandcode/foo", "other")
+	if p.Source != "unpriced" || p.Reason != reasonProviderConflict || len(p.Candidates) != 2 {
+		t.Fatal(p)
+	}
+	if p.Candidates[0].Provider != "commandcode" || p.Candidates[1].Provider != "other" {
+		t.Fatal(p.Candidates)
+	}
+	if q, err := s.Quote("commandcode/foo", "other", Tokens{Input: 1_000_000}, time.Now()); err != nil ||
+		q.Source != "unpriced" || q.CostMicroUSD != 0 {
+		t.Fatal(q, err)
+	}
+	// The namespace remains resolvable when no contradictory channel is given.
+	p = previewOne(t, s, "commandcode/foo", "")
+	if p.Source != "auto" || p.Match != matchNamespace || p.CatalogModel != "foo" || p.Rates.Input != 2_000_000 {
+		t.Fatal(p)
+	}
+}
+
+// Unsupported dimensions inside a nested tier (for example audio) invalidate
+// the tier table instead of being silently ignored and billed as text rates.
+func TestTierSchemaRejectsUnsupportedDimensions(t *testing.T) {
+	body := `{"p":{"models":{
+		"audio-tier":{"cost":{"input":1,"output":2,"tiers":[{"input":1,"output":2,"input_audio":3,"tier":{"type":"context","size":100}}]}},
+		"metadata-tier":{"cost":{"input":1,"output":2,"tiers":[{"input":1,"output":2,"tier":{"type":"context","size":100,"extra":true}}]}},
+		"legacy-audio":{"cost":{"input":1,"output":2,"context_over_200k":{"input":2,"output":3,"output_audio":4}}},
+		"supported":{"cost":{"input":1,"output":2,"tiers":[{"input":2,"output":3,"reasoning":1,"tier":{"type":"context","size":100}}]}}
+	}}}`
+	entries, err := parseCatalog([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := NewService(DefaultConfig(), "", nil)
+	s.catalog = indexCatalog(entries)
+	for _, model := range []string{"audio-tier", "metadata-tier", "legacy-audio"} {
+		p := previewOne(t, s, model, "p")
+		if p.Source != "unpriced" || p.Reason != reasonTiersUnsupported {
+			t.Fatal(model, p)
+		}
+	}
+	p := previewOne(t, s, "supported", "p")
+	if p.Source != "auto" || p.Reason != reasonContextTiers || p.Rates.Input != 1_000_000 {
+		t.Fatal(p)
+	}
+	q, err := s.Quote("supported", "p", Tokens{Input: 101}, time.Now())
+	if err != nil || q.Source != "auto" || q.Rates.Input != 2_000_000 {
+		t.Fatal(q, err)
+	}
+}
+
+// The fixture's grok conflict is grounded in extracted source entries with
+// different complete rates, not in an accidental missing fixture row.
+func TestFixtureGrokEvidence(t *testing.T) {
+	s := sampleService(t)
+	p := previewOne(t, s, "grok-4.7", "")
+	if p.Source != "unpriced" || p.Reason != reasonAmbiguous || len(p.Candidates) < 5 {
+		t.Fatal(p)
+	}
+	want := map[string]Rates{
+		"xai":         {Input: 2_000_000, Output: 6_000_000, CacheRead: 500_000},
+		"opencode-go": {Input: 2_000_000, Output: 6_000_000, CacheRead: 500_000},
+		"aihubmix":    {Input: 2_200_000, Output: 6_600_000, CacheRead: 550_000},
+		"302ai":       {Input: 2_000_000, Output: 6_000_000, CacheRead: 500_000, CacheWrite: 500_000},
+		"requesty":    {Input: 2_000_000, Output: 6_000_000, CacheRead: 500_000, CacheWrite: 2_000_000},
+	}
+	got := map[string]Candidate{}
+	for _, c := range p.Candidates {
+		got[c.Provider] = c
+	}
+	for provider, rates := range want {
+		c, ok := got[provider]
+		if !ok || !ratesEqual(c.Rates, rates) {
+			t.Fatal(provider, c, ok)
+		}
+	}
+}

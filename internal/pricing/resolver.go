@@ -137,46 +137,85 @@ func (s *Service) resolveLocked(model, provider string) resolution {
 		return s.fromEntry(e, matchMapping)
 	}
 
-	// 2. A trusted real provider plus an exact catalog ID.
+	// Route by the two independent identity clues. A non-empty provider is a
+	// trusted channel and must never fall through to a provider-less exact entry
+	// owned by a different channel.
+	if ns, inner, ok := splitKnownNamespace(model); ok {
+		return s.resolveNamespaceLocked(model, provider, ns, inner)
+	}
+	if provider != "" {
+		return s.resolveProviderLocked(model, provider)
+	}
+	return s.resolveProviderlessLocked(model)
+}
+
+// resolveNamespaceLocked handles the verified commandcode/ and opencode-go/
+// prefixes. When the trusted provider disagrees with the namespace, both are
+// authoritative clues and the result is a conflict even if the complete public
+// model happens to exist under the other provider's catalog.
+func (s *Service) resolveNamespaceLocked(model, provider, ns, inner string) resolution {
+	if provider != "" && provider != ns {
+		r := unpriced(reasonProviderConflict, matchAmbiguous)
+		r.catalogTime = s.catalogTimeLocked()
+		lists := [][]entry{}
+		for _, candidate := range []struct {
+			model, provider string
+		}{
+			{model, provider}, {model, ns}, {inner, provider}, {inner, ns},
+		} {
+			if e, ok := s.catalog.exactEntry(candidate.model, candidate.provider); ok {
+				lists = append(lists, []entry{e})
+			}
+		}
+		r.candidates = mergeCandidates(lists...)
+		return r
+	}
+	// A provider consistent with the namespace still follows exact provider
+	// identity before namespace resolution.
 	if provider != "" {
 		if e, ok := s.catalog.exactEntry(model, provider); ok {
 			return s.fromEntry(e, matchProvider)
 		}
 	}
-
-	// 3. Verified public outer namespaces. Only these exact prefixes are
-	// removed; inner slashes, dates, version suffixes and :free stay intact.
-	if ns, inner, ok := splitKnownNamespace(model); ok {
-		if provider != "" && provider != ns {
-			// Two trusted clues point at different providers. Do not pick one.
-			r := unpriced(reasonProviderConflict, matchAmbiguous)
-			r.catalogTime = s.catalogTimeLocked()
-			a, aok := s.catalog.exactEntry(inner, provider)
-			b, bok := s.catalog.exactEntry(inner, ns)
-			r.candidates = mergeCandidates(entrySlice(a, aok), entrySlice(b, bok))
-			return r
-		}
-		if e, ok := s.catalog.exactEntry(inner, ns); ok {
-			return s.fromEntry(e, matchNamespace)
-		}
-		// Canonical aliases are usable only inside the same verified provider.
-		variants := s.catalog.canonicalEntries(inner, ns)
-		if r, ok := canonicalWithin(s, variants); ok {
-			return r
-		}
-		// Other channels are explicit candidates only, never an automatic price.
-		r := unpriced(reasonNotFound, matchNone)
-		r.catalogTime = s.catalogTimeLocked()
-		r.candidates = candidateList(s.catalog.candidateEntries(inner, ns))
-		if len(r.candidates) == 0 && len(variants) > 0 {
-			r.reason = reasonVariantOnly
-			r.candidates = candidateList(variants)
-		}
+	if e, ok := s.catalog.exactEntry(inner, ns); ok {
+		return s.fromEntry(e, matchNamespace)
+	}
+	// Canonical aliases are usable only inside the same verified provider.
+	variants := s.catalog.canonicalEntries(inner, ns)
+	if r, ok := canonicalWithin(s, variants); ok {
 		return r
 	}
+	// Other channels are explicit candidates only, never an automatic price.
+	r := unpriced(reasonNotFound, matchNone)
+	r.catalogTime = s.catalogTimeLocked()
+	r.candidates = candidateList(s.catalog.candidateEntries(inner, ns))
+	if len(r.candidates) == 0 && len(variants) > 0 {
+		r.reason = reasonVariantOnly
+		r.candidates = candidateList(variants)
+	}
+	return r
+}
 
-	// 4/5. Without a trusted channel, only an exact identity with one complete
-	// set of rates across every exact provider may be selected automatically.
+func (s *Service) resolveProviderLocked(model, provider string) resolution {
+	if e, ok := s.catalog.exactEntry(model, provider); ok {
+		return s.fromEntry(e, matchProvider)
+	}
+	// A canonical alias from the same provider is explicit catalog evidence.
+	variants := s.catalog.canonicalEntries(model, provider)
+	if r, ok := canonicalWithin(s, variants); ok {
+		return r
+	}
+	r := unpriced(reasonNotFound, matchNone)
+	r.catalogTime = s.catalogTimeLocked()
+	r.candidates = candidateList(s.catalog.candidateEntries(model, provider))
+	if len(r.candidates) == 0 && len(variants) > 0 {
+		r.reason = reasonVariantOnly
+		r.candidates = candidateList(variants)
+	}
+	return r
+}
+
+func (s *Service) resolveProviderlessLocked(model string) resolution {
 	entries := s.catalog.modelEntries(model)
 	if len(entries) > 0 {
 		first := entries[0]
@@ -195,23 +234,6 @@ func (s *Service) resolveLocked(model, provider string) resolution {
 		r.candidates = candidateList(entries)
 		return r
 	}
-
-	if provider != "" {
-		// A canonical alias from the same provider is explicit catalog evidence.
-		variants := s.catalog.canonicalEntries(model, provider)
-		if r, ok := canonicalWithin(s, variants); ok {
-			return r
-		}
-		r := unpriced(reasonNotFound, matchNone)
-		r.catalogTime = s.catalogTimeLocked()
-		r.candidates = candidateList(s.catalog.candidateEntries(model, provider))
-		if len(r.candidates) == 0 && len(variants) > 0 {
-			r.reason = reasonVariantOnly
-			r.candidates = candidateList(variants)
-		}
-		return r
-	}
-
 	// Canonical identity across providers is not a channel price. Surface the
 	// candidates instead of choosing an arbitrary provider.
 	if canonical := s.catalog.canonicalAnyEntries(model); len(canonical) > 0 {
@@ -223,13 +245,6 @@ func (s *Service) resolveLocked(model, provider string) resolution {
 	r := unpriced(reasonNotFound, matchNone)
 	r.catalogTime = s.catalogTimeLocked()
 	return r
-}
-
-func entrySlice(e entry, ok bool) []entry {
-	if !ok {
-		return nil
-	}
-	return []entry{e}
 }
 
 func canonicalWithin(s *Service, entries []entry) (resolution, bool) {

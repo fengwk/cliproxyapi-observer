@@ -97,6 +97,29 @@ type rawTier struct {
 	rawCost
 }
 
+func tierRateKey(key string) bool {
+	switch key {
+	case rateInput, rateOutput, rateCacheRead, rateCacheWrite, "reasoning", "tier":
+		return true
+	}
+	return false
+}
+
+func tierMetadataKey(key string) bool { return key == "type" || key == "size" }
+
+func strictObjectKeys(raw json.RawMessage, allowed func(string) bool) bool {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return false
+	}
+	for key := range fields {
+		if !allowed(key) {
+			return false
+		}
+	}
+	return true
+}
+
 func rateFieldNames() []string {
 	return []string{rateInput, rateOutput, rateCacheRead, rateCacheWrite}
 }
@@ -163,16 +186,30 @@ func rawPresent(raw json.RawMessage) bool {
 func parseTiers(raw, contextRaw json.RawMessage) ([]tier, bool) {
 	var out []tier
 	if rawPresent(raw) {
-		var parsed []rawTier
-		if err := json.Unmarshal(raw, &parsed); err != nil {
+		var elements []json.RawMessage
+		if err := json.Unmarshal(raw, &elements); err != nil {
 			return nil, true
 		}
-		if len(parsed) > maxCatalogTiers {
+		if len(elements) > maxCatalogTiers {
 			return nil, true
 		}
-		if len(parsed) > 0 {
-			out = make([]tier, 0, len(parsed))
-			for _, t := range parsed {
+		if len(elements) > 0 {
+			out = make([]tier, 0, len(elements))
+			for _, element := range elements {
+				// Unknown rate dimensions or tier metadata are not silently
+				// discarded: the whole tier table is unreliable for billing.
+				if !strictObjectKeys(element, tierRateKey) {
+					return nil, true
+				}
+				var fields map[string]json.RawMessage
+				_ = json.Unmarshal(element, &fields)
+				if !strictObjectKeys(fields["tier"], tierMetadataKey) {
+					return nil, true
+				}
+				var t rawTier
+				if err := json.Unmarshal(element, &t); err != nil {
+					return nil, true
+				}
 				if t.Tier.Type != "context" {
 					return nil, true
 				}
@@ -197,6 +234,11 @@ func parseTiers(raw, contextRaw json.RawMessage) ([]tier, bool) {
 	}
 	// context_over_200k is a reliable legacy spelling only when tiers is absent.
 	if rawPresent(contextRaw) {
+		if !strictObjectKeys(contextRaw, func(key string) bool {
+			return key == rateInput || key == rateOutput || key == rateCacheRead || key == rateCacheWrite || key == "reasoning"
+		}) {
+			return nil, true
+		}
 		var c rawCost
 		if err := json.Unmarshal(contextRaw, &c); err != nil {
 			return nil, true
