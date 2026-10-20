@@ -25,13 +25,29 @@ func denyInference(t *testing.T, h *harness, secret string) {
 	}
 }
 
-// Generated secrets work through every supported transport, but host builtin
-// keys, conflicting credentials and invalidated secrets never fall back.
-func TestExclusiveKeyAuthenticationAndInvalidation(t *testing.T) {
+// Native CPA access keys and Observer client keys are independent providers.
+// Observer must neither shadow nor account native traffic, while its generated,
+// custom, disabled, expired, rotated and revoked credentials keep their own
+// admission boundaries.
+func TestKeyAuthenticationCoexistenceAndInvalidation(t *testing.T) {
 	h := newHarness(t)
 	created := h.createKey(t, validSpec())
-	denyInference(t, h, clientKey)
-	denyInference(t, h, clientKeyTwo)
+
+	// Native host keys stay usable with the plugin enabled and never enter the
+	// Observer ledger or create Observer Keys.
+	for _, secret := range []string{clientKey, clientKeyTwo} {
+		status, body := h.infer(t, secret, false)
+		if status != http.StatusOK || jsonContent(body) != fixtureText {
+			t.Fatalf("native key inference status=%d body=%s", status, truncate(body, 300))
+		}
+	}
+	if keys := h.keys(t); len(keys) != 1 || keys[0].ID != created.Key.ID {
+		t.Fatalf("native traffic changed Observer Keys: %+v", keys)
+	}
+	if records := h.page(t, "page_size=100"); len(records.Items) != 0 {
+		t.Fatalf("native traffic entered Observer accounting: %+v", records.Items)
+	}
+
 	denyInference(t, h, "")
 	for _, variant := range []struct {
 		query   string
@@ -48,11 +64,56 @@ func TestExclusiveKeyAuthenticationAndInvalidation(t *testing.T) {
 			t.Fatalf("key transport status=%d err=%v", status, err)
 		}
 	}
+	// Settle the five authenticated Observer transports before using the ledger
+	// as a discriminator for credential-source conflicts below.
+	h.await(t, "generated key transports are accounted", func() bool {
+		return len(h.page(t, "page_size=100").Items) == 5
+	})
+
+	// Conflicting Observer credentials are not authenticated by Observer. With no
+	// native key present, CPA has no fallback and rejects the request.
 	before := h.mock.callCount()
-	status, _, err := h.rawRequest("POST", "/v1/chat/completions?key="+url.QueryEscape(created.Secret), chatBody(false), map[string]string{"Authorization": "Bearer " + clientKey})
+	status, _, err := h.rawRequest("POST", "/v1/chat/completions?key="+url.QueryEscape(created.Secret), chatBody(false), map[string]string{"Authorization": "Bearer fake-unconfigured-observer-key"})
 	if err != nil || (status != 401 && status != 403) || h.mock.callCount() != before {
-		t.Fatal("conflicting credentials admitted")
+		t.Fatal("conflicting Observer credentials were admitted")
 	}
+
+	// A native credential in a second source is a real coexistence case, not a
+	// cross-provider rejection: Observer refuses the conflicting credential set,
+	// then CPA's native provider resolves the request. Record the observed host
+	// behavior and prove Observer does not bill this native execution.
+	for _, variant := range []struct {
+		name    string
+		path    string
+		headers map[string]string
+	}{
+		{"observer query plus native header", "/v1/chat/completions?key=" + url.QueryEscape(created.Secret), map[string]string{"Authorization": "Bearer " + clientKey}},
+		{"native query plus observer header", "/v1/chat/completions?key=" + url.QueryEscape(clientKey), map[string]string{"Authorization": "Bearer " + created.Secret}},
+	} {
+		beforeRecords := len(h.page(t, "page_size=100").Items)
+		status, body, err := h.rawRequest("POST", variant.path, chatBody(false), variant.headers)
+		if err != nil || status != 200 || jsonContent(body) != fixtureText {
+			t.Fatalf("%s status=%d err=%v", variant.name, status, err)
+		}
+		if got := len(h.page(t, "page_size=100").Items); got != beforeRecords {
+			t.Fatalf("%s entered Observer accounting: %d -> %d records", variant.name, beforeRecords, got)
+		}
+	}
+
+	// Identical duplicate Observer credentials are still one credential, so this
+	// path remains Observer-authenticated and is accounted normally.
+	beforeRecords := len(h.page(t, "page_size=100").Items)
+	status, body, err := h.rawRequest("POST", "/v1/chat/completions", chatBody(false), map[string]string{
+		"Authorization": "Bearer " + created.Secret,
+		"x-api-key":     created.Secret,
+	})
+	if err != nil || status != 200 || jsonContent(body) != fixtureText {
+		t.Fatalf("duplicate identical credentials status=%d err=%v", status, err)
+	}
+	h.await(t, "duplicate identical credentials are accounted once", func() bool {
+		return len(h.page(t, "page_size=100").Items) == beforeRecords+1
+	})
+
 	spec := validSpec()
 	spec.Enabled = false
 	h.api(t, "PUT", "/keys?id="+url.QueryEscape(created.Key.ID), spec, 200, nil)
@@ -75,6 +136,10 @@ func TestExclusiveKeyAuthenticationAndInvalidation(t *testing.T) {
 	}
 	h.api(t, "DELETE", "/keys?id="+url.QueryEscape(created.Key.ID), nil, 204, nil)
 	denyInference(t, h, rotated.Secret)
+	// Revoking an Observer Key must not revoke the independent native provider.
+	if status, body := h.infer(t, clientKey, false); status != 200 || jsonContent(body) != fixtureText {
+		t.Fatalf("native key lost after Observer revocation status=%d body=%s", status, truncate(body, 300))
+	}
 	for _, path := range []string{"/keys", "/health", "/requests?page_size=100", "/summary"} {
 		raw := h.api(t, "GET", path, nil, 200, nil)
 		for _, secret := range []string{created.Secret, rotated.Secret, mgmtKey, upstreamKey} {
@@ -185,12 +250,16 @@ func TestFilteredLogsCaptureRedactionAndBounds(t *testing.T) {
 		Body          json.RawMessage `json:"body"`
 		Headers       http.Header     `json:"headers"`
 		CaptureStatus string          `json:"capture_status"`
+		BodyStatus    string          `json:"body_status"`
+		CaptureReason string          `json:"capture_reason"`
+		OriginalBytes int64           `json:"original_bytes"`
 	}
 	h.api(t, "GET", "/requests/detail?id="+url.QueryEscape(disabled.ID), nil, 200, &detail)
 	if detail.CaptureStatus != "disabled" || string(detail.Body) != "null" {
 		t.Fatalf("disabled capture: %+v", detail)
 	}
 	settings["capture_enabled"] = true
+	settings["capture_mode"] = "headers_and_body"
 	h.api(t, "PUT", "/settings", settings, 200, nil)
 	body := []byte(`{"model":"` + modelName + `","messages":[{"role":"user","content":"` + upstreamPrompt + `"}],"metadata":{"api_key":"fake-nested-secret","nested":{"password":"fake-nested-password"}},"stream":false}`)
 	status, _, err := h.rawRequest("POST", "/v1/chat/completions?key="+url.QueryEscape(created.Secret), body, map[string]string{"X-Api-Key": created.Secret})
@@ -259,13 +328,16 @@ func TestFilteredLogsCaptureRedactionAndBounds(t *testing.T) {
 	if err != nil || status != 200 {
 		t.Fatal("bounded capture affected inference")
 	}
-	truncated := acceptanceAwaitNewRecord(t, h, known)
-	h.await(t, "bounded capture status", func() bool {
-		h.api(t, "GET", "/requests/detail?id="+url.QueryEscape(truncated.ID), nil, 200, &detail)
-		return detail.CaptureStatus == "truncated"
+	bounded := acceptanceAwaitNewRecord(t, h, known)
+	h.await(t, "bounded body is marked too_large", func() bool {
+		h.api(t, "GET", "/requests/detail?id="+url.QueryEscape(bounded.ID), nil, 200, &detail)
+		return detail.CaptureStatus == "too_large" && detail.BodyStatus == "too_large" && detail.CaptureReason == "body_too_large"
 	})
-	if len(detail.Body) > 64 {
-		t.Fatal("capture size bound exceeded")
+	if string(detail.Body) != "null" {
+		t.Fatal("bounded capture retained a partial body")
+	}
+	if detail.OriginalBytes <= 64 {
+		t.Fatalf("original body size = %d, want the observed request size above the 64-byte bound", detail.OriginalBytes)
 	}
 }
 

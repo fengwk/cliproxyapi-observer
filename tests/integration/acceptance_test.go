@@ -349,6 +349,7 @@ func TestSettingsHealthCompactRestartPreserveKeysAndCosts(t *testing.T) {
 
 	settings := acceptanceGetSettings(t, h)
 	settings["capture_enabled"] = true
+	settings["capture_mode"] = "headers_and_body"
 	settings["max_body_bytes"] = 262144
 	settings["max_body_storage_bytes"] = int64(32 << 20)
 	settings["raw_retention_hours"] = 48

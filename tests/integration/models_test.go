@@ -117,19 +117,42 @@ func modelsKeyByID(t *testing.T, h *harness, id string) keyView {
 	return keyView{}
 }
 
-// Catalog access is a one-shot, read-only capability, never a frontend bypass
-// for management/builtin keys and never usable for generation or token counting.
+// Catalog access through a short-lived capability is read-only and single-use,
+// but native CPA access keys retain their own directory reads. The management
+// secret is still never a frontend client credential.
 func TestLocalModelDiscovery(t *testing.T) {
 	h := newHarness(t)
 	discovered := modelsDiscoverLocalModels(t, h)
 	if !slices.Equal(discovered, []string{modelName, modelNameTwo}) {
 		t.Fatalf("discovered models = %v, want [%s %s]", discovered, modelName, modelNameTwo)
 	}
-	for _, secret := range []string{clientKey, mgmtKey} {
-		status, _, err := h.rawRequest("GET", "/v1/models", nil, map[string]string{"Authorization": "Bearer " + secret})
-		if err != nil || (status != 401 && status != 403) {
-			t.Fatalf("catalog bypass status=%d err=%v", status, err)
+	// Native host keys coexist with the Observer provider: the host's catalog is
+	// returned unchanged instead of being shadowed by an exclusive plugin.
+	for _, secret := range []string{clientKey, clientKeyTwo} {
+		status, raw, err := h.rawRequest("GET", "/v1/models", nil, map[string]string{"Authorization": "Bearer " + secret})
+		if err != nil || status != 200 {
+			t.Fatalf("native key catalog status=%d err=%v body=%s", status, err, truncate(raw, 300))
 		}
+		var catalog struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &catalog); err != nil {
+			t.Fatal(err)
+		}
+		ids := make([]string, 0, len(catalog.Data))
+		for _, model := range catalog.Data {
+			ids = append(ids, model.ID)
+		}
+		sort.Strings(ids)
+		if !slices.Equal(ids, discovered) {
+			t.Fatalf("native key catalog models = %v, want %v", ids, discovered)
+		}
+	}
+	status, _, err := h.rawRequest("GET", "/v1/models", nil, map[string]string{"Authorization": "Bearer " + mgmtKey})
+	if err != nil || (status != 401 && status != 403) {
+		t.Fatalf("management secret bypassed catalog auth status=%d err=%v", status, err)
 	}
 	token := issueCatalogToken(t, h)
 	for i := 0; i < 2; i++ {

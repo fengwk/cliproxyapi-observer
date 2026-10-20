@@ -139,5 +139,12 @@ func TestCleanNativeReplacementPreservesKeys(t *testing.T) {
 	if status, _ := h.infer(t, created.Secret, false); status != http.StatusOK {
 		t.Fatal("replacement lost key/store")
 	}
-	denyInference(t, h, clientKey)
+	// Native CPA Keys are independent of Observer's replacement lifecycle.
+	beforeRecords := len(h.page(t, "page_size=100").Items)
+	if status, body := h.infer(t, clientKey, false); status != http.StatusOK || jsonContent(body) != fixtureText {
+		t.Fatalf("native key after replacement status=%d body=%s", status, truncate(body, 300))
+	}
+	if records := h.page(t, "page_size=100"); len(records.Items) != beforeRecords {
+		t.Fatalf("native key after replacement entered Observer accounting: %d -> %d records", beforeRecords, len(records.Items))
+	}
 }
