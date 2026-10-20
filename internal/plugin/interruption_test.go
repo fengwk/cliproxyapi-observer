@@ -57,13 +57,13 @@ func TestInterruptionAcrossManagers(t *testing.T) {
 			if err != nil || len(keys) != 1 || keys[0].BlockedReason == "" {
 				t.Fatal("new Store did not observe interruption")
 			}
-			a := authenticateTest(t, next, pluginapi.FrontendAuthRequest{Headers: http.Header{"Authorization": {"Bearer " + secret}}})
+			a := authenticateTest(t, next, pluginapi.FrontendAuthRequest{Method: "POST", Path: "/v1/chat/completions", Headers: http.Header{"Authorization": {"Bearer " + secret}}})
 			if !a.Authenticated {
 				t.Fatal("authentication should remain distinct from admission")
 			}
 			before := func() pluginapi.RequestInterceptResponse {
 				var r pluginapi.RequestInterceptResponse
-				_ = json.Unmarshal(call(t, next, "request.intercept_before", pluginapi.RequestInterceptRequest{RequestID: "next", RequestedModel: "model", Metadata: map[string]any{coreexecutor.CallerScopeMetadataKey: session.CallerScope(a.Principal)}}), &r)
+				_ = json.Unmarshal(call(t, next, "request.intercept_before", pluginapi.RequestInterceptRequest{RequestID: "next", RequestedModel: "model", Metadata: map[string]any{coreexecutor.CallerScopeMetadataKey: session.CallerScope(a.Principal), coreexecutor.RequestPathMetadataKey: "/v1/chat/completions"}}), &r)
 				return r
 			}
 			if !before().Terminate {
@@ -116,7 +116,7 @@ func TestInterruptionWriteFailureFallback(t *testing.T) {
 	if _, ok := m.billingFaults.Load(id); ok {
 		t.Fatal("ordinary pending accounting forced unknown interruption")
 	}
-	for _, principal := range []string{"observer:../escape", "observer:short", "observer-count:" + id, "observer-catalog"} {
+	for _, principal := range []string{"observer:../escape", "observer:short", "observer-count:" + id, "observer-directory:" + id, "observer-catalog"} {
 		if validPrincipal(principal) {
 			t.Fatal("unvalidated interruption identity")
 		}

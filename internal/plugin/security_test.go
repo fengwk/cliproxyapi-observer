@@ -45,9 +45,10 @@ func liveManager(t *testing.T) *Manager {
 	return m
 }
 
-// Schema refusal must precede opening storage. Disabled and quiesced managers
-// still advertise exclusivity so built-in host keys cannot bypass this plugin.
-func TestExclusiveAndUnavailable(t *testing.T) {
+// Schema refusal must precede opening storage. Observer never claims global
+// exclusivity, so disabled/faulted storage only lets its own recognized scopes
+// fail closed while native host authentication continues.
+func TestNoGlobalExclusivityAndUnavailable(t *testing.T) {
 	m := NewManager(nil)
 	out, _ := m.HandleCall("plugin.register", []byte(`{"schema_version":5}`))
 	if !strings.Contains(string(out), `"ok":false`) {
@@ -55,23 +56,40 @@ func TestExclusiveAndUnavailable(t *testing.T) {
 	}
 	reg := call(t, m, "plugin.register", lifecycleRequest{[]byte("enabled: false"), 6})
 	var r registration
-	if json.Unmarshal(reg, &r) != nil || r.SchemaVersion != 6 || len(r.Capabilities) != 6 || !r.Capabilities["frontend_auth_provider_exclusive"] {
+	if json.Unmarshal(reg, &r) != nil || r.SchemaVersion != 6 || len(r.Capabilities) != 5 ||
+		r.Capabilities["frontend_auth_provider_exclusive"] || !r.Capabilities["frontend_auth_provider"] {
 		t.Fatalf("registration: %s", reg)
 	}
-	auth := call(t, m, "frontend_auth.authenticate", pluginapi.FrontendAuthRequest{Headers: http.Header{"Authorization": {"Bearer fake-secret"}}})
+	auth := call(t, m, "frontend_auth.authenticate", pluginapi.FrontendAuthRequest{
+		Method: http.MethodPost, Path: "/v1/chat/completions",
+		Headers: http.Header{"Authorization": {"Bearer fake-secret"}},
+	})
 	if strings.Contains(string(auth), "fake-secret") || strings.Contains(string(auth), `"Authenticated":true`) {
-		t.Fatal("unavailable auth was not fail-closed")
+		t.Fatal("invalid Key was globally accepted")
 	}
+	// No scope on an unknown path: pass through untouched even with no store.
 	var before pluginapi.RequestInterceptResponse
 	_ = json.Unmarshal(call(t, m, "request.intercept_before", pluginapi.RequestInterceptRequest{}), &before)
-	if !before.Terminate {
-		t.Fatal("unavailable admission accepted")
+	if before.Terminate {
+		t.Fatal("unowned admission rejected")
 	}
-	// A storage fault must not prevent the exclusive provider from registering.
+	// A scope issued by this plugin still fails closed when storage is absent.
+	id := strings.Repeat("a", 64)
+	own := session.CallerScope("observer:" + id)
+	m.scopes.Store(own, callerScope{KeyID: id})
+	_ = json.Unmarshal(call(t, m, "request.intercept_before", pluginapi.RequestInterceptRequest{RequestID: "own", Metadata: map[string]any{
+		coreexecutor.CallerScopeMetadataKey: own, coreexecutor.RequestPathMetadataKey: "/v1/chat/completions",
+	}}), &before)
+	if !before.Terminate || before.StatusCode != 503 {
+		t.Fatal("owned admission did not fail closed")
+	}
+	// A storage fault fails registration; it must not install an exclusive
+	// provider that would shadow the host's native Keys.
 	faulted := NewManager(nil)
-	reg = call(t, faulted, "plugin.register", lifecycleRequest{[]byte("db: " + t.TempDir()), 6})
-	if !strings.Contains(string(reg), `"frontend_auth_provider_exclusive":true`) || faulted.store != nil {
-		t.Fatal("storage fault lost exclusivity")
+	faultedRaw, _ := json.Marshal(lifecycleRequest{[]byte("db: " + t.TempDir()), 6})
+	faultedOut, _ := faulted.HandleCall("plugin.register", faultedRaw)
+	if !strings.Contains(string(faultedOut), `"ok":false`) || !strings.Contains(string(faultedOut), "storage_unavailable") || faulted.store != nil {
+		t.Fatalf("storage fault registration: %s", faultedOut)
 	}
 }
 
@@ -87,7 +105,10 @@ func TestAdmissionRotationAndResume(t *testing.T) {
 	}
 	authenticate := func(s string) pluginapi.FrontendAuthResponse {
 		var a pluginapi.FrontendAuthResponse
-		_ = json.Unmarshal(call(t, m, "frontend_auth.authenticate", pluginapi.FrontendAuthRequest{Headers: http.Header{"Authorization": {"Bearer " + s}}}), &a)
+		_ = json.Unmarshal(call(t, m, "frontend_auth.authenticate", pluginapi.FrontendAuthRequest{
+			Method: http.MethodPost, Path: "/v1/chat/completions",
+			Headers: http.Header{"Authorization": {"Bearer " + s}},
+		}), &a)
 		return a
 	}
 	if !authenticate(secret).Authenticated {
@@ -97,6 +118,7 @@ func TestAdmissionRotationAndResume(t *testing.T) {
 	req := pluginapi.RequestInterceptRequest{RequestID: "admission-1", TraceID: "trace", RequestedModel: "model/full", Body: []byte(`{"secret":"must-not-echo"}`), Metadata: map[string]any{
 		coreexecutor.CallerScopeMetadataKey: session.CallerScope(principal),
 		coreexecutor.GenerateMetadataKey:    true,
+		coreexecutor.RequestPathMetadataKey: "/v1/chat/completions",
 	}}
 	before := func(r pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
 		var b pluginapi.RequestInterceptResponse
@@ -126,13 +148,19 @@ func TestAdmissionRotationAndResume(t *testing.T) {
 	if !before(bad).Terminate {
 		t.Fatal("model restriction bypassed")
 	}
-	other.Metadata = map[string]any{coreexecutor.CallerScopeMetadataKey: session.CallerScope(principal), coreexecutor.GenerateMetadataKey: false}
+	other.Metadata = map[string]any{coreexecutor.CallerScopeMetadataKey: session.CallerScope(principal), coreexecutor.GenerateMetadataKey: false, coreexecutor.RequestPathMetadataKey: "/v1/chat/completions"}
 	if before(other).Terminate || m.store.Health().ActiveRequests != 1 {
 		t.Fatal("Generate false reserved a slot")
 	}
 	out, _ := m.HandleCall("plugin.quiesce", nil)
 	if !strings.Contains(string(out), `"ok":false`) {
 		t.Fatal("quiesce closed live admission")
+	}
+	// Completion events also arrive for native requests. Only an admission this
+	// plugin created may release its own slot.
+	call(t, m, "request.complete", pluginapi.RequestCompletion{RequestID: "native-request", CompletedAt: time.Now()})
+	if m.store.Health().ActiveRequests != 1 {
+		t.Fatal("foreign completion released an owned slot")
 	}
 	for i := 0; i < 2; i++ {
 		call(t, m, "request.complete", pluginapi.RequestCompletion{RequestID: req.RequestID, CompletedAt: time.Now()})
@@ -235,7 +263,7 @@ func TestUsageOwnershipAndQuota(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	call(t, m, "frontend_auth.authenticate", pluginapi.FrontendAuthRequest{Query: url.Values{"key": {secret}}})
+	call(t, m, "frontend_auth.authenticate", pluginapi.FrontendAuthRequest{Method: http.MethodPost, Path: "/v1/chat/completions", Query: url.Values{"key": {secret}}})
 	u := pluginapi.UsageRecord{RequestID: "execution-1", TraceID: "trace", Provider: "openai", Model: "fixed", APIKey: "observer:" + k.ID, AccessProvider: "config-inline", Generate: true, RequestedAt: time.Now(), Detail: pluginapi.UsageDetail{InputTokens: 1, TotalTokens: 1}}
 	call(t, m, "usage.handle", u)
 	u.AccessProvider = AccessProvider
@@ -255,7 +283,10 @@ func TestUsageOwnershipAndQuota(t *testing.T) {
 		t.Fatalf("execution accounting: %+v, %v", keys, err)
 	}
 	var response pluginapi.RequestInterceptResponse
-	_ = json.Unmarshal(call(t, m, "request.intercept_before", pluginapi.RequestInterceptRequest{RequestID: "next", RequestedModel: "fixed", Metadata: map[string]any{coreexecutor.CallerScopeMetadataKey: session.CallerScope("observer:" + k.ID)}}), &response)
+	_ = json.Unmarshal(call(t, m, "request.intercept_before", pluginapi.RequestInterceptRequest{RequestID: "next", RequestedModel: "fixed", Metadata: map[string]any{
+		coreexecutor.CallerScopeMetadataKey: session.CallerScope("observer:" + k.ID),
+		coreexecutor.RequestPathMetadataKey: "/v1/chat/completions",
+	}}), &response)
 	if !response.Terminate || response.StatusCode != 429 {
 		t.Fatal("quota did not block next admission")
 	}

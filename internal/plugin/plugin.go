@@ -1,4 +1,5 @@
-// Package plugin implements exclusive client Key authentication and admission.
+// Package plugin implements client Key authentication and admission without
+// taking over the host's other authentication providers.
 package plugin
 
 import "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -25,5 +26,7 @@ type registration struct {
 }
 
 func registrationResponse() registration {
-	return registration{6, Metadata(), map[string]bool{"frontend_auth_provider": true, "frontend_auth_provider_exclusive": true, "request_interceptor": true, "request_lifecycle_plugin": true, "usage_plugin": true, "management_api": true}}
+	// FrontendAuthProviderExclusive is intentionally absent: native CPA Keys and
+	// other plugins must stay in the host authentication chain.
+	return registration{6, Metadata(), map[string]bool{"frontend_auth_provider": true, "request_interceptor": true, "request_lifecycle_plugin": true, "usage_plugin": true, "management_api": true}}
 }

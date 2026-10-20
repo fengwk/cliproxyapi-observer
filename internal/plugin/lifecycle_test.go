@@ -20,10 +20,11 @@ func TestDefaultModelAccessAndSelectedModels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	call(t, m, "frontend_auth.authenticate", pluginapi.FrontendAuthRequest{Query: map[string][]string{"key": {secret}}})
+	call(t, m, "frontend_auth.authenticate", pluginapi.FrontendAuthRequest{Method: "POST", Path: "/v1/chat/completions", Query: map[string][]string{"key": {secret}}})
 	req := pluginapi.RequestInterceptRequest{RequestID: "model-test", RequestedModel: "provider/model:variant", Metadata: map[string]any{
 		coreexecutor.CallerScopeMetadataKey: session.CallerScope("observer:" + k.ID),
 		coreexecutor.GenerateMetadataKey:    false,
+		coreexecutor.RequestPathMetadataKey: "/v1/chat/completions",
 	}}
 	before := func() bool {
 		var r pluginapi.RequestInterceptResponse
