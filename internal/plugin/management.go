@@ -87,7 +87,7 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodGet, Path: routeHealth, Description: "Observer health and lifecycle counters."},
 			{Method: http.MethodPost, Path: routeModelsToken, Description: "Issue a single-use capability for GET /v1/models only."},
 			{Method: http.MethodGet, Path: routeKeys, Description: "List client keys."},
-			{Method: http.MethodPost, Path: routeKeys, Description: "Create a client key; the plaintext secret is returned once."},
+			{Method: http.MethodPost, Path: routeKeys, Description: "Create a client key; plaintext is available in authenticated management lists."},
 			{Method: http.MethodPut, Path: routeKeys, Description: "Replace a client key selected by the id query parameter."},
 			{Method: http.MethodDelete, Path: routeKeys, Description: "Revoke a client key selected by the id query parameter."},
 			{Method: http.MethodPost, Path: routeKeyDelete, Description: "Permanently delete a client key selected by the id query parameter."},

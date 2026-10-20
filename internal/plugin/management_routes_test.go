@@ -117,14 +117,15 @@ func TestRegisteredManagementRoutesDispatch(t *testing.T) {
 	var created keySecretResponse
 	r := dispatchForTest(t, m, http.MethodPost, managementBasePath+"/keys", nil,
 		`{"label":"routes","enabled":true,"max_concurrent":2,"limits":{"total":1000000}}`)
-	if r.StatusCode != http.StatusCreated || json.Unmarshal(r.Body, &created) != nil || created.Key.ID == "" || created.Secret == "" {
+	if r.StatusCode != http.StatusCreated || json.Unmarshal(r.Body, &created) != nil || created.Key.ID == "" || created.Secret == "" || created.Key.Secret != created.Secret {
 		t.Fatalf("create key: %d %s", r.StatusCode, r.Body)
 	}
 	id := created.Key.ID
 
 	var listed keysResponse
 	if r = dispatchForTest(t, m, http.MethodGet, managementBasePath+"/keys", nil, ""); r.StatusCode != http.StatusOK ||
-		json.Unmarshal(r.Body, &listed) != nil || len(listed.Items) != 1 || listed.Items[0].ID != id {
+		json.Unmarshal(r.Body, &listed) != nil || len(listed.Items) != 1 || listed.Items[0].ID != id ||
+		listed.Items[0].Secret != created.Secret {
 		t.Fatalf("list keys: %d %s", r.StatusCode, r.Body)
 	}
 
@@ -132,25 +133,29 @@ func TestRegisteredManagementRoutesDispatch(t *testing.T) {
 	r = dispatchForTest(t, m, http.MethodPut, managementBasePath+"/keys", url.Values{"id": {id}},
 		`{"label":"routes-updated","enabled":true,"max_concurrent":1,"limits":{"total":2000000}}`)
 	if r.StatusCode != http.StatusOK || json.Unmarshal(r.Body, &updated) != nil ||
-		updated.ID != id || updated.Label != "routes-updated" || updated.MaxConcurrent != 1 {
+		updated.ID != id || updated.Label != "routes-updated" || updated.MaxConcurrent != 1 ||
+		updated.Secret != created.Secret {
 		t.Fatalf("update key: %d %s", r.StatusCode, r.Body)
 	}
 
 	var rotated keySecretResponse
 	r = dispatchForTest(t, m, http.MethodPost, managementBasePath+"/keys/rotate", url.Values{"id": {id}}, "")
-	if r.StatusCode != http.StatusOK || json.Unmarshal(r.Body, &rotated) != nil || rotated.Secret == "" || rotated.Key.ID != id {
+	if r.StatusCode != http.StatusOK || json.Unmarshal(r.Body, &rotated) != nil || rotated.Secret == "" || rotated.Key.ID != id ||
+		rotated.Key.Secret != rotated.Secret {
 		t.Fatalf("rotate key: %d %s", r.StatusCode, r.Body)
 	}
 
 	r = dispatchForTest(t, m, http.MethodPost, managementBasePath+"/keys/reset", url.Values{"id": {id}},
 		`{"windows":["five_hour","week"]}`)
-	if r.StatusCode != http.StatusOK || json.Unmarshal(r.Body, &updated) != nil || updated.ID != id {
+	if r.StatusCode != http.StatusOK || json.Unmarshal(r.Body, &updated) != nil || updated.ID != id ||
+		updated.Secret != rotated.Secret {
 		t.Fatalf("reset key: %d %s", r.StatusCode, r.Body)
 	}
 
 	r = dispatchForTest(t, m, http.MethodPost, managementBasePath+"/keys/recover", url.Values{"id": {id}},
 		`{"acknowledge":true}`)
-	if r.StatusCode != http.StatusOK || json.Unmarshal(r.Body, &updated) != nil || updated.ID != id {
+	if r.StatusCode != http.StatusOK || json.Unmarshal(r.Body, &updated) != nil || updated.ID != id ||
+		updated.Secret != rotated.Secret {
 		t.Fatalf("recover key: %d %s", r.StatusCode, r.Body)
 	}
 
@@ -221,6 +226,9 @@ func TestRegisteredManagementRoutesDispatch(t *testing.T) {
 	foundDeleted := false
 	for _, key := range allKeys.Items {
 		if key.ID == deleted.Key.ID && key.DeletedAt != nil {
+			if key.Secret != "" {
+				t.Fatal("deleted key retained plaintext")
+			}
 			foundDeleted = true
 		}
 	}
@@ -239,6 +247,12 @@ func TestRegisteredManagementRoutesDispatch(t *testing.T) {
 
 	if r = dispatchForTest(t, m, http.MethodDelete, managementBasePath+"/keys", url.Values{"id": {id}}, ""); r.StatusCode != http.StatusNoContent {
 		t.Fatalf("revoke key: %d %s", r.StatusCode, r.Body)
+	}
+	var revokedList keysResponse
+	if r = dispatchForTest(t, m, http.MethodGet, managementBasePath+"/keys", nil, ""); r.StatusCode != http.StatusOK ||
+		json.Unmarshal(r.Body, &revokedList) != nil || len(revokedList.Items) != 1 || revokedList.Items[0].ID != id ||
+		revokedList.Items[0].Secret != "" || !revokedList.Items[0].Revoked {
+		t.Fatalf("revoked key view: %d %s", r.StatusCode, r.Body)
 	}
 }
 

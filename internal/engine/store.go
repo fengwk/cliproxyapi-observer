@@ -271,7 +271,7 @@ func Open(o Options) (*Store, error) {
 		if e := m.Put([]byte("schema"), []byte("2")); e != nil {
 			return e
 		}
-		return m.Put([]byte("observer_features"), []byte("1"))
+		return m.Put([]byte("observer_features"), []byte(strconv.Itoa(supportedObserverFeature)))
 	})
 	if e != nil {
 		db.Close()

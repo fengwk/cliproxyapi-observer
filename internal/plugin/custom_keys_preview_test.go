@@ -30,13 +30,13 @@ func TestCustomKeyManagementContract(t *testing.T) {
 		body, _ := json.Marshal(map[string]any{"label": "custom", "enabled": true, "secret": secret})
 		res := dispatchForTest(t, m, "POST", managementBasePath+"/keys", nil, string(body))
 		var out keySecretResponse
-		if res.StatusCode != 201 || json.Unmarshal(res.Body, &out) != nil || out.Secret != secret {
+		if res.StatusCode != 201 || json.Unmarshal(res.Body, &out) != nil || out.Secret != secret || out.Key.Secret != secret {
 			t.Fatalf("custom create: %d %s", res.StatusCode, res.Body)
 		}
 		return out
 	}
 	first := create("first-custom-secret!")
-	create("second-custom-secret!")
+	second := create("second-custom-secret!")
 	query := url.Values{"id": {first.Key.ID}}
 	before, _ := m.store.Keys()
 	for _, body := range []string{`{"secret":null}`, `{"secret":""}`, `{"secret":false}`,
@@ -58,13 +58,21 @@ func TestCustomKeyManagementContract(t *testing.T) {
 		t.Fatal("failed requests changed Key state")
 	}
 	res = dispatchForTest(t, m, "GET", managementBasePath+"/keys", nil, "")
-	if strings.Contains(string(res.Body), first.Secret) || strings.Contains(string(res.Body), `"secret"`) {
-		t.Fatal("list exposes secret")
+	var listed keysResponse
+	if res.StatusCode != 200 || json.Unmarshal(res.Body, &listed) != nil {
+		t.Fatalf("list keys: %d %s", res.StatusCode, res.Body)
+	}
+	visible := map[string]string{}
+	for _, item := range listed.Items {
+		visible[item.ID] = item.Secret
+	}
+	if len(listed.Items) != 2 || visible[first.Key.ID] != first.Secret || visible[second.Key.ID] != second.Secret {
+		t.Fatal("list did not expose the current plaintext", listed)
 	}
 	for _, body := range []string{`{"secret":"replacement-secret!"}`, "", "{}"} {
 		res = dispatchForTest(t, m, "POST", managementBasePath+"/keys/rotate", query, body)
 		var out keySecretResponse
-		if res.StatusCode != 200 || json.Unmarshal(res.Body, &out) != nil || len(out.Secret) < 8 || out.Key.ID != first.Key.ID {
+		if res.StatusCode != 200 || json.Unmarshal(res.Body, &out) != nil || len(out.Secret) < 8 || out.Key.ID != first.Key.ID || out.Key.Secret != out.Secret {
 			t.Fatal("custom/legacy automatic rotation failed", res.StatusCode, string(res.Body))
 		}
 	}

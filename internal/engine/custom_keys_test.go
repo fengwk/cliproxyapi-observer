@@ -38,14 +38,21 @@ func TestCustomSecretValidation(t *testing.T) {
 	}
 }
 
-// The hash index and Key update must commit together, including for disabled
-// Keys. Failed rotations must leave both authentication and accounting intact.
+// The hash index, plaintext display material and Key update must commit
+// together, including for disabled Keys. Failed rotations must leave both
+// authentication, stored plaintext and accounting intact.
 func TestCustomSecretAtomicRotationAndPersistence(t *testing.T) {
 	s, now, _ := fixture(t)
 	first, secret, err := s.CreateKeyWithSecret(KeySpec{Enabled: true, Label: "client", Limits: Limits{Total: 100}}, "first-secret-exact!")
 	must(t, err)
-	other, _, err := s.CreateKeyWithSecret(KeySpec{Enabled: false}, "disabled-secret!")
+	if first.Secret != secret {
+		t.Fatal("created key did not expose its current plaintext")
+	}
+	other, otherSecret, err := s.CreateKeyWithSecret(KeySpec{Enabled: false}, "disabled-secret!")
 	must(t, err)
+	if other.Secret != otherSecret || other.Enabled {
+		t.Fatal("disabled key did not retain its current plaintext")
+	}
 	must(t, s.RecordUsage(event(first, "custom-record", *now)))
 	before, err := s.Keys()
 	must(t, err)
@@ -65,39 +72,68 @@ func TestCustomSecretAtomicRotationAndPersistence(t *testing.T) {
 	after, err := s.Keys()
 	must(t, err)
 	if !reflect.DeepEqual(before, after) {
-		t.Fatal("failed rotation modified Key state")
+		t.Fatal("failed rotation modified Key state or displayed plaintext")
 	}
 	rotated, next, err := s.RotateKeyWithSecret(first.ID, "replacement-secret-exact!")
 	must(t, err)
+	if rotated.Secret != next {
+		t.Fatal("rotation did not publish the replacement plaintext")
+	}
 	for _, old := range before {
-		if old.ID == first.ID && !reflect.DeepEqual(old, rotated) {
+		if old.ID != first.ID {
+			continue
+		}
+		// Identity, counters, windows and policy are unchanged; only the
+		// current plaintext is allowed to differ.
+		old.Secret = ""
+		comparable := rotated
+		comparable.Secret = ""
+		if !reflect.DeepEqual(old, comparable) {
 			t.Fatal("successful rotation changed identity, counters or windows")
 		}
 	}
 	if _, err = s.Authenticate(secret); !errors.Is(err, ErrUnauthorized) {
 		t.Fatal("old credential survived rotation", err)
 	}
-	if authenticated, err := s.Authenticate(next); err != nil || authenticated.ID != first.ID {
-		t.Fatal("replacement rejected", err)
+	authenticated, err := s.Authenticate(next)
+	if err != nil || authenticated.ID != first.ID || authenticated.Secret != next {
+		t.Fatal("replacement rejected or failed to expose current plaintext", err)
 	}
-	// Inspect real Bolt storage, not a mock, for both plaintext exclusion and
-	// hash lookup integrity; then reopen the same schema2 file.
+	// Inspect the live Bolt value, not a mock: the current plaintext and hash
+	// index coexist. Old plaintext may remain in retained bbolt pages, so this
+	// test makes no physical-erasure claim.
 	path := s.db.Path()
 	must(t, s.db.View(func(tx *bolt.Tx) error {
 		if string(tx.Bucket([]byte("hashes")).Get([]byte(hash(next)))) != first.ID {
 			t.Fatal("hash index missing")
+		}
+		var stored storedKey
+		if e := get(tx.Bucket([]byte("keys")), first.ID, &stored); e != nil {
+			return e
+		}
+		if stored.Secret != next || stored.Hash != hash(next) {
+			t.Fatal("live Key value lost current plaintext or hash", stored.Key)
 		}
 		return nil
 	}))
 	must(t, s.Close())
 	data, err := os.ReadFile(path)
 	must(t, err)
-	if bytes.Contains(data, []byte(secret)) || bytes.Contains(data, []byte(next)) {
-		t.Fatal("plaintext credential persisted")
+	if !bytes.Contains(data, []byte(next)) {
+		t.Fatal("current plaintext missing from durable database")
 	}
 	reopened, err := Open(Options{DataPath: path, Pricer: &fakePrice{}})
 	must(t, err)
 	defer reopened.Close()
+	listed, err := reopened.Keys()
+	must(t, err)
+	secrets := map[string]string{}
+	for _, current := range listed {
+		secrets[current.ID] = current.Secret
+	}
+	if len(listed) != 2 || secrets[first.ID] != next || secrets[other.ID] != otherSecret {
+		t.Fatal("stored plaintext lost on restart", listed)
+	}
 	if authenticated, err := reopened.Authenticate(next); err != nil || authenticated.ID != first.ID {
 		t.Fatal("custom credential lost on restart", err)
 	}

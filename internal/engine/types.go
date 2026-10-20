@@ -36,7 +36,10 @@ type KeySpec struct {
 	Limits        Limits     `json:"limits"`
 }
 type Key struct {
-	ID            string     `json:"id"`
+	ID string `json:"id"`
+	// Secret is the current plaintext credential, persisted additively for
+	// authenticated management display. Legacy hash-only rows leave it empty.
+	Secret        string     `json:"secret,omitempty"`
 	KeySpec                  // embedded flat JSON
 	Used          Limits     `json:"used"`
 	Starts        Windows    `json:"starts"`
@@ -109,7 +112,7 @@ const (
 	captureReasonCorrelation  = "trace_collision"
 	captureHeaderLimit        = 16 << 10
 	captureEnvelopeVersion    = 1
-	supportedObserverFeature  = 1
+	supportedObserverFeature  = 2
 )
 
 type Health struct {
