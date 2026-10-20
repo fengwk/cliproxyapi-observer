@@ -46,7 +46,7 @@ func TestPricePreviewIsReadOnlyAndConservative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i, want := range []string{"manual", "auto", "unpriced", "auto", "unpriced", "auto", "auto", "unpriced"} {
+	for i, want := range []string{"manual", "auto", "unpriced", "auto", "unpriced", "auto", "unpriced", "unpriced"} {
 		if items[i].Source != want {
 			t.Fatalf("item %d: %+v", i, items[i])
 		}

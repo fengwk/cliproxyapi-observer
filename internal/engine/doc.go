@@ -45,11 +45,30 @@
 // extends the correlation lifetime to protect still-readable request rows.
 //
 // Capture is best effort and nonblocking. A 64-entry queue holds at most 8MiB
-// per body, plus bounded headers. Oversized bodies enqueue only a truncated
-// sentinel, not their bytes. Diagnostic storage defaults to 256MiB (max 1GiB).
+// per body, plus bounded headers. CaptureMode selects off, safe headers only, or
+// headers plus redacted JSON. Oversized/non-JSON bodies retain independent
+// status and never store a partial payload. Diagnostic storage defaults to
+// 256MiB (max 1GiB) and is tracked by a transactional compressed-byte counter;
+// expired content is removed before the oldest capture is evicted by time.
 // Only allowlisted, redacted headers and recursively redacted JSON are stored.
-// Metadata and captures are gzip compressed with one bounded decoder. Ambiguous
-// same-Key traces hide content; expiration is enforced on reads before cleanup.
+// New captures use one gzip envelope; old double-compressed schema2 rows remain
+// readable. Ambiguous same-Key traces hide content; expiration is enforced on
+// reads before cleanup, and PurgeCaptures advances a generation so already
+// queued writes cannot resurrect cleared content. Cleanup/Purge never touch
+// metadata, rollups, costs, quotas or the independent Key counters.
+//
+// DeleteKey writes a terminal tombstone, clears the authentication hash and
+// disables the Key in one transaction. Active requests and retained accounting
+// events return ErrBusy; deleted Keys reject all other mutations while history
+// and counters remain. Revocation (empty hash, not deleted) and ordinary
+// disabling remain distinguishable. Generated secrets are sk- plus 48 unbiased
+// alphanumeric characters; internal IDs remain 64 lowercase hex.
+//
+// Schema stays 2 and observer_features=1 marks the additive capture/state
+// buckets. A higher feature version is rejected from a read-only preflight
+// before opening a writable handle. Legacy settings inherit the former boolean
+// mode and raw retention; the FIFO index and TTL state are rebuilt idempotently
+// without rewriting or clearing old content.
 //
 // Lists expose zero effective rolling usage for expired windows without changing
 // anchors. Existing reset timestamps remain in the past so the UI can explain

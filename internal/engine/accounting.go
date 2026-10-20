@@ -81,7 +81,7 @@ func (s *Store) RecordUsage(u pluginapi.UsageRecord) error {
 		rate := *q.Rates.Reasoning
 		q.Rates.Reasoning = &rate
 	}
-	p := pending{Record: r, At: at, Quote: q, CaptureEnabled: s.settings.CaptureEnabled, Epoch: key.Epoch}
+	p := pending{Record: r, At: at, Quote: q, CaptureEnabled: s.settings.CaptureEnabled, CaptureMode: s.settings.CaptureMode, Epoch: key.Epoch}
 	if e = s.persistLocked(p); e == nil {
 		return nil
 	}
@@ -188,7 +188,7 @@ func (s *Store) persistLocked(p pending) error {
 		if e := put(db, id, d); e != nil {
 			return e
 		}
-		if e := put(tx.Bucket([]byte("records")), r.ID, recordData{Record: r, Quote: p.Quote, CaptureEnabled: p.CaptureEnabled}); e != nil {
+		if e := put(tx.Bucket([]byte("records")), r.ID, recordData{Record: r, Quote: p.Quote, CaptureEnabled: p.CaptureEnabled, CaptureMode: p.CaptureMode}); e != nil {
 			return e
 		}
 		if e := tx.Bucket([]byte("timeline")).Put([]byte(timeID(r)), []byte(r.ID)); e != nil {
