@@ -69,8 +69,8 @@ func TestCatalogCapabilityScopeAndSingleUse(t *testing.T) {
 	_ = json.Unmarshal(call(t, m, "request.intercept_before", pluginapi.RequestInterceptRequest{RequestID: "catalog", RequestedModel: "model", Metadata: map[string]any{
 		coreexecutor.CallerScopeMetadataKey: session.CallerScope(a.Principal), coreexecutor.RequestPathMetadataKey: "/v1/chat/completions",
 	}}), &before)
-	if !before.Terminate || before.StatusCode != http.StatusForbidden || !bytes.Contains(before.ResponseBody, []byte("observer_key_required")) || m.store.Health().ActiveRequests != 0 {
-		t.Fatalf("catalog capability entered admission: %+v", before)
+	if before.Terminate || m.store.Health().ActiveRequests != 0 {
+		t.Fatal("catalog capability entered admission")
 	}
 }
 

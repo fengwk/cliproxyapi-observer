@@ -139,14 +139,10 @@ func TestCleanNativeReplacementPreservesKeys(t *testing.T) {
 	if status, _ := h.infer(t, created.Secret, false); status != http.StatusOK {
 		t.Fatal("replacement lost key/store")
 	}
-	// Native CPA Keys keep host authentication across Observer replacement, but
-	// model execution still requires an Observer-owned scope.
+	// Native CPA Keys are independent of Observer's replacement lifecycle.
 	beforeRecords := len(h.page(t, "page_size=100").Items)
-	beforeCalls := h.mock.callCount()
-	status, body := h.infer(t, clientKey, false)
-	requireObserverKeyRequired(t, status, body)
-	if h.mock.callCount() != beforeCalls {
-		t.Fatal("native key after replacement reached the upstream")
+	if status, body := h.infer(t, clientKey, false); status != http.StatusOK || jsonContent(body) != fixtureText {
+		t.Fatalf("native key after replacement status=%d body=%s", status, truncate(body, 300))
 	}
 	if records := h.page(t, "page_size=100"); len(records.Items) != beforeRecords {
 		t.Fatalf("native key after replacement entered Observer accounting: %d -> %d records", beforeRecords, len(records.Items))
