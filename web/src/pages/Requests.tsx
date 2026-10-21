@@ -62,7 +62,7 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
     ...draftFilters,
   }));
 
-  // Active view tab: requests, model, key, account, provider
+  // Active view tab: requests, model, key, key_model, account, provider
   const [view, setView] = useState<ViewTab>('requests');
 
   // Pagination
@@ -695,7 +695,7 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
         loading={loading && !viewData}
       />
 
-      {/* 5. Table Area (5 views tabs + records/groups table + pagination) */}
+      {/* 5. Table Area (6 views tabs + records/groups table + pagination) */}
       <RequestsTable
         view={view}
         onViewChange={handleViewChange}

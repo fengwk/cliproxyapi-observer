@@ -123,6 +123,86 @@ func TestDetailedAggregatesAndRequestViews(t *testing.T) {
 	}
 }
 
+// The composite view keeps the full identity in a JSON triple: equal labels do
+// not merge Keys, and equal model names do not merge providers. Filtering and
+// paging reuse the existing group query, and expired raw details still rely on
+// the daily rollup.
+func TestKeyModelViewIdentityFilteringAndDailyRollup(t *testing.T) {
+	s, now, _ := fixture(t)
+	a, _ := key(t, s, KeySpec{Enabled: true, Label: "Shared Label"})
+	b, _ := key(t, s, KeySpec{Enabled: true, Label: "Shared Label"})
+	base := day(*now)
+	add := func(k Key, id, provider, model string, at time.Time) {
+		u := event(k, id, at)
+		u.Provider, u.Model = provider, model
+		must(t, s.RecordUsage(u))
+	}
+	add(a, "a-openai-1", "openai", "gpt-exact", base.Add(8*time.Hour))
+	add(a, "a-openai-2", "openai", "gpt-exact", base.Add(9*time.Hour))
+	add(a, "a-azure", "azure", "gpt-exact", base.Add(10*time.Hour))
+	add(a, "a-other", "openai", "other-model", base.Add(10*time.Hour))
+	add(b, "b-openai", "openai", "gpt-exact", base.Add(11*time.Hour))
+
+	expected := map[string]struct {
+		keyID, provider, model string
+		requests               int64
+	}{
+		a.ID + "/openai/gpt-exact":   {a.ID, "openai", "gpt-exact", 2},
+		a.ID + "/azure/gpt-exact":    {a.ID, "azure", "gpt-exact", 1},
+		a.ID + "/openai/other-model": {a.ID, "openai", "other-model", 1},
+		b.ID + "/openai/gpt-exact":   {b.ID, "openai", "gpt-exact", 1},
+	}
+	view, e := s.RequestView(ViewQuery{FromDate: "2024-01-31", ToDate: "2024-01-31", View: viewKeyModel})
+	must(t, e)
+	if view.Summary.Requests != 5 || len(view.Groups) != len(expected) {
+		t.Fatalf("composite summary/groups = %+v/%d", view.Summary, len(view.Groups))
+	}
+	var groupTotal int64
+	keyIDs := map[string]bool{}
+	for _, g := range view.Groups {
+		var identity []string
+		must(t, json.Unmarshal([]byte(g.Key), &identity))
+		if len(identity) != 3 {
+			t.Fatalf("identity is not a JSON triple: %q", g.Key)
+		}
+		lookup := identity[0] + "/" + identity[1] + "/" + identity[2]
+		want, ok := expected[lookup]
+		if !ok || identity[0] != want.keyID || identity[1] != want.provider || identity[2] != want.model {
+			t.Fatalf("unexpected composite identity %q: %+v", g.Key, g)
+		}
+		if g.KeyID != want.keyID || g.Provider != want.provider || g.Model != want.model ||
+			g.Label != "Shared Label" || g.Requests != want.requests {
+			t.Fatalf("group identity/label/count = %+v, want %+v", g, want)
+		}
+		groupTotal += g.Requests
+		keyIDs[g.KeyID] = true
+	}
+	if groupTotal != view.Summary.Requests || len(keyIDs) != 2 {
+		t.Fatalf("group totals/labels merged: total=%d keys=%v", groupTotal, keyIDs)
+	}
+
+	filtered, e := s.RequestView(ViewQuery{FromDate: "2024-01-31", ToDate: "2024-01-31", View: viewKeyModel, Query: Query{KeyID: a.ID, PageSize: 2}})
+	must(t, e)
+	if filtered.Summary.Requests != 4 || len(filtered.Groups) != 2 || !filtered.Pagination.HasMore {
+		t.Fatalf("filtered first page = %+v/%d/%+v", filtered.Summary, len(filtered.Groups), filtered.Pagination)
+	}
+	second, e := s.RequestView(ViewQuery{FromDate: "2024-01-31", ToDate: "2024-01-31", View: viewKeyModel, Query: Query{KeyID: a.ID, Page: 2, PageSize: 2}})
+	must(t, e)
+	if len(second.Groups) != 1 || second.Pagination.HasMore {
+		t.Fatalf("filtered second page = %d/%+v", len(second.Groups), second.Pagination)
+	}
+
+	// Expire raw records and hourly rollups; the complete-day query must still
+	// reconstruct the same composite identities from the daily rollup.
+	*now = now.Add(26 * time.Hour)
+	must(t, s.Maintenance())
+	rollup, e := s.RequestView(ViewQuery{FromDate: "2024-01-31", ToDate: "2024-01-31", View: viewKeyModel})
+	must(t, e)
+	if rollup.Summary.Requests != 5 || len(rollup.Groups) != len(expected) {
+		t.Fatalf("daily rollup lost composite groups: %+v/%d", rollup.Summary, len(rollup.Groups))
+	}
+}
+
 // Cache/input denominators must use the same complete sample set. A total-only
 // unknown provider remains visible in raw usage and authoritative totals/cost,
 // but its unclassified buckets never blend into a misleading aggregate hit rate.

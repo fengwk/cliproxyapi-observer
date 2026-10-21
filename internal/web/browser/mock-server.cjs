@@ -720,7 +720,7 @@ function requestView(state, url) {
   if (end < from) throw failure(400, 'invalid_query', 'reversed dates');
   const to = Math.min(now, end + 86400000);
   const view = copy.searchParams.get('view') || 'requests';
-  if (!['requests', 'model', 'key', 'account', 'provider'].includes(view)) throw failure(400, 'invalid_query', 'invalid view');
+  if (!['requests', 'model', 'key', 'key_model', 'account', 'provider'].includes(view)) throw failure(400, 'invalid_query', 'invalid view');
   ['from_date', 'to_date', 'view'].forEach(key => copy.searchParams.delete(key));
   copy.searchParams.set('from', iso(from)); copy.searchParams.set('to', iso(to));
   const query = parseRequestQuery(copy), rows = filterRecords(state.records, query), summary = computeSummary(rows, query);
@@ -729,16 +729,21 @@ function requestView(state, url) {
   if (view !== 'requests') {
     const map = new Map();
     for (const row of rows) {
-      const id = view === 'model' ? JSON.stringify([row.provider, row.model]) : row[view === 'key' ? 'key_id' : view === 'account' ? 'auth_index' : 'provider'] || 'unknown';
+      const id = view === 'model' ? JSON.stringify([row.provider, row.model])
+        : view === 'key_model' ? JSON.stringify([row.key_id, row.provider, row.model])
+        : row[view === 'key' ? 'key_id' : view === 'account' ? 'auth_index' : 'provider'] || 'unknown';
       if (!map.has(id)) map.set(id, []);
       map.get(id).push(row);
     }
     groups = [...map].map(([id, items]) => {
       const { buckets, granularity, ...totals } = computeSummary(items, query);
       const row = items[0];
-      return { ...totals, key: id, label: view === 'key' ? state.keys.find(key => key.id === id)?.label || id : id,
-        model: view === 'model' ? row.model : '', provider: view === 'provider' || view === 'model' ? row.provider : '',
-        key_id: view === 'key' ? row.key_id : '', auth_index: view === 'account' ? row.auth_index : '' };
+      const keyed = view === 'key' || view === 'key_model';
+      return { ...totals, key: id,
+        label: keyed ? state.keys.find(key => key.id === row.key_id)?.label || row.key_id || 'unknown' : id,
+        model: view === 'model' || view === 'key_model' ? row.model : '',
+        provider: view === 'provider' || view === 'model' || view === 'key_model' ? row.provider : '',
+        key_id: keyed ? row.key_id : '', auth_index: view === 'account' ? row.auth_index : '' };
     }).sort((a, b) => b.requests - a.requests || a.key.localeCompare(b.key));
     selected = groups;
   }

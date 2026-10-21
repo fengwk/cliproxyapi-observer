@@ -337,8 +337,9 @@ describe('RequestsPage and RequestsHelpers', () => {
    */
   it('formulas: calculates cache hit rate with full input denominator, failure rate, and stream TPS accurately', () => {
     // Cache hit rate = cache_read / (input + cache_read + cache_write)
-    // 100 read, 300 input, 100 write -> 100 / 500 = 20.0%
-    expect(calculateCacheHitRate(100, 300, 100)).toBe('20.0%');
+    expect(calculateCacheHitRate(100, 300, 100)).toBe('20.00%');
+    expect(calculateCacheHitRate(1, 2, 0)).toBe('33.33%');
+    expect(calculateCacheHitRate(0, 100, 0)).toBe('0.00%');
     // Unknown or 0 denominator returns null
     expect(calculateCacheHitRate(0, 0, 0)).toBeNull();
 
@@ -400,7 +401,7 @@ describe('RequestsPage and RequestsHelpers', () => {
       expect(screen.getByTestId('metric-requests')).toHaveTextContent('12');
       expect(screen.getByTestId('metric-failures')).toHaveTextContent('2');
       expect(screen.getByTestId('metric-tokens')).toHaveTextContent('45,000');
-      expect(screen.getByTestId('metric-cache')).toHaveTextContent('23.8%'); // 10000 / (30000+10000+2000)
+      expect(screen.getByTestId('metric-cache')).toHaveTextContent('23.81%'); // 10000 / (30000+10000+2000)
       expect(screen.getByTestId('metric-latency')).toHaveTextContent('0.20 s'); // 2400 / 12
       expect(screen.getByTestId('metric-latency')).toHaveTextContent('TTFT: 0.06 s'); // 600 / 10
       expect(screen.getByTestId('metric-cost')).toHaveTextContent('$1.5');
@@ -999,6 +1000,90 @@ describe('RequestsPage and RequestsHelpers', () => {
     await waitFor(() => {
       expect(screen.getByText('渠道: openai')).toBeInTheDocument();
     });
+  });
+
+  /**
+   * Why covered:
+   * Proves the composite tab sends view=key_model and renders the Key and model
+   * as separate columns. The composite group key is never displayed as a Key ID,
+   * and cache rates use two decimals with zero padding or an honest dash.
+   */
+  it('key_model view: requests composite groups and renders separate Key/model columns', async () => {
+    const base = createMockApiClient();
+    const api = createMockApiClient({
+      request: vi.fn(async (path, options) => {
+        const result = await base.request(path, options);
+        if (path.startsWith('/requests/view') && path.includes('view=key_model')) {
+          const view = result as RequestView;
+          view.groups = [
+            {
+              ...view.summary,
+              key: JSON.stringify(['key-abc', 'openai', 'gpt-4o']),
+              key_id: 'key-abc',
+              label: 'Production Key',
+              model: 'gpt-4o',
+              provider: 'openai',
+              requests: 7,
+              detailed_requests: 7,
+              complete_requests: 7,
+              cache_read_tokens: 10000,
+              cache_write_tokens: 2000,
+            },
+            {
+              ...view.summary,
+              key: JSON.stringify(['4f68a2d1e09c8b7a6543210fedcba9874f68a2d1e09c8b7a6543210fedcba987', 'anthropic', 'claude-3-5-sonnet']),
+              key_id: '4f68a2d1e09c8b7a6543210fedcba9874f68a2d1e09c8b7a6543210fedcba987',
+              label: 'Archived Key',
+              model: 'claude-3-5-sonnet',
+              provider: 'anthropic',
+              requests: 3,
+              detailed_requests: 3,
+              complete_requests: 3,
+              cache_read_tokens: 0,
+              cache_write_tokens: 0,
+            },
+            {
+              ...view.summary,
+              key: JSON.stringify(['key-azure', 'azure', 'unknown-model']),
+              key_id: 'key-azure',
+              label: 'Azure Key',
+              model: 'unknown-model',
+              provider: 'azure',
+              requests: 1,
+              detailed_requests: 0,
+              complete_requests: 0,
+              cache_read_tokens: 0,
+              cache_write_tokens: 0,
+            },
+          ];
+        }
+        return result;
+      }) as ApiClient['request'],
+    });
+    render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('tab', { name: 'Key × 模型' }));
+
+    await waitFor(() => {
+      const calls = vi.mocked(api.request).mock.calls.filter(([path]) => path.startsWith('/requests/view'));
+      expect(new URLSearchParams(calls[calls.length - 1][0].split('?')[1]).get('view')).toBe('key_model');
+      expect(screen.getByRole('columnheader', { name: '客户端 Key' })).toBeInTheDocument();
+      expect(screen.getByRole('columnheader', { name: '模型' })).toBeInTheDocument();
+    });
+
+    const primary = screen.getByText('Production Key', { selector: '.requests-key-name' }).closest('tr');
+    expect(primary).toHaveTextContent('gpt-4o');
+    expect(primary).toHaveTextContent('渠道: openai');
+    expect(primary).toHaveTextContent('23.81%');
+    expect(primary).not.toHaveTextContent('["key-abc"');
+
+    const zero = screen.getByText('claude-3-5-sonnet', { selector: '.requests-primary-text' }).closest('tr');
+    expect(zero).toHaveTextContent('渠道: anthropic');
+    expect(zero).toHaveTextContent('0.00%');
+
+    const missing = screen.getByText('unknown-model', { selector: '.requests-primary-text' }).closest('tr');
+    expect(missing).toHaveTextContent('渠道: azure');
+    expect(missing).toHaveTextContent('—');
   });
 
   // Names are display metadata, not group/filter identities. Keep duplicate

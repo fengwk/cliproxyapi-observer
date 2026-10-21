@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"sort"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ const (
 	viewRequests = "requests"
 	viewModel    = "model"
 	viewKey      = "key"
+	viewKeyModel = "key_model"
 	viewAccount  = "account"
 	viewProvider = "provider"
 
@@ -161,7 +163,7 @@ func (s *Store) RequestView(v ViewQuery) (RequestView, error) {
 	out.Coverage.RawFrom, out.Coverage.DailyFrom = &rawFrom, &dailyFrom
 	e = env.db.View(func(tx *bolt.Tx) error {
 		keyLabels := map[string]string(nil)
-		if view == viewKey {
+		if view == viewKey || view == viewKeyModel {
 			keyLabels = readKeyLabels(tx)
 		}
 		agg, buckets, groups, e := collect(tx, env, q, granularity, view, keyLabels)
@@ -435,6 +437,16 @@ func groupIdentity(view, key, model, provider, auth string, labels map[string]st
 			label = key
 		}
 		return key, label, "", "", key, ""
+	case viewKeyModel:
+		if key == "" && model == "" && provider == "" {
+			return "unknown", "unknown", "", "", "", ""
+		}
+		raw, _ := json.Marshal([]string{key, provider, model})
+		label = labels[key]
+		if label == "" {
+			label = key
+		}
+		return string(raw), label, model, provider, key, ""
 	case viewAccount:
 		if auth == "" {
 			return "unknown", "unknown", "", "", "", ""
@@ -629,7 +641,7 @@ func (e *queryEnv) normalizeView(v ViewQuery) (Query, string, error) {
 	if view == "" {
 		view = viewRequests
 	}
-	if view != viewRequests && view != viewModel && view != viewKey && view != viewAccount && view != viewProvider {
+	if view != viewRequests && view != viewModel && view != viewKey && view != viewKeyModel && view != viewAccount && view != viewProvider {
 		return Query{}, "", ErrInvalid
 	}
 	if v.FromDate == "" && v.ToDate == "" && !q.From.IsZero() && !q.To.IsZero() {

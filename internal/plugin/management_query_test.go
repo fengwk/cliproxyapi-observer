@@ -43,6 +43,13 @@ func TestManagementRequestViewAndFacets(t *testing.T) {
 	if response.StatusCode != 200 || json.Unmarshal(response.Body, &view) != nil || len(view.Groups) != 1 || view.Groups[0].Provider != "openai" {
 		t.Fatalf("group not connected: %d %s", response.StatusCode, response.Body)
 	}
+	query.Set("view", "key_model")
+	response = dispatchForTest(t, m, http.MethodGet, managementBasePath+"/requests/view", query, "")
+	if response.StatusCode != 200 || json.Unmarshal(response.Body, &view) != nil || len(view.Groups) != 1 ||
+		view.Groups[0].KeyID != key.ID || view.Groups[0].Label != "Historical" ||
+		view.Groups[0].Model != "exact/model:v1" || view.Groups[0].Provider != "openai" {
+		t.Fatalf("composite group not connected: %d %s", response.StatusCode, response.Body)
+	}
 	var facets engine.FacetPage
 	response = dispatchForTest(t, m, http.MethodGet, managementBasePath+"/requests/facets", url.Values{"field": {"model"}, "search": {"exact/"}}, "")
 	if response.StatusCode != 200 || json.Unmarshal(response.Body, &facets) != nil || len(facets.Items) != 1 || facets.Items[0].Value != "exact/model:v1" {

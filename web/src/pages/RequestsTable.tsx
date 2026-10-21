@@ -41,10 +41,11 @@ export function RequestsTable({
   loading = false,
 }: RequestsTableProps) {
   const isRecordsView = view === 'requests';
+  const isKeyModel = view === 'key_model';
 
   return (
     <div className="requests-table-section" data-testid="requests-table-section">
-      {/* 5 Views Tabs */}
+      {/* 6 Views Tabs */}
       <div className="requests-tabs-nav" role="tablist" aria-label="请求视图切换">
         <button
           type="button"
@@ -72,6 +73,15 @@ export function RequestsTable({
           onClick={() => onViewChange('key')}
         >
           Key 分组
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === 'key_model'}
+          className={`requests-tab-btn ${view === 'key_model' ? 'is-active' : ''}`}
+          onClick={() => onViewChange('key_model')}
+        >
+          Key × 模型
         </button>
         <button
           type="button"
@@ -292,15 +302,22 @@ export function RequestsTable({
             <table className="requests-table">
               <thead>
                 <tr>
-                  <th>
-                    {view === 'model'
-                      ? '模型'
-                      : view === 'key'
-                      ? '客户端 Key'
-                      : view === 'account'
-                      ? '账户'
-                      : '提供商'}
-                  </th>
+                  {isKeyModel ? (
+                    <>
+                      <th>客户端 Key</th>
+                      <th>模型</th>
+                    </>
+                  ) : (
+                    <th>
+                      {view === 'model'
+                        ? '模型'
+                        : view === 'key'
+                        ? '客户端 Key'
+                        : view === 'account'
+                        ? '账户'
+                        : '提供商'}
+                    </th>
+                  )}
                   <th>请求数</th>
                   <th>失败 / 失败率</th>
                   <th>未缓存入 / 出</th>
@@ -334,8 +351,8 @@ export function RequestsTable({
                         )}
                       </div>
                     );
-                  } else if (view === 'key') {
-                    const kId = g.key_id || g.key;
+                  } else if (view === 'key' || isKeyModel) {
+                    const kId = g.key_id || (view === 'key' ? g.key : '');
                     const kInfo = resolveKeyDisplay(kId, keysMap);
                     groupLabel = (
                       <div className="requests-cell-stacked">
@@ -373,11 +390,25 @@ export function RequestsTable({
                   return (
                     <tr key={g.key}>
                       {/* 1. Group identity */}
-                      <td className={view === 'key' ? 'requests-key-cell' : undefined}>
+                      <td className={view === 'key' || isKeyModel ? 'requests-key-cell' : undefined}>
                         {groupLabel}
                       </td>
 
-                      {/* 2. Requests */}
+                      {/* 2. Composite model identity (key_model only) */}
+                      {isKeyModel && (
+                        <td>
+                          <div className="requests-cell-stacked">
+                            <span className="requests-primary-text">
+                              {g.model || '未指定模型'}
+                            </span>
+                            {g.provider && (
+                              <span className="requests-subtext">渠道: {g.provider}</span>
+                            )}
+                          </div>
+                        </td>
+                      )}
+
+                      {/* 3. Requests */}
                       <td className="requests-num-cell">
                         {formatNumber(g.requests)}
                       </td>

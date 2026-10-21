@@ -71,7 +71,9 @@ GET /requests/view?from_date=2026-10-01&to_date=2026-10-20&view=model&page=1&pag
 
 UTC 日期包含结束日，今天截到本次查询时刻；不接受混入 `from/to`。
 过滤参数仍为 `key_id/model/provider/auth_index/status`，状态 `success|failed`；
-view 为 `requests|model|key|account|provider`，page_size 最多 100。
+view 为 `requests|model|key|key_model|account|provider`，page_size 最多 100。
+`key_model` 以 JSON `[key_id,provider,model]` 为分组身份，不因 Key 标签相同或
+模型同名但 Provider 不同而合并；分组仍返回原 `key_id/model/provider`。
 未知、重复、畸形参数被拒绝。
 
 返回：
@@ -98,7 +100,7 @@ latency_ms/latency_samples/ttft_ms/ttft_samples
 总延迟/TTFT 按各自有效样本数计算平均，细分 Token/缓存命中率只用完整样本集合的合计计算，
 reasoning 已在 output 内。每条 TPS 仅用于完整、有效流式样本，不提供平均 TPS。
 缓存命中率为 `Σcache_read_tokens / Σ(input_tokens + cache_read_tokens + cache_write_tokens)`，
-其中 input 是未缓存输入；不包含输出/reasoning，也不平均每请求百分比，显示一位小数。
+其中 input 是未缓存输入；不包含输出/reasoning，也不平均每请求百分比，统一显示两位小数。
 样本覆盖不足时不代表全量请求的缓存命中率；分母为零显示 `—`，不补造缺失细分。
 旧日汇总没有细分时 `detailed_requests=0`，不能把缺失视为已知零。
 可用原始明细只在查询范围/不足一小时的边界解码，完整小时复用小时汇总；

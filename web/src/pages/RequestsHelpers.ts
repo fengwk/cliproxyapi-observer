@@ -12,7 +12,7 @@ export interface FilterState {
 }
 
 export type PresetRange = 'today' | 'last7days' | 'last30days' | 'custom';
-export type ViewTab = 'requests' | 'model' | 'key' | 'account' | 'provider';
+export type ViewTab = 'requests' | 'model' | 'key' | 'key_model' | 'account' | 'provider';
 
 /**
  * Returns today's UTC date as YYYY-MM-DD.
@@ -385,7 +385,7 @@ export function calculateCacheHitRate(
   const write = Number(cacheWrite) || 0;
   const fullInput = inTokens + read + write;
   if (fullInput <= 0) return null;
-  return `${((read / fullInput) * 100).toFixed(1)}%`;
+  return `${((read / fullInput) * 100).toFixed(2)}%`;
 }
 
 /**

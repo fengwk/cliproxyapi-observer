@@ -164,6 +164,21 @@ test('requests: filters, RFC3339 validation, pagination and no accidental detail
   });
 });
 
+test('request view: key_model groups by Key/provider/model with the Key label', async () => {
+  await withServer(async (server) => {
+    const date = new Date().toISOString().slice(0, 10);
+    const view = await json(server, '/requests/view?from_date=' + date + '&to_date=' + date + '&view=key_model&page_size=100');
+    assert.equal(view.res.status, 200);
+    const group = view.body.groups.find((item) =>
+      item.key_id === 'key-alpha' && item.provider === 'openai' && item.model === 'gpt-5-codex');
+    assert.ok(group, 'composite group present');
+    assert.equal(group.key, JSON.stringify(['key-alpha', 'openai', 'gpt-5-codex']));
+    assert.equal(group.label, '生产 Key（自动化）');
+    assert.equal(group.requests, 3);
+    assert.ok(view.body.groups.every((item) => Array.isArray(JSON.parse(item.key)) && JSON.parse(item.key).length === 3));
+  });
+});
+
 test('details: query-ID route only, fake redacted headers/body, XSS payload stays data', async () => {
   await withServer(async (server) => {
     const missing = await json(server, '/requests/detail?id=does-not-exist');
