@@ -5,7 +5,6 @@ import {
   parseQuotaLimit,
   validateExpiry,
   copyToClipboard,
-  maskId,
 } from './KeysHelpers';
 
 describe('KeysHelpers Unit Tests', () => {
@@ -133,14 +132,6 @@ describe('KeysHelpers Unit Tests', () => {
       mockWrite.mockRejectedValueOnce(new Error('fail'));
       const fail = await copyToClipboard('test-copy');
       expect(fail).toBe(false);
-    });
-  });
-
-  describe('maskId', () => {
-    // 意图：测试 ID 掩码截断规则
-    it('preserves short IDs and masks long IDs', () => {
-      expect(maskId('short-id')).toBe('short-id');
-      expect(maskId('12345678901234567890')).toBe('12345678...567890');
     });
   });
 });

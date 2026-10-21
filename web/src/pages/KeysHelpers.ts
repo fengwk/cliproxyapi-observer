@@ -132,11 +132,3 @@ export async function copyToClipboard(text: string): Promise<boolean> {
   }
   return false;
 }
-
-/**
- * 截断长 Key ID。
- */
-export function maskId(id: string): string {
-  if (id.length <= 16) return id;
-  return `${id.slice(0, 8)}...${id.slice(-6)}`;
-}

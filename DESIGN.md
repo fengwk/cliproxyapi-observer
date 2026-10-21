@@ -274,12 +274,13 @@ Resource shell may be public, but all data authenticated.
 
 Plugin frontend auth extracts bearer/x-api-key/x-goog-api-key and supported
 query key/auth_token, disallows conflicting material. Authentication is
-nonexclusive and only recognizes finite supported operations. Non-model routes
-stay unchanged, but native/unknown scopes on guarded model execution paths now
-fail with 403. Authenticated owned generation fails closed across reconfiguration/
-store failures. Unsupported intercepted model surfaces are denied, not billed.
-Host Live/Realtime/Alpha Search paths skip this hook: all-route enforcement is
-blocked, not solved by merely listing their paths. See docs/model-policy.md.
+nonexclusive and only recognizes finite supported operations. Native/unknown
+scopes pass through without touching Observer storage. Authenticated owned
+generation fails closed across reconfiguration/store failures and enforces exact
+requested-model permissions, quota and concurrency. Unsupported Observer routes
+stay unhandled; no global model-surface classifier or native execution denylist.
+CPA Realtime tokens remain host-owned; Observer catalog tokens remain one-use,
+GET-directory-only capabilities. See docs/model-policy.md for current scope.
 Anonymous/no-native-provider and duplicate/mixed-key limitations remain explicit.
 An unloaded plugin cannot enforce its own authentication or admission.
 Before-interceptor validates principal metadata, makes admission once;

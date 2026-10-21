@@ -1,8 +1,8 @@
 # Observer 当前开发实现说明
 
 本文件包含 v0.8.0 发布后的未发布开发变更；`REFACTOR-next.md` 是历史需求设计，
-v0.6/v0.7/v0.8 发布说明保留各版本历史行为。当前模型策略及 SDK 覆盖缺口见
-[模型接口策略](model-policy.md)，尚不能发布为全路由 Observer-only 网关。
+v0.6/v0.7/v0.8 发布说明保留各版本历史行为。当前采用最小非独占认证共存，
+详见 [认证与模型权限](model-policy.md)，不接管 CPA 的原生凭据或实时令牌。
 
 ## 能力与可复用验收
 
@@ -18,7 +18,7 @@ v0.6/v0.7/v0.8 发布说明保留各版本历史行为。当前模型策略及 S
 | R08 ID/密钥 | `sk-` + 48 字母数字，内部 ID 保留关联；当前明文持久展示/复制 | `key_material_test.go`、`custom_keys_preview_test.go`、Key 页面测试 |
 | R09 可解释计费 | 共用解析器、完整身份、候选和显式映射、历史报价固定 | `internal/pricing/*test.go`、`upgrade_test.go`、设置页草稿隔离测试 |
 | R10 内容生命周期 | 三模式、独立 TTL、单 gzip、索引 FIFO/到期、清理/清空/整理 | `capture*_test.go`、`rebuild_test.go`、`acceptance_test.go`、设置页测试 |
-| R11 最新模型鉴权策略 | 非独占；被拦截的模型执行只允许 Observer Key；非模型行为保留；全入口覆盖未完成 | `native_scope_test.go`、`model_guard_test.go`、`gemini_test.go` |
+| R11 认证共存 | 原生凭据保留 CPA 行为；Observer 只限制、记账自己支持的调用 | `native_scope_test.go`、`native_extensions_test.go`、`gemini_test.go` |
 
 测试文件位于 `internal/engine`、`internal/plugin`、`internal/pricing`、
 `web/src` 和 `tests/integration`。测试覆盖能力不等于任意部署保证；
@@ -32,28 +32,29 @@ v0.6/v0.7/v0.8 发布说明保留各版本历史行为。当前模型策略及 S
   `/v1/responses`、`/backend-api/codex/responses`，以及 Gemini
   `/v1beta/models/{model}:generateContent|streamGenerateContent`。
 - 目录读取：GET `/v1/models`、`/v1beta/models` 及合法模型详情。
-  count：POST `/v1/messages/count_tokens`、Gemini `:countTokens`，也要求 Observer Key。
+  count：POST `/v1/messages/count_tokens`、Gemini `:countTokens`。
   目录/count 不准入、不预留、不采集、不记账；count 仍校验自有 Key 的模型权限。
-- 在 request.before 覆盖的模型路径上，原生/未知/缺失 caller scope 返回
-  `403 observer_key_required`；被拦截但不支持计账的模型入口返回
-  `403 model_surface_unsupported`。非模型及无关路径不由 Observer 处理。
+- request.before 只处理由 Observer 认证并记录的自有生成/计数操作；
+  原生/未知/缺失 caller scope 直接透传，不访问 Observer 存储。
+  自有操作校验精确请求模型，不匹配返回 403；生成还检查额度和并发。
   Gemini 的 before-hook 是通配模板，使用认证时记下的真实操作，不猜正文；
   真生成也不能用 `Generate=false` 绕过准入。
 - 已认证的自有生成在存储暂停、重配置、记账故障或维护时 fail-closed；
   不能把无关流量一起拒绝，也不能一律返回认证成功。
-- Live/Realtime/Alpha Search 等宿主直接转发链不经过 request.before。
-  Responses WebSocket 的原生认证可完成握手，但每 turn 的模型执行被拒绝；
-  v8.0.30 丢弃 DirectResponse 错误正文，客户端看到连接关闭，不保证收到 403 JSON。
-  不能把此有限覆盖当作“所有模型入口已锁定”，详见 [覆盖表](model-policy.md)。
+- 图片/音频/视频、Alpha Search、Live/Realtime、Responses WebSocket 等接口
+  不在 Observer Key 的认证白名单；即使 Key 配置全部模型也不通用放行。
+  CPA 原生凭据继续按宿主行为访问这些接口，执行不纳入 Observer 账本。
+  CPA 原生临时令牌保留签发、有效期、模型/会话绑定和通话归属；Observer 不复制
+  令牌存储或另造替代协议。目录能力仍只授权一次 GET /v1/models。
 - **无原生 Key 的匿名模式**：CPA 不安装认证 provider 时可能匿名返回 200；
   安装非独占 provider 后全链弃权会返回 401。当前 SDK 没有安全的按路径原生
   委派接口，因此不承诺这类配置的透明共存。真实宿主测试锁定该已知限制。
 - **同明文双重身份/混合来源**：原生与 Observer provider 各自认证。
-  同一明文也在 CPA 原生 Key 列表时，原生认证先胜出会在受管模型执行阶段被拒绝，
-  而不是作为 Observer 请求计账。跨 query/header 的混合凭据亦可能由原生 provider 接管，
-  然后在同一模型边界被拒绝；不影响独立的非模型认证。
+  同一明文也在 CPA 原生 Key 列表时，原生认证先胜出便按原生调用执行，
+  不受 Observer 模型/额度/启停限制，也不作为 Observer 请求计账。
+  跨 query/header 的混合凭据亦可能由原生 provider 接管。
   不读取宿主密钥库、不改变 provider 顺序抢认证；部署时必须使用不同明文并只发
-  一套一致凭据。已知未覆盖路径的 200 不代表已受 Observer 额度管理。
+  一套一致凭据。客户端得到 200 不等于已受 Observer 额度管理。
 - 插件被宿主卸载/停用后不能拦截请求，CPA 的非持久化用量队列也不能保证
   热替换/崩溃时所有事件交付。停流升级、检查待记账与 unknown 标记仍然必要。
 
@@ -150,7 +151,7 @@ preview、Snapshot、Quote 使用同一个 resolver；原因/候选/缺失费率
    当作用量回调已落盘。
 2. 备份**整个数据目录**与匹配旧插件二进制，并核实可读取；
    保留中断标记等关联文件。不要在线普通复制正在写入的 bbolt 文件。
-3. 部署前先解决模型入口覆盖问题。数据可继续使用原 schema2 库，也可按用户允许
+3. 确认采用认证共存策略，且 CPA/Observer 使用不同凭据。数据可继续使用原 schema2 库，也可按用户允许
    在停流备份后显式换用全新空库、重新创建客户端 Key；不自动删除旧文件。
 4. 检查 Key 身份/累计、旧费用、内容模式和健康。旧 schema2 增量补建索引，
    按 1000 条明细一批回填新增细分字段及小时汇总；事务 checkpoint 可续接，

@@ -1,66 +1,61 @@
-# 模型接口 Observer Key 策略（开发中，发布阻塞）
+# 认证共存与模型权限
 
-## 目标与当前状态
+## 最小原则：各管各的
 
-用户要求：**模型接口必须使用 Observer Key，非模型接口保持不变**。
-这取代 v0.8.0 的原生模型调用透传规则，但不是全局独占认证。
+使用 CPA 已有的非独占 `FrontendAuthProvider`，不改 CPA 核心、不另造令牌系统。
+CPA 原生凭据保留原生行为；Observer 只管理自己认证且明确支持的调用。
+本轮删除候选中的“所有模型执行必须使用 Observer Key”守卫及其拒绝码、路径分类表、
+专属 WebSocket 测试框架，不将其替换成新的全路由拦截层。
 
-当前实现完成了有限模型执行拦截与明文 Key 管理，**尚未完成全路由强制鉴权**。
-仅把路径写进分类表不能让宿主补调用插件。发布不能隐瞒以下 SDK 覆盖缺口。
+## 凭据与接口范围
 
-## 已实现的执行边界
-
-| 入口 | 当前行为 |
+| 凭据 / 入口 | 行为 |
 | --- | --- |
-| POST Chat / Completions / Messages / Responses / Codex Responses | 有效 Observer 认证及正常准入才执行；原生 Key 返回 `403 observer_key_required` |
-| Gemini generateContent / streamGenerateContent | Observer 认证时记录真实动作；原生 scope 在通配执行边界拒绝 |
-| Claude / Gemini countTokens | 要求 Observer Key，校验状态/模型权限，但不计费、不占并发、不采集 |
-| 图片、音频、视频、Responses compact、Interactions 等已进入 before 的未支持执行 | 返回 `403 model_surface_unsupported`，不悄悄透传原生调用 |
-| Responses WebSocket | Observer Key 不支持握手；原生 Key 可以握手，但每 turn 的生成在 before 拒绝，v8.0.30 客户端观察为关闭而非 JSON 错误 |
-| 模型目录、详情、健康、管理认证、OAuth 等非模型执行 | 不在执行 guard 中接管，保留宿主行为 |
+| CPA 原生 Key | 宿主原生认证、权限和执行；不自动导入 Observer、不纳入 Observer 账本 |
+| CPA 签发的 Realtime `ek_…` | CPA 负责签发、有效期、模型/会话绑定、签发者身份与通话归属；Observer 不复制或读取其令牌存储 |
+| Observer Key：POST Chat / Completions / Messages / Responses / Codex Responses | 检查 Key 状态、精确请求模型、额度和并发；支持的执行按 Observer 规则记账 |
+| Observer Key：Gemini generateContent / streamGenerateContent | 认证时保留真实动作，在通配执行边界按自有操作进行授权、准入和记账 |
+| Observer Key：Claude / Gemini countTokens | 检查 Key 状态及精确请求模型，不计费、不占并发、不采集 |
+| Observer Key：支持的 GET 模型目录 / 详情 | 只读，不准入、不计账 |
+| Observer Key：图片、音频、视频、Responses compact、Interactions、Alpha Search、Live/Realtime、WebSocket 等其他入口 | 不在认证白名单，不因“全部模型”或有效 Key 而通用放行 |
+| Observer 目录能力 | 管理认证后签发的单次、30 秒令牌；仅 Bearer `GET /v1/models`，不能推理、计数或管理 |
+| CPA 管理密钥 | 管理认证；不是 Observer 客户端 Key，Observer 不将客户端 Key 升格为管理凭据 |
 
-无 Key 或任意无效 Key 仍由宿主认证返回 401。原生 Key 有效不等于获得模型执行权限。
-不把原生凭据自动导入 Observer，不读取宿主密钥，也不修改请求头/正文/路由或选路顺序。
-同一密钥同时配置到原生和 Observer、或混合 query/header 凭据时，原生认证先胜出
-的请求在受管模型边界也会被拒绝；请使用独立 Observer Key 和一套一致凭据。
+没有原生凭据兜底时，不支持的 Observer 请求由宿主拒绝认证；在配置原生客户端 Key 的
+真实宿主中验证为 401，而不是放行后漏记账。CPA 对这些接口自身的支持状况不由插件决定。
 
-## 尚未封闭的入口：宿主不经过 before
+## 认证、模型授权、准入与记账不是同一件事
 
-已核查 SDK 基线 `CLIProxyAPI/v8 v8.0.30`（本地源码提交
-`5be2cdab0869cbaa3d401891f740aebf7e15aa99`）：
+- `Authenticate` 检查密钥哈希、启用、到期等状态，不因认证成功就授权任意模型。
+- 自有生成 / count 在执行前用完整请求模型 ID 检查 `AllowedModels`。
+  空列表表示这些支持接口内不限制模型，不表示获得其他接口权限。
+- 生成再检查额度、并发及记账故障；count / 目录不消耗生成额度或并发。
+- `request.before` 先判断自有 caller scope 与操作，不属于 Observer 的请求直接透传，
+  不访问 Observer 存储。自有生成在存储不可用时仍拒绝准入。
+- 不通过 `generate` 正文字段猜测操作，不修改请求正文、头、路由、重试或会话。
 
-| 原生入口 | 已追踪的直接上游链（该版本源码） |
-| --- | --- |
-| POST `/v1/alpha/search`、`/backend-api/codex/alpha/search` | `internal/api/server_routes.go` 的 `codexAlphaSearch` → AuthManager.HttpRequest |
-| Live / Realtime HTTP 执行 | `internal/client/codex/live/live.go` 的 Handle → AuthManager.HttpRequest |
-| Realtime WebSocket | `internal/client/codex/live/websocket.go` → dialer.DialContext |
-| Live / Realtime sideband | `internal/client/codex/live/sideband.go` → dialer.DialContext |
-| Realtime 临时 token / session 等家族 | 独立认证/会话链，不属于已经覆盖的 before 模型入口；不作保护保证 |
+**限制只属于相应凭据，不是进程级模型策略。** 同一明文同时配置到 CPA 原生和 Observer，
+或 query / header 混入独立原生凭据时，宿主的原生 provider 可能先认证成功。
+这种请求按 CPA 原生规则执行，不受 Observer Key 的模型、额度、禁用或删除控制，
+也不进入 Observer 账本。请使用不同凭据及单一一致的来源；不能声称删除 Observer Key
+会同时撤销 CPA 中那份独立凭据。
 
-这些路径不通过 SDK 的 `applyRequestInterceptorsBeforeAuth`。
-普通非独占前端 provider 返回 `Authenticated:false` 是“交给下一 provider”，
-不是“终止请求”；原生 provider 仍可能认证成功。
+## 宿主边界与验证
 
-`tests/integration/model_guard_gap_test.go` 专门复现缺口，而不是假称修复：
-在零 Observer Key 的真实宿主上，原生 Key 可签发 Realtime 临时 token；
-Alpha Search 两个别名仍返回本地假上游的 200，假上游收到两次请求，
-Observer 没有记账。该测试通过说明缺口确实存在，不表示全入口要求通过验收。
-测试只使用隔离配置、假凭据和回环上游，不接触生产或实际模型服务。
+SDK 基线仍为 `CLIProxyAPI/v8 v8.0.30`，最低插件 schema 6。
+Alpha Search、Live/Realtime 等直接转发链没有完整的 Observer 执行授权和会话用量钩子；
+本次不为 Observer Key 开放这些接口，也不宣称其具有 Observer 实时计费或额度控制。
+CPA 原生请求保持原有语义，不需要为认证共存改造宿主。
 
-不能用以下方式假装补齐：
+`native_scope_test.go` 对比启用 / 停用插件的原生生成、计数、目录与管理行为，
+核对发往假上游的正文和请求头一致，且没有 Observer 账目。
+`native_extensions_test.go` 验证原生 Realtime 令牌签发与两种 Alpha Search 别名继续工作，
+受限 Observer Key 不能借这些入口绕过模型权限。所有上游均为隔离回环测试服务。
+模型授权、额度、并发、Gemini 操作区分和目录能力边界继续由相应测试验证。
 
-- 开启全局独占认证会改变非模型接口，不符合用户要求。
-- 对所有调用返回认证成功，会把错误凭据认证为有效，不能使用。
-- 依赖请求正文 `generate` 判断，无法区分真实生成与计数，也可由客户端操控。
-- 抢占调度/改路由不是可靠的请求过滤器；Home 选路路径会绕过插件 Scheduler，
-  而 Scheduler 请求也缺少精确 method/path。不能把未覆盖链伪装成已受控。
-
-**阻塞的收尾决策**：在支持路径级终止且覆盖这些入口的宿主能力可用后验证，
-或者在部署入口显式封禁未支持的执行路径并禁止直连绕过，再以真实覆盖范围发布。
-当前未修改 CPA 核心，也未替用户更改生产代理/防火墙配置。仅源码实现不能替代
-部署入口隔离；“已经部署、无法绕过”的说法在此不成立。
-
-此外，插件卸载/熔断/调用错误时宿主仍可能跳过它；这也不是进程外强制网关。
+这是独立插件，不是进程外强制网关。宿主可能在插件卸载、熔断或钩子失败时跳过插件；
+无原生 Key 的匿名配置注册 provider 后也可能从匿名成功变为 401。
+本次不更改这些宿主边界，不以全局独占认证或伪造认证成功来掩盖。
 
 ## Key 明文与数据
 
