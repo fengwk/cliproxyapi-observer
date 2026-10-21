@@ -1001,6 +1001,56 @@ describe('RequestsPage and RequestsHelpers', () => {
     });
   });
 
+  // Names are display metadata, not group/filter identities. Keep duplicate
+  // names on separate indexes and preserve the full long name in its tooltip.
+  it('shows account names with index tooltips and filters by the original index', async () => {
+    const name = `production-${'long-account-name-'.repeat(6)}.json`;
+    const base = createMockApiClient();
+    const api = createMockApiClient({
+      request: vi.fn(async (path, options) => {
+        if (path.startsWith('/requests/facets') && path.includes('field=auth_index')) {
+          return { items: [
+            { value: 'auth-a', label: name },
+            { value: 'auth-b', label: name },
+            { value: 'legacy-auth' },
+          ] };
+        }
+        const result = await base.request(path, options);
+        if (path.startsWith('/requests/view')) {
+          const view = result as RequestView;
+          view.groups = [
+            { ...view.summary, key: 'auth-a', auth_index: 'auth-a', label: name },
+            { ...view.summary, key: 'auth-b', auth_index: 'auth-b', label: name },
+            { ...view.summary, key: 'legacy-auth', auth_index: 'legacy-auth' },
+          ];
+        }
+        return result;
+      }) as ApiClient['request'],
+    });
+    render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('tab', { name: '账户分组' }));
+
+    const names = await screen.findAllByText(name, { selector: '.requests-account-name' });
+    expect(names).toHaveLength(2);
+    expect(names[0]).toHaveAttribute('title', `${name}\nAuthIndex: auth-a`);
+    expect(names[1]).toHaveAttribute('title', `${name}\nAuthIndex: auth-b`);
+    expect(screen.getByText('legacy-auth', { selector: '.requests-account-name' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '账户' })).toBeInTheDocument();
+
+    const trigger = screen.getByRole('combobox', { name: '账户' });
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    const search = screen.getByRole('textbox', { name: '搜索选项' });
+    fireEvent.change(search, { target: { value: name } });
+    fireEvent.keyDown(search, { key: 'Enter' });
+    expect(trigger).toHaveTextContent(name);
+    fireEvent.click(screen.getByRole('button', { name: '查询' }));
+    await waitFor(() => {
+      const calls = vi.mocked(api.request).mock.calls.filter(([path]) => path.startsWith('/requests/view'));
+      const params = new URLSearchParams(calls[calls.length - 1][0].split('?')[1]);
+      expect(params.get('auth_index')).toBe('auth-a');
+    });
+  });
+
   // The interval menu is an actual Radix control rather than a hidden timer
   // configuration. Timer/pause behavior is independently exercised below.
   it('polling controls: dedicated interval selector', async () => {

@@ -501,6 +501,14 @@
   font-weight: 500;
 }
 
+.requests-account-name {
+  display: block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .requests-subtext {
   font-size: 11px;
   color: var(--text-secondary);
