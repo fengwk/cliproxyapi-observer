@@ -156,6 +156,9 @@ type FacetQuery struct {
 	Search string `json:"search,omitempty"`
 	Cursor string `json:"cursor,omitempty"`
 	Limit  int    `json:"limit,omitempty"`
+	// Labels is caller-injected display metadata. It never comes from JSON or
+	// the ledger and is applied only to auth_index values already observed.
+	Labels map[string]string `json:"-"`
 }
 
 type FacetItem struct {

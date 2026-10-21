@@ -322,13 +322,13 @@ func (m *Manager) dispatchManagementRoute(req managementRequest, route string) p
 		if !requireMethod(req.Method, http.MethodGet) {
 			return methodNotAllowedResponse()
 		}
-		return m.serveRequestView(req.Query)
+		return m.serveRequestView(req.Query, req.HostCallbackID)
 
 	case "/requests/facets":
 		if !requireMethod(req.Method, http.MethodGet) {
 			return methodNotAllowedResponse()
 		}
-		return m.serveRequestFacets(req.Query)
+		return m.serveRequestFacets(req.Query, req.HostCallbackID)
 
 	case "/summary":
 		if !requireMethod(req.Method, http.MethodGet) {

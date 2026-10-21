@@ -8,7 +8,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
-func (m *Manager) serveRequestView(values url.Values) pluginapi.ManagementResponse {
+func (m *Manager) serveRequestView(values url.Values, callbackID string) pluginapi.ManagementResponse {
 	// Date-only ranges belong to normalizeView, including the inclusive end.
 	// Do not mix them with the legacy RFC3339 half-open parameters.
 	copy := url.Values{}
@@ -29,9 +29,15 @@ func (m *Manager) serveRequestView(values url.Values) pluginapi.ManagementRespon
 		return invalidQueryResponse()
 	}
 	return m.withStore(func(store *engine.Store) pluginapi.ManagementResponse {
-		view, err := store.RequestView(engine.ViewQuery{Query: query, FromDate: values.Get("from_date"), ToDate: values.Get("to_date"), View: values.Get("view")})
+		viewName := values.Get("view")
+		view, err := store.RequestView(engine.ViewQuery{Query: query, FromDate: values.Get("from_date"), ToDate: values.Get("to_date"), View: viewName})
 		if err != nil {
 			return storeFailureResponse(err)
+		}
+		if viewName == "account" {
+			// The read lock is already held by withStore for the complete query
+			// and optional host metadata lookup.
+			projectAccountLabels(&view, m.accountLabelsLocked(callbackID))
 		}
 		return jsonResponse(http.StatusOK, view)
 	})
@@ -60,7 +66,7 @@ func parseViewFilters(values url.Values) (engine.Query, error) {
 	return engine.Query{KeyID: values.Get("key_id"), Model: values.Get("model"), Provider: values.Get("provider"), AuthIndex: values.Get("auth_index"), Status: status, Page: page, PageSize: size}, nil
 }
 
-func (m *Manager) serveRequestFacets(values url.Values) pluginapi.ManagementResponse {
+func (m *Manager) serveRequestFacets(values url.Values, callbackID string) pluginapi.ManagementResponse {
 	for key, list := range values {
 		if len(list) != 1 || (key != "field" && key != "search" && key != "cursor" && key != "limit") {
 			return invalidQueryResponse()
@@ -71,7 +77,12 @@ func (m *Manager) serveRequestFacets(values url.Values) pluginapi.ManagementResp
 		return invalidQueryResponse()
 	}
 	return m.withStore(func(store *engine.Store) pluginapi.ManagementResponse {
-		page, err := store.Facets(engine.FacetQuery{Field: values.Get("field"), Search: values.Get("search"), Cursor: values.Get("cursor"), Limit: limit})
+		field := values.Get("field")
+		var labels map[string]string
+		if field == "auth_index" {
+			labels = m.accountLabelsLocked(callbackID)
+		}
+		page, err := store.Facets(engine.FacetQuery{Field: field, Search: values.Get("search"), Cursor: values.Get("cursor"), Limit: limit, Labels: labels})
 		if err != nil {
 			return storeFailureResponse(err)
 		}

@@ -92,6 +92,9 @@ type Manager struct {
 	billingFaults      sync.Map // marker-write failure fallback; explicit recovery or durable handoff only
 	capsMu             sync.Mutex
 	catalogCaps        map[[32]byte]time.Time
+	// accountMetadata returns the raw host.auth.list envelope for one
+	// management callback. It is set only by the native host bridge.
+	accountMetadata func(callbackID string) []byte
 }
 
 // A host caller_scope is owned only after this plugin authenticated that exact
@@ -103,6 +106,15 @@ type callerScope struct {
 }
 
 func NewManager(assets AssetFunc) *Manager { return &Manager{assets: assets, now: time.Now} }
+
+// SetAccountMetadataLookup installs the native read-only metadata bridge. The
+// lookup is consulted under the lifecycle read lock only for account views and
+// auth_index facets; it must never be called on usage or authentication paths.
+func (m *Manager) SetAccountMetadataLookup(lookup func(callbackID string) []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.accountMetadata = lookup
+}
 
 type lifecycleRequest struct {
 	ConfigYAML    []byte `json:"config_yaml"`

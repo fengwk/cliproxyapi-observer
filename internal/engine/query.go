@@ -246,6 +246,16 @@ func (s *Store) Facets(q FacetQuery) (FacetPage, error) {
 	if e != nil {
 		return FacetPage{}, e
 	}
+	if q.Field == facetAuthIndex && len(q.Labels) > 0 {
+		// Replace labels only for AuthIndex values that actually appeared in
+		// retained records. Never inject a host account that Observer has no
+		// history for, and keep value/cursor/sort identity on the index.
+		for value := range values {
+			if label := q.Labels[value]; label != "" {
+				values[value] = label
+			}
+		}
+	}
 	search := strings.ToLower(strings.TrimSpace(q.Search))
 	type item struct{ value, label string }
 	all := make([]item, 0, len(values))
