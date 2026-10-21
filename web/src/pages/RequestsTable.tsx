@@ -234,7 +234,7 @@ export function RequestsTable({
                       </td>
 
                       {/* 8. Latency / TTFT */}
-                      <td>
+                      <td className="requests-duration-cell">
                         <div className="requests-cell-stacked requests-num-cell">
                           <span>{formatSecondsFromMs(r.latency_ms)}</span>
                           {r.stream && r.ttft_ms > 0 ? (
@@ -419,7 +419,7 @@ export function RequestsTable({
                       </td>
 
                       {/* 7. Avg Latency & TTFT */}
-                      <td>
+                      <td className="requests-duration-cell">
                         <div className="requests-cell-stacked requests-num-cell">
                           <span>{avgLat}</span>
                           <span className="requests-subtext">

@@ -516,6 +516,10 @@
   vertical-align: middle;
 }
 
+.requests-duration-cell {
+  white-space: nowrap;
+}
+
 .requests-key-name {
   font-weight: 500;
   max-width: 160px;

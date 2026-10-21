@@ -156,10 +156,7 @@ export function Select({
       value={value || emptyValue}
       open={open}
       onOpenChange={handleOpenChange}
-      onValueChange={(next) => {
-        onChange(next === emptyValue ? '' : next);
-        handleOpenChange(false);
-      }}
+      onValueChange={(next) => onChange(next === emptyValue ? '' : next)}
       disabled={disabled}
     >
       <SelectPrimitive.Trigger

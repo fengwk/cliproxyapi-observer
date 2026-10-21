@@ -123,6 +123,8 @@ describe('UI components', () => {
     expect(trigger).toHaveTextContent('Claude 3.5 Sonnet');
     expect(screen.queryByRole('textbox', { name: '搜索选项' })).not.toBeInTheDocument();
     expect(handleSearchChange).toHaveBeenLastCalledWith('');
+    // Radix already closes after selection; notify remote facets only once.
+    expect(handleSearchChange.mock.calls.filter(([query]) => query === '')).toHaveLength(1);
 
     // Reopen keeps the selected value; a no-match Enter neither clears nor closes it.
     fireEvent.keyDown(trigger, { key: 'ArrowDown' });
