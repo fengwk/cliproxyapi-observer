@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -393,38 +392,9 @@ func (m *Manager) authenticate(raw []byte) ([]byte, error) {
 	m.scopes.LoadOrStore(session.CallerScope(principal), callerScope{KeyID: k.ID, Operation: operation})
 	return okEnvelope(pluginapi.FrontendAuthResponse{Authenticated: true, Principal: principal})
 }
-
-type denialBody struct {
-	Error struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
-
-func deniedWith(code, message string, status int) pluginapi.RequestInterceptResponse {
-	var body denialBody
-	body.Error.Code = code
-	body.Error.Message = message
-	encoded, _ := json.Marshal(body)
-	return pluginapi.RequestInterceptResponse{Terminate: true, StatusCode: status, ResponseBody: encoded}
-}
-
 func denied(status int) pluginapi.RequestInterceptResponse {
-	return deniedWith("admission_denied", "request not admitted", status)
+	return pluginapi.RequestInterceptResponse{Terminate: true, StatusCode: status, ResponseBody: []byte(`{"error":{"code":"admission_denied","message":"request not admitted"}}`)}
 }
-
-// observerKeyRequired rejects native, missing or malformed identities on
-// model execution paths without importing or inspecting host credentials.
-func observerKeyRequired() pluginapi.RequestInterceptResponse {
-	return deniedWith("observer_key_required", "an Observer client key is required", http.StatusForbidden)
-}
-
-// unsupportedModelSurface rejects intercepted model execution that Observer
-// cannot account for, instead of letting native authentication execute it.
-func unsupportedModelSurface() pluginapi.RequestInterceptResponse {
-	return deniedWith("model_surface_unsupported", "model surface is not supported", http.StatusForbidden)
-}
-
 func (m *Manager) before(raw []byte) (out []byte, err error) {
 	// Fail closed only after ownership is proven. A panic while classifying
 	// unknown/native traffic must not reject that traffic globally.
@@ -442,55 +412,45 @@ func (m *Manager) before(raw []byte) (out []byte, err error) {
 	if json.Unmarshal(raw, &r) != nil {
 		return okEnvelope(pluginapi.RequestInterceptResponse{})
 	}
-	// Classify the path before any caller-scope early return. Observer owns
-	// every recognized model execution surface; only unrecognized/non-model
-	// paths remain native pass-through.
-	path, _ := r.Metadata[coreexecutor.RequestPathMetadataKey].(string)
-	surface := surfaceFor(path)
-	if surface == surfaceNone {
-		return okEnvelope(pluginapi.RequestInterceptResponse{})
-	}
-	owned = true
-	if surface == surfaceUnsupported {
-		return okEnvelope(unsupportedModelSurface())
-	}
 	scope, _ := r.Metadata[coreexecutor.CallerScopeMetadataKey].(string)
 	if scope == "" {
-		return okEnvelope(observerKeyRequired())
+		return okEnvelope(pluginapi.RequestInterceptResponse{})
 	}
 	v, ok := m.scopes.Load(scope)
 	if !ok {
-		return okEnvelope(observerKeyRequired())
+		return okEnvelope(pluginapi.RequestInterceptResponse{})
 	}
 	caller, ok := v.(callerScope)
 	if !ok || caller.KeyID == "" {
-		return okEnvelope(observerKeyRequired())
+		return okEnvelope(pluginapi.RequestInterceptResponse{})
 	}
 	// The host supplies an exact path for most routes, but Gin's FullPath for
 	// Gemini is "/v1beta/models/*action". That template cannot distinguish
 	// generateContent from countTokens, so the authenticated operation governs.
-	var operation requestOperation
-	if surface == surfaceGeminiWildcard {
+	path, _ := r.Metadata[coreexecutor.RequestPathMetadataKey].(string)
+	operation, template := beforeOperation(path)
+	if template {
 		switch caller.Operation {
 		case operationGeneration, operationCount:
 			operation = caller.Operation
 		default:
 			// A directory (or otherwise non-execution) scope never enters a
 			// model execution, even if a path was rewritten upstream.
-			return okEnvelope(observerKeyRequired())
+			return okEnvelope(denied(403))
 		}
-	} else {
-		operation = operationGeneration
-		if surface == surfaceCount {
-			operation = operationCount
-		}
+	} else if operation == operationGeneration || operation == operationCount {
 		// Exact routes must agree with the scope's authenticated operation:
 		// generation cannot masquerade as count, and count cannot bypass
 		// generation quota/concurrency.
 		if caller.Operation != operation {
-			return okEnvelope(observerKeyRequired())
+			return okEnvelope(denied(403))
 		}
+	} else {
+		// Unknown, absent, directory, or unsupported paths are not execution
+		// operations Observer owns. Native/unowned scopes were already returned.
+		return okEnvelope(pluginapi.RequestInterceptResponse{})
 	}
+	owned = true
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.store == nil {
