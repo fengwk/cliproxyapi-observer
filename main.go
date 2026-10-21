@@ -40,7 +40,7 @@ extern void cliproxyPluginShutdown(void);
 // The host API is copied by value at init. These helpers only receive that
 // value; no C global or borrowed pointer to the host-owned struct is retained.
 static int observer_host_api_ready(cliproxy_host_api api) {
-	return api.call != NULL && api.free_buffer != NULL && api.host_ctx != NULL;
+	return api.call != NULL && api.free_buffer != NULL;
 }
 
 static int observer_call_auth_list(cliproxy_host_api api, cliproxy_buffer* response) {
@@ -48,7 +48,7 @@ static int observer_call_auth_list(cliproxy_host_api api, cliproxy_buffer* respo
 		response->ptr = NULL;
 		response->len = 0;
 	}
-	if (api.call == NULL || api.host_ctx == NULL) {
+	if (api.call == NULL) {
 		return 1;
 	}
 	return api.call(api.host_ctx, "host.auth.list", NULL, 0, response);
