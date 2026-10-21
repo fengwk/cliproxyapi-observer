@@ -105,9 +105,3 @@ func beforeOperation(path string) (operation requestOperation, template bool) {
 	}
 	return operationFor(http.MethodPost, path), false
 }
-
-// countTokenPath is kept as the narrow operation predicate used by tests; it
-// intentionally shares the same exact-path rules as authentication.
-func countTokenPath(path string) bool {
-	return operationFor(http.MethodPost, path) == operationCount
-}

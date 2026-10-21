@@ -31,7 +31,7 @@ func TestNativeRealtimeTokenAndObserverBoundary(t *testing.T) {
 		Value string `json:"value"`
 	}
 	if status != http.StatusOK || json.Unmarshal(body, &issued) != nil || !strings.HasPrefix(issued.Value, "ek_") {
-		t.Fatalf("native Realtime token status=%d body=%s", status, truncate(body, 300))
+		t.Fatalf("native Realtime token issuance status=%d or invalid token response", status)
 	}
 	// The native issuance path stays outside Observer: no Key, execution or
 	// upstream call, and the ephemeral token is not exposed by Observer reads.
@@ -59,8 +59,7 @@ func TestNativeRealtimeTokenAndObserverBoundary(t *testing.T) {
 	status, body, err = h.rawRequest(http.MethodPost, "/v1/realtime/client_secrets",
 		request, map[string]string{"Authorization": "Bearer " + restricted.Secret})
 	if err != nil || status != http.StatusUnauthorized {
-		t.Fatalf("Observer Key Realtime token status=%d err=%v body=%s, want 401",
-			status, err, truncate(body, 300))
+		t.Fatalf("Observer Key Realtime token status=%d err=%v, want 401", status, err)
 	}
 	if h.mock.callCount() != before {
 		t.Fatal("Observer Key Realtime token request reached an upstream")

@@ -171,7 +171,7 @@ func TestCountScopeFromOriginalPath(t *testing.T) {
 		t.Fatal("count principal not stable")
 	}
 	for _, path := range []string{"/v1beta/models/:countTokens", "/v1beta/models/m:countTokens/", "/v1beta/models/a/b:countTokens", "/v1/messages/count_tokens/"} {
-		if countTokenPath(path) {
+		if operationFor(http.MethodPost, path) == operationCount {
 			t.Fatal("overbroad count path")
 		}
 	}
