@@ -123,15 +123,16 @@ func TestDetailedAggregatesAndRequestViews(t *testing.T) {
 	}
 }
 
-// Cache/input denominators must use the same complete sample set. An unknown
-// provider's raw buckets remain visible on the record, not blended into a
-// misleading aggregate hit rate; authoritative totals/cost still count it.
+// Cache/input denominators must use the same complete sample set. A total-only
+// unknown provider remains visible in raw usage and authoritative totals/cost,
+// but its unclassified buckets never blend into a misleading aggregate hit rate.
 func TestMixedAccountingCoverageKeepsOneTokenSampleSet(t *testing.T) {
 	s, now, _ := fixture(t)
 	k, _ := key(t, s, KeySpec{Enabled: true})
 	must(t, s.RecordUsage(event(k, "complete", now.Add(-time.Hour))))
 	unknown := event(k, "unknown", now.Add(-time.Hour))
 	unknown.Provider = "unknown-provider"
+	unknown.Detail = pluginapi.UsageDetail{TotalTokens: 10}
 	must(t, s.RecordUsage(unknown))
 	v, err := s.RequestView(ViewQuery{})
 	must(t, err)

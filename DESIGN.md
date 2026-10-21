@@ -49,8 +49,13 @@ session affinity remain untouched. SDK baseline v8.0.30, schema 6 minimum.
 - Ignore non-generation/count-tokens usage. Do not admit/reserve count-tokens
   requests, but still enforce enabled/expiry/model authorization.
 - Preserve raw SDK counters and canonical normalized token buckets. Use the
-  pinned CPA token helper for known providers; unknown semantics must not
-  invent overlapping buckets. Missing price costs zero, never blocks inference.
+  pinned CPA token helper for known providers. Unknown semantics may recover
+  only from nonnegative raw counters with a positive reported total,
+  at least one positive input/output counter, and a unique (or identical)
+  complete subset/independent/separate-reasoning result conserving that total;
+  otherwise remain unclassified. Never reinterpret legacy CachedTokens without
+  a read/write split, reclassify history, or invent overlap. Missing price costs
+  zero, never blocks inference.
 - Capture is opt-in, queued, bounded, gzip, expires on reads. Store only the
   client inbound, pre-auth header copy plus recursively redacted JSON; never
   upstream-sent headers, upstream credentials or failure bodies. Preserve every

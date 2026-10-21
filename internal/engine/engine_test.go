@@ -473,8 +473,9 @@ func TestPendingBoundAndCloseDebt(t *testing.T) {
 	}
 }
 
-// Unknown pricing is a valid zero-cost quote, not an inference gate. Unknown
-// provider token overlap must never invent billable canonical input buckets.
+// Unknown pricing is a valid zero-cost quote, not an inference gate. Explicit,
+// conservative raw counters can recover canonical buckets, but billing still
+// stays zero when no price exists.
 func TestUnknownPricingAndTokens(t *testing.T) {
 	s, now, p := fixture(t)
 	p.cost = 0
@@ -485,7 +486,8 @@ func TestUnknownPricingAndTokens(t *testing.T) {
 	must(t, s.RecordUsage(u))
 	d, e := s.Detail(u.RequestID)
 	must(t, e)
-	if d.Record.CostMicroUSD != 0 || d.Record.Tokens.Input != 0 {
+	if d.Record.CostMicroUSD != 0 || d.Record.AccountingQuality != "complete" ||
+		d.Record.Tokens.Input != 4 || d.Record.Tokens.CacheRead != 4 || d.Record.Tokens.Total != 10 {
 		t.Fatal(d)
 	}
 	must(t, s.Admit(Admission{RequestID: "allowed", KeyID: k.ID}))
