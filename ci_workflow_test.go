@@ -78,6 +78,10 @@ func TestCIBrowserRunsRealChromeAndUploadsEvidence(t *testing.T) {
 	if !ok || strings.TrimSpace(install.Run) != "npm ci --prefix web" {
 		t.Fatal("browser job must install the locked Playwright build tools")
 	}
+	fonts, ok := stepByName(job.Steps, "Install Chinese fonts")
+	if !ok || !strings.Contains(fonts.Run, "fonts-noto-cjk") || !strings.Contains(fonts.Run, "fc-match") {
+		t.Fatal("browser screenshots must have verified Chinese fonts, not tofu glyphs")
+	}
 
 	verify, ok := stepByName(job.Steps, "Verify installed Chrome")
 	if !ok || !strings.Contains(verify.Run, "test -x \"$CHROME_BIN\"") ||
@@ -171,6 +175,10 @@ func TestRealHostBrowserIsRequiredAndArchived(t *testing.T) {
 	install, ok := stepByName(job.Steps, "Install frontend tools")
 	if !ok || strings.TrimSpace(install.Run) != "npm ci --prefix web" {
 		t.Fatal("real-host browser must install the locked Playwright build tools")
+	}
+	fonts, ok := stepByName(job.Steps, "Install Chinese fonts")
+	if !ok || !strings.Contains(fonts.Run, "fonts-noto-cjk") || !strings.Contains(fonts.Run, "fc-match") {
+		t.Fatal("real-host screenshots must have verified Chinese fonts")
 	}
 	verify, ok := stepByName(job.Steps, "Verify installed Chrome")
 	if !ok || !strings.Contains(verify.Run, "test -x \"$CHROME_BIN\"") {

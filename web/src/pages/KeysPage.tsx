@@ -324,7 +324,7 @@ export function KeysPage({ api, onDirtyChange }: KeysPageProps) {
             <thead>
               <tr>
                 <th>名称 / 状态</th>
-                <th style={{ width: '230px' }}>密钥</th>
+                <th>密钥</th>
                 <th>额度使用 (已用 / 限额)</th>
                 <th>并发限制</th>
                 <th>模型权限</th>
@@ -357,6 +357,7 @@ export function KeysPage({ api, onDirtyChange }: KeysPageProps) {
                               color: 'inherit',
                               cursor: 'pointer',
                               textAlign: 'left',
+                              minWidth: 0,
                             }}
                           >
                             <strong style={{ fontSize: '0.95rem' }}>{k.label || '(未命名)'}</strong>

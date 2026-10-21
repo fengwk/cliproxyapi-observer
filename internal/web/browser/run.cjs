@@ -434,7 +434,30 @@ async function readonlyPages(env, name) {
   check(name + ': key table displays credentials rather than internal IDs',
     await frame.getByRole('columnheader', { name: '密钥', exact: true }).count() === 1 &&
     await frame.getByRole('columnheader', { name: '内部 ID', exact: true }).count() === 0);
+  // Clickable names must not lose the old flex-item ellipsis and paint over
+  // the secret column. Measure actual text/button/status bounds, not just CSS.
+  const names = await frame.locator('table[aria-label="Key 列表"] tbody tr').evaluateAll(rows => rows.map(row => {
+    const cell = row.cells[0];
+    const button = cell.querySelector('button[title="查看 Key 详情"]');
+    const label = button.querySelector('strong');
+    const status = button.nextElementSibling;
+    const bounds = cell.getBoundingClientRect();
+    const inside = element => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= bounds.left && rect.right <= bounds.right;
+    };
+    return {
+      inside: [button, label, status].every(inside),
+      clipped: label.scrollWidth > label.clientWidth,
+      ellipsis: getComputedStyle(label).textOverflow === 'ellipsis' &&
+        getComputedStyle(label).overflow === 'hidden',
+    };
+  }));
+  check(name + ': key names and status stay in their own column',
+    names.length > 0 && names.every(item => item.inside), JSON.stringify(names));
   if (server) {
+    check(name + ': long key names are visibly ellipsized',
+      names.some(item => item.clipped && item.ellipsis), JSON.stringify(names));
     const managed = frame.getByRole('row').filter({ hasText: 'sk-key-alpha' });
     check(name + ': current client secret is readable and copyable in the list',
       await managed.count() === 1 && await managed.getByRole('button', { name: '复制密钥', exact: true }).count() === 1);

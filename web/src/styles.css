@@ -881,13 +881,16 @@ input[type="number"] {
 
 .cpa-table[aria-label="Key 列表"] { min-width: 1120px; table-layout: fixed; }
 .cpa-table[aria-label="Key 列表"] th:nth-child(1) { width: 210px; }
-.cpa-table[aria-label="Key 列表"] th:nth-child(2) { width: 135px; }
+.cpa-table[aria-label="Key 列表"] th:nth-child(2) { width: 230px; }
 .cpa-table[aria-label="Key 列表"] th:nth-child(3) { width: 180px; }
 .cpa-table[aria-label="Key 列表"] th:nth-child(4) { width: 90px; }
 .cpa-table[aria-label="Key 列表"] th:nth-child(5) { width: 110px; }
 .cpa-table[aria-label="Key 列表"] th:nth-child(6) { width: 180px; }
 .cpa-table[aria-label="Key 列表"] th:last-child { width: 190px; }
 .cpa-table[aria-label="Key 列表"] strong {
+  /* The label now lives inside a button, so it is no longer a flex item.
+     Make it a block again so its width and ellipsis actually take effect. */
+  display: block;
   max-width: 145px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .cpa-table[aria-label="Key 列表"] td:last-child > div {
