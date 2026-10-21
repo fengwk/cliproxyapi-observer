@@ -418,19 +418,22 @@ export function calculateTPS(
 }
 
 /**
- * Formats average latency.
+ * Formats a millisecond duration as seconds with fixed two decimals.
+ * Missing values stay unknown; an explicit zero remains zero.
  */
-export function formatAvgLatency(latencyMs?: number, samples?: number): string {
-  if (!samples || samples <= 0 || latencyMs === undefined) return '—';
-  return `${Math.round(latencyMs / samples)} ms`;
+export function formatSecondsFromMs(ms?: number | null): string {
+  if (ms === undefined || ms === null || isNaN(ms)) return '—';
+  // Round half-up at centisecond precision to avoid binary float truncation
+  // such as 45ms rendering as 0.04 s.
+  return `${(Math.round(ms / 10) / 100).toFixed(2)} s`;
 }
 
 /**
- * Formats average TTFT.
+ * Formats an averaged millisecond duration as seconds with fixed two decimals.
  */
-export function formatAvgTTFT(ttftMs?: number, samples?: number): string {
-  if (!samples || samples <= 0 || ttftMs === undefined) return '—';
-  return `${Math.round(ttftMs / samples)} ms`;
+export function formatAvgSeconds(totalMs?: number, samples?: number): string {
+  if (!samples || samples <= 0 || totalMs === undefined) return '—';
+  return formatSecondsFromMs(totalMs / samples);
 }
 
 /**

@@ -7,6 +7,7 @@ import {
   formatCostExact,
   formatNumber,
   formatPriceSource,
+  formatSecondsFromMs,
   formatUTCDateTime,
   redactBody,
   redactHeaders,
@@ -213,8 +214,10 @@ export function RequestsDetailModal({
                   <div className="requests-detail-item">
                     <span className="requests-detail-item-label">耗时 / TTFT</span>
                     <span className="requests-detail-item-val">
-                      {record.latency_ms} ms
-                      {record.stream && record.ttft_ms > 0 ? ` (TTFT: ${record.ttft_ms} ms)` : ''}
+                      {formatSecondsFromMs(record.latency_ms)}
+                      {record.stream && record.ttft_ms > 0
+                        ? ` (TTFT: ${formatSecondsFromMs(record.ttft_ms)})`
+                        : ''}
                     </span>
                   </div>
                   <div className="requests-detail-item">

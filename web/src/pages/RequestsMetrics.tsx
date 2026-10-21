@@ -2,8 +2,7 @@ import type { Aggregate, RequestViewCoverage } from '../lib/types';
 import {
   calculateCacheHitRate,
   calculateFailureRate,
-  formatAvgLatency,
-  formatAvgTTFT,
+  formatAvgSeconds,
   formatCostExact,
   formatNumber,
 } from './RequestsHelpers';
@@ -52,8 +51,8 @@ export function RequestsMetrics({ summary, coverage }: RequestsMetricsProps) {
   const cacheSub = `读 ${cacheRead} / 写 ${cacheWrite} · 样本 ${details?.complete_requests ?? '—'}/${summary?.requests ?? '—'}`;
 
   // 5. Latency & TTFT
-  const avgLatency = formatAvgLatency(summary?.latency_ms, summary?.latency_samples);
-  const avgTTFT = formatAvgTTFT(summary?.ttft_ms, summary?.ttft_samples);
+  const avgLatency = formatAvgSeconds(summary?.latency_ms, summary?.latency_samples);
+  const avgTTFT = formatAvgSeconds(summary?.ttft_ms, summary?.ttft_samples);
   const latencySub = `TTFT: ${avgTTFT} · 样本 ${summary?.ttft_samples ?? '—'} / 耗时样本 ${summary?.latency_samples ?? '—'}`;
 
   // 6. Cost

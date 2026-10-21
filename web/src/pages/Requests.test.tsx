@@ -9,6 +9,8 @@ import {
   calculateCacheHitRate,
   calculateFailureRate,
   calculateTPS,
+  formatAvgSeconds,
+  formatSecondsFromMs,
   isHistoricalDateQueryError,
 } from './RequestsHelpers';
 import type { ApiClient } from '../lib/api';
@@ -222,6 +224,9 @@ function createMockApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
           headers: {
             'content-type': ['application/json'],
             authorization: ['Bearer secret-token-12345'],
+            'x-request-id': ['req-header-123'],
+            traceparent: ['00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'],
+            'x-multi-value': ['alpha', 'beta'],
           },
           body: { prompt: 'Hello world', secret_key: 'top-secret' },
           capture_status: 'available',
@@ -396,7 +401,8 @@ describe('RequestsPage and RequestsHelpers', () => {
       expect(screen.getByTestId('metric-failures')).toHaveTextContent('2');
       expect(screen.getByTestId('metric-tokens')).toHaveTextContent('45,000');
       expect(screen.getByTestId('metric-cache')).toHaveTextContent('23.8%'); // 10000 / (30000+10000+2000)
-      expect(screen.getByTestId('metric-latency')).toHaveTextContent('200 ms'); // 2400 / 12
+      expect(screen.getByTestId('metric-latency')).toHaveTextContent('0.20 s'); // 2400 / 12
+      expect(screen.getByTestId('metric-latency')).toHaveTextContent('TTFT: 0.06 s'); // 600 / 10
       expect(screen.getByTestId('metric-cost')).toHaveTextContent('$1.5');
     });
 
@@ -685,10 +691,185 @@ describe('RequestsPage and RequestsHelpers', () => {
 
   /**
    * Why covered:
-   * Proves that Key labels display friendly names, deleted keys show [已删除] tag,
-   * 64-hex IDs are truncated with copy button, and copy works without alert.
+   * Proves that latency/TTFT are displayed in seconds with fixed two decimals
+   * for rows, grouped averages and the detail modal, without changing TPS math.
    */
-  it('Key labels & deleted keys: friendly name, deleted tag, 64-hex truncation, and inline copy notice', async () => {
+  it('duration units: list, group averages and detail render seconds while TPS stays unchanged', async () => {
+    expect(formatSecondsFromMs(15697)).toBe('15.70 s');
+    expect(formatSecondsFromMs(1474)).toBe('1.47 s');
+    expect(formatSecondsFromMs(0)).toBe('0.00 s');
+    expect(formatSecondsFromMs(undefined)).toBe('—');
+    expect(formatAvgSeconds(1400, 7)).toBe('0.20 s');
+    expect(formatAvgSeconds(undefined, 7)).toBe('—');
+    expect(formatAvgSeconds(1400, 0)).toBe('—');
+
+    const api = createMockApiClient();
+    render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
+
+    // req-001: 120ms -> 0.12 s, TTFT 45ms -> 0.05 s, TPS formula unchanged.
+    const firstRow = await screen.findByTestId('record-row-req-001');
+    expect(firstRow).toHaveTextContent('0.12 s');
+    expect(firstRow).toHaveTextContent('TTFT: 0.05 s');
+    expect(firstRow).not.toHaveTextContent('120 ms');
+    expect(calculateTPS(50, 120, 45, true)).toBe('666.7');
+
+    // req-002 is not streaming: latency only, no TTFT line.
+    const secondRow = screen.getByTestId('record-row-req-002');
+    expect(secondRow).toHaveTextContent('0.35 s');
+    expect(secondRow).not.toHaveTextContent('TTFT');
+
+    // Group average: 1400/7 = 200ms -> 0.20 s; TTFT 350/5 = 70ms -> 0.07 s.
+    fireEvent.click(screen.getByRole('tab', { name: '模型分组' }));
+    await waitFor(() => {
+      // The summary card and group row both show 0.20 s after the metrics switch.
+      expect(screen.getAllByText('0.20 s')).toHaveLength(2);
+      expect(screen.getByText('TTFT: 0.07 s')).toBeInTheDocument();
+    });
+
+    // Detail modal uses the same seconds representation.
+    fireEvent.click(screen.getByRole('tab', { name: '请求明细' }));
+    fireEvent.click(await screen.findByRole('button', { name: '查看请求详情 req-001' }));
+    await screen.findByText(/请求详情: req-001/);
+    await waitFor(() => {
+      expect(screen.getByText('0.12 s (TTFT: 0.05 s)')).toBeInTheDocument();
+    });
+  });
+
+  /**
+   * Why covered:
+   * Proves the detail header tab displays arbitrary non-sensitive headers
+   * (including X-Request-ID and traceparent) and multi-value headers, copies
+   * them, and still redacts sensitive values.
+   */
+  it('header display: arbitrary and multi-value headers are visible/copyable while secrets stay redacted', async () => {
+    const api = createMockApiClient();
+    render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '查看请求详情 req-001' }));
+    await screen.findByText(/请求详情: req-001/);
+    fireEvent.click(screen.getByRole('tab', { name: '请求头' }));
+
+    expect(screen.getByText('x-request-id')).toBeInTheDocument();
+    expect(screen.getByText('req-header-123')).toBeInTheDocument();
+    expect(screen.getByText('traceparent')).toBeInTheDocument();
+    expect(screen.getByText('00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01')).toBeInTheDocument();
+    expect(screen.getByText('x-multi-value')).toBeInTheDocument();
+    expect(screen.getByText('alpha, beta')).toBeInTheDocument();
+    expect(screen.queryByText('Bearer secret-token-12345')).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '复制请求头 JSON' }));
+    });
+    expect(mockClipboard.writeText).toHaveBeenCalledTimes(1);
+    const copied = JSON.parse(mockClipboard.writeText.mock.calls[0][0] as string);
+    expect(copied['x-request-id']).toBe('req-header-123');
+    expect(copied.traceparent).toBe('00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01');
+    expect(copied['x-multi-value']).toBe('alpha, beta');
+    expect(copied.authorization).toBe('[redacted]');
+    expect(JSON.stringify(copied)).not.toContain('secret-token-12345');
+  });
+
+  /**
+   * Why covered:
+   * Proves model and Key pickers still filter their current options locally when
+   * onSearchChange is used for remote facets, Enter picks the visible match rather
+   * than the all-option, and no-match Enter leaves the selected value untouched.
+   */
+  it('model and key filters narrow locally with remote search callback and select matches', async () => {
+    const api = createMockApiClient();
+    render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
+
+    const modelTrigger = await screen.findByRole('combobox', { name: '模型' });
+    fireEvent.keyDown(modelTrigger, { key: 'ArrowDown' });
+    let searchInput = await screen.findByRole('textbox', { name: '搜索选项' });
+    fireEvent.change(searchInput, { target: { value: 'CLAUDE' } });
+
+    expect(screen.getByRole('option', { name: 'claude-3-5-sonnet' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: '全部模型' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'gpt-4o' })).not.toBeInTheDocument();
+
+    fireEvent.keyDown(searchInput, { key: 'Enter' });
+    await waitFor(() => {
+      expect(modelTrigger).toHaveTextContent('claude-3-5-sonnet');
+    });
+
+    const keyTrigger = screen.getByRole('combobox', { name: '客户端 Key' });
+    fireEvent.keyDown(keyTrigger, { key: 'ArrowDown' });
+    searchInput = await screen.findByRole('textbox', { name: '搜索选项' });
+    fireEvent.change(searchInput, { target: { value: 'prod' } });
+
+    expect(screen.getByRole('option', { name: 'Production Key' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: '全部 Key' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Archived Key (已删除)' })).not.toBeInTheDocument();
+
+    fireEvent.keyDown(searchInput, { key: 'Enter' });
+    await waitFor(() => {
+      expect(keyTrigger).toHaveTextContent('Production Key');
+    });
+
+    // A no-match Enter leaves the existing selection and open search intact.
+    fireEvent.keyDown(keyTrigger, { key: 'ArrowDown' });
+    searchInput = await screen.findByRole('textbox', { name: '搜索选项' });
+    fireEvent.change(searchInput, { target: { value: 'no-such-key' } });
+    expect(screen.getByText('无匹配项')).toBeInTheDocument();
+    fireEvent.keyDown(searchInput, { key: 'Enter' });
+    expect(keyTrigger).toHaveTextContent('Production Key');
+    expect(screen.getByRole('textbox', { name: '搜索选项' })).toBeInTheDocument();
+
+    // Escape uses the shared close cleanup so the next open starts with an empty query.
+    fireEvent.keyDown(searchInput, { key: 'Escape' });
+    fireEvent.keyDown(keyTrigger, { key: 'ArrowDown' });
+    expect(await screen.findByRole('textbox', { name: '搜索选项' })).toHaveValue('');
+    expect(screen.getByRole('option', { name: '全部 Key' })).toBeInTheDocument();
+  });
+
+  /**
+   * Why covered:
+   * Proves a late remote/history facet result joins the still-active local search
+   * and can be selected without losing the typed query or the chosen value.
+   */
+  it('late model facet results join the active search without breaking selection', async () => {
+    let resolveLateFacet: (value: FacetPage) => void = () => {};
+    const base = createMockApiClient();
+    const api = createMockApiClient({
+      request: vi.fn((path: string, options?: { signal?: AbortSignal }) => {
+        if (path.startsWith('/requests/facets')) {
+          const params = new URLSearchParams(path.slice(path.indexOf('?') + 1));
+          if (params.get('field') === 'model' && params.get('search') === 'late') {
+            return new Promise<FacetPage>((resolve) => {
+              resolveLateFacet = resolve;
+            });
+          }
+        }
+        return base.request(path, options);
+      }) as ApiClient['request'],
+    });
+    render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
+
+    const trigger = await screen.findByRole('combobox', { name: '模型' });
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    const searchInput = await screen.findByRole('textbox', { name: '搜索选项' });
+    fireEvent.change(searchInput, { target: { value: 'late' } });
+    expect(screen.getByText('无匹配项')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveLateFacet({
+        items: [{ value: 'late-model-v1', label: 'late-model-v1 (历史)' }],
+      });
+    });
+
+    expect(screen.getByRole('option', { name: 'late-model-v1 (历史)' })).toBeInTheDocument();
+    expect(searchInput).toHaveValue('late');
+    fireEvent.keyDown(searchInput, { key: 'Enter' });
+    expect(trigger).toHaveTextContent('late-model-v1 (历史)');
+  });
+
+  /**
+   * Why covered:
+   * Proves that Key labels display friendly names, deleted keys show [已删除] tag,
+   * 64-hex IDs are truncated with a full-ID tooltip, and no copy-ID action is shown.
+   */
+  it('Key labels & deleted keys: friendly name, deleted tag, 64-hex truncation, no copy action', async () => {
     const api = createMockApiClient();
     render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
 
@@ -705,19 +886,8 @@ describe('RequestsPage and RequestsHelpers', () => {
       '4f68a2d1e09c8b7a6543210fedcba9874f68a2d1e09c8b7a6543210fedcba987'
     );
 
-    // Click copy button
-    const copyBtns = screen.getAllByRole('button', { name: '复制 ID' });
-    await act(async () => {
-      fireEvent.click(copyBtns[1]);
-    });
-
-    // Clipboard writeText called with full 64-hex ID
-    expect(mockClipboard.writeText).toHaveBeenCalledWith(
-      '4f68a2d1e09c8b7a6543210fedcba9874f68a2d1e09c8b7a6543210fedcba987'
-    );
-
-    // Clipboard acknowledgement is visible without native alert
-    expect(screen.getByText(/已复制完整 Key ID/)).toBeInTheDocument();
+    // The request list must not expose an internal Key ID copy action.
+    expect(screen.queryByRole('button', { name: '复制 ID' })).not.toBeInTheDocument();
   });
 
   /**

@@ -139,7 +139,7 @@ export function Select({
   while (options.some(option => option.value === emptyValue)) emptyValue += '_';
 
   const visibleOptions = React.useMemo(() => {
-    if (!searchable || onSearchChange) {
+    if (!searchable) {
       return options;
     }
     const q = searchQuery.trim().toLowerCase();
@@ -149,14 +149,17 @@ export function Select({
         opt.label.toLowerCase().includes(q) ||
         opt.value.toLowerCase().includes(q)
     );
-  }, [searchable, onSearchChange, searchQuery, options]);
+  }, [searchable, searchQuery, options]);
 
   return (
     <SelectPrimitive.Root
       value={value || emptyValue}
       open={open}
       onOpenChange={handleOpenChange}
-      onValueChange={(next) => onChange(next === emptyValue ? '' : next)}
+      onValueChange={(next) => {
+        onChange(next === emptyValue ? '' : next);
+        handleOpenChange(false);
+      }}
       disabled={disabled}
     >
       <SelectPrimitive.Trigger
@@ -203,7 +206,7 @@ export function Select({
                 onChange={handleSearchChange}
                 onKeyDown={(e) => {
                   if (e.key === 'Escape') {
-                    setOpen(false);
+                    handleOpenChange(false);
                     return;
                   }
                   if (e.key === 'ArrowDown') {
