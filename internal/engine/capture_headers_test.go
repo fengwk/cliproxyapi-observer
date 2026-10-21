@@ -148,6 +148,32 @@ func TestCaptureHeaderBudgetCountsNamesAndDiscardsWholeGroup(t *testing.T) {
 	}
 }
 
+// Empty values still cost a minimum entry overhead. Otherwise a single header
+// with more than 16KiB zero-length values would bypass the budget and keep
+// growing the copied slice.
+func TestCaptureHeaderBudgetBoundsEmptyValues(t *testing.T) {
+	s, now, _ := fixture(t)
+	k, _ := key(t, s, KeySpec{Enabled: true})
+	configureCapture(t, s, CaptureModeHeadersAndBody, nil)
+	headers := http.Header{
+		"X-Empty": make([]string, captureHeaderLimit+1),
+		"Accept":  {"application/json"},
+	}
+	if !s.Capture(CaptureInput{RequestID: "empty-values", TraceID: "empty-values", KeyID: k.ID, Headers: headers, Body: []byte(`{"ok":1}`), At: *now}) {
+		t.Fatal("capture rejected")
+	}
+	drainCapture(s)
+	must(t, s.RecordUsage(usageFor(k, "empty-values-exec", "empty-values", *now)))
+	d, e := s.Detail("empty-values-exec")
+	must(t, e)
+	if d.HeadersStatus != captureStatusTooLarge || d.CaptureReason != captureReasonHeadersLarge || len(d.Headers) != 0 {
+		t.Fatalf("empty-value header bypassed budget: %+v", d)
+	}
+	if d.BodyStatus != captureStatusAvailable || string(d.Body) != `{"ok":1}` {
+		t.Fatalf("body should remain independent: %+v", d)
+	}
+}
+
 // Excluded credential headers are omitted without consuming the debug-header
 // budget; otherwise a single large Authorization value could hide all headers.
 func TestCaptureSensitiveHeadersDoNotConsumeBudget(t *testing.T) {

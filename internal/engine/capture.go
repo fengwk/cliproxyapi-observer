@@ -217,6 +217,11 @@ func secretHeader(k string) bool {
 		strings.Contains(compact, "bearer")
 }
 
+// captureHeaderEntryOverhead is the minimum serialized cost of one value
+// (": " plus CRLF). Charging it prevents unlimited zero-length values from
+// growing the header slice while sharing the same 16KiB budget.
+const captureHeaderEntryOverhead = 4
+
 // copyCaptureHeaders copies all non-credential names and values without
 // touching the caller's map. Names and retained (possibly URL-redacted) values
 // share the header budget; overflow drops the whole group rather than a partial
@@ -229,24 +234,30 @@ func copyCaptureHeaders(src http.Header) (http.Header, bool, bool) {
 		if secretHeader(k) {
 			continue
 		}
-		name := http.CanonicalHeaderKey(k)
-		if len(name) > captureHeaderLimit-size {
+		// Reject an oversized raw name before CanonicalHeaderKey can allocate a
+		// same-sized copy. Canonicalization never changes the name length.
+		if len(k) > captureHeaderLimit-size {
 			return http.Header{}, false, true
 		}
+		name := http.CanonicalHeaderKey(k)
 		size += len(name)
 		for _, value := range values {
-			// Bound the raw value before redactURL allocates for a huge input.
-			if len(value) > captureHeaderLimit-size {
+			remaining := captureHeaderLimit - size
+			// Bound the raw value before redactURL allocates for a huge input,
+			// and reserve the entry overhead even when value is empty.
+			if remaining < captureHeaderEntryOverhead || len(value) > remaining-captureHeaderEntryOverhead {
 				return http.Header{}, false, true
 			}
 			value, changed := redactURL(value)
 			if changed {
 				redacted = true
 			}
-			if len(value) > captureHeaderLimit-size {
+			remaining = captureHeaderLimit - size
+			// Redaction can expand a value, so re-check the retained length.
+			if remaining < captureHeaderEntryOverhead || len(value) > remaining-captureHeaderEntryOverhead {
 				return http.Header{}, false, true
 			}
-			size += len(value)
+			size += captureHeaderEntryOverhead + len(value)
 			headers.Add(name, value)
 		}
 	}
