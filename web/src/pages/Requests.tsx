@@ -99,7 +99,6 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [queryError, setQueryError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const [copiedKeyNotice, setCopiedKeyNotice] = useState<string | null>(null);
 
   // Detail Modal state
   const [activeDetailId, setActiveDetailId] = useState<string | null>(null);
@@ -462,19 +461,6 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
     fetchRequestView(undefined, correctedDraft, view, 1, true, 'custom');
   }, [draftFilters, view, fetchRequestView]);
 
-  // Copy Key ID with inline notification
-  const handleCopyKey = useCallback(async (fullId: string) => {
-    try {
-      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
-      await navigator.clipboard.writeText(fullId);
-      setCopiedKeyNotice(`已复制完整 Key ID: ${fullId.slice(0, 16)}…`);
-      setTimeout(() => setCopiedKeyNotice(null), 3000);
-    } catch {
-      setCopiedKeyNotice('复制失败，请从 Key ID 提示中复制完整标识。');
-      setTimeout(() => setCopiedKeyNotice(null), 3000);
-    }
-  }, []);
-
   // Deduplicate Models: availableModels + facetModels
   const modelOptions = useMemo<SelectOption[]>(() => {
     const opts: SelectOption[] = [{ value: '', label: '全部模型' }];
@@ -651,13 +637,6 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
         </div>
       </header>
 
-      {/* Copy notification */}
-      {copiedKeyNotice && (
-        <div className="requests-action-notice">
-          <Notice tone="info">{copiedKeyNotice}</Notice>
-        </div>
-      )}
-
       {/* Query Error Notice */}
       {queryError && (
         <div className="requests-error-notice">
@@ -727,7 +706,6 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
         onPageChange={handlePageChange}
         keysMap={keysMap}
         onOpenDetail={handleOpenDetail}
-        onCopyKey={handleCopyKey}
         loading={loading && !viewData}
       />
 

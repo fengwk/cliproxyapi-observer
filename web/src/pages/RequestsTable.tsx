@@ -5,11 +5,11 @@ import {
   calculateCacheHitRate,
   calculateFailureRate,
   calculateTPS,
-  formatAvgLatency,
-  formatAvgTTFT,
+  formatAvgSeconds,
   formatCostExact,
   formatNumber,
   formatPriceSource,
+  formatSecondsFromMs,
   formatUTCDateTime,
   resolveKeyDisplay,
 } from './RequestsHelpers';
@@ -25,7 +25,6 @@ export interface RequestsTableProps {
   onPageChange: (newPage: number) => void;
   keysMap: Map<string, Key>;
   onOpenDetail: (id: string) => void;
-  onCopyKey: (keyId: string) => void;
   loading?: boolean;
 }
 
@@ -39,7 +38,6 @@ export function RequestsTable({
   onPageChange,
   keysMap,
   onOpenDetail,
-  onCopyKey,
   loading = false,
 }: RequestsTableProps) {
   const isRecordsView = view === 'requests';
@@ -159,7 +157,7 @@ export function RequestsTable({
                       </td>
 
                       {/* 2. Client Key */}
-                      <td>
+                      <td className="requests-key-cell">
                         <div className="requests-cell-stacked">
                           <div className="requests-key-row">
                             <span
@@ -174,16 +172,6 @@ export function RequestsTable({
                               </Badge>
                             )}
                           </div>
-                          {keyInfo.fullId && (
-                            <button
-                              type="button"
-                              className="requests-copy-key-btn"
-                              onClick={() => onCopyKey(keyInfo.fullId)}
-                              title="复制完整 Key ID"
-                            >
-                              复制 ID
-                            </button>
-                          )}
                         </div>
                       </td>
 
@@ -248,10 +236,10 @@ export function RequestsTable({
                       {/* 8. Latency / TTFT */}
                       <td>
                         <div className="requests-cell-stacked requests-num-cell">
-                          <span>{r.latency_ms !== undefined ? `${r.latency_ms} ms` : '—'}</span>
+                          <span>{formatSecondsFromMs(r.latency_ms)}</span>
                           {r.stream && r.ttft_ms > 0 ? (
                             <span className="requests-subtext">
-                              TTFT: {r.ttft_ms} ms
+                              TTFT: {formatSecondsFromMs(r.ttft_ms)}
                             </span>
                           ) : null}
                         </div>
@@ -331,8 +319,8 @@ export function RequestsTable({
                     detail?.input_tokens,
                     detail?.cache_write_tokens
                   );
-                  const avgLat = formatAvgLatency(g.latency_ms, g.latency_samples);
-                  const avgTTFT = formatAvgTTFT(g.ttft_ms, g.ttft_samples);
+                  const avgLat = formatAvgSeconds(g.latency_ms, g.latency_samples);
+                  const avgTTFT = formatAvgSeconds(g.ttft_ms, g.ttft_samples);
 
                   // Group identity rendering
                   let groupLabel: React.ReactNode = g.key || '未归属';
@@ -361,16 +349,6 @@ export function RequestsTable({
                             </Badge>
                           )}
                         </div>
-                        {kInfo.fullId && (
-                          <button
-                            type="button"
-                            className="requests-copy-key-btn"
-                            onClick={() => onCopyKey(kInfo.fullId)}
-                            title="复制完整 Key ID"
-                          >
-                            复制 ID
-                          </button>
-                        )}
                       </div>
                     );
                   } else if (view === 'account') {
@@ -390,7 +368,9 @@ export function RequestsTable({
                   return (
                     <tr key={g.key}>
                       {/* 1. Group identity */}
-                      <td>{groupLabel}</td>
+                      <td className={view === 'key' ? 'requests-key-cell' : undefined}>
+                        {groupLabel}
+                      </td>
 
                       {/* 2. Requests */}
                       <td className="requests-num-cell">
