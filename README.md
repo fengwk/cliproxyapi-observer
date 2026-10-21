@@ -1,4 +1,4 @@
-# Observer v0.9.1
+# Observer v0.9.2
 
 认证采用最小侵入的非独占共存：CPA 凭据保留原生行为，Observer 仅管理自己支持的
 调用，不是全路由安全网关。范围见 [认证与模型权限](docs/model-policy.md)。
@@ -17,7 +17,8 @@ CLIProxyAPI（CPA）独立原生插件，稳定 ID `cliproxyapi-observer`。提�
 仍须使用新数据库与新 Key；非空且无 schema2 标记的旧库会被拒绝，不会就地改写。
 升级前请备份，安排停流维护；发布不会自动修改生产配置或删除旧数据库。
 当前能力、API、SDK 限制和安全升级/回退步骤见 [重构说明](docs/reconstruction.md)。
-本版样式修正见 [v0.9.1 发布说明](docs/release-notes-v0.9.1.md)；
+本版请求调试、显示与自定义 provider 用量修复见 [v0.9.2 发布说明](docs/release-notes-v0.9.2.md)；
+Key 名称样式修正见 [v0.9.1 发布说明](docs/release-notes-v0.9.1.md)；
 明文 Key 升级与认证边界见 [v0.9.0 发布说明](docs/release-notes-v0.9.0.md)。
 
 ## 安装与首次启动
@@ -248,7 +249,7 @@ python3 scripts/test_publish_release.py
 浏览器入口见 [现有说明](internal/web/browser/README.md)，使用本地假数据和实际 Chrome，
 CI 上传报告及截图。`make build` 验证本机 c-shared；发布矩阵仍构建三个平台。
 版本通过 `internal/plugin.Version` ldflags 注入，正式版本来自 tag，开发构建为
-`0.9.1-dev+<commit>`，不取 SDK 版本。
+`0.9.2-dev+<commit>`，不取 SDK 版本。
 
 现有依赖维护策略保留：仅白名单 Go/官方 Actions 纯版本升级可经完整 CI 后自动合并，
 普通功能合并不会触发自动发版；不可变发布器校验源码、三个平台归档与校验和，
