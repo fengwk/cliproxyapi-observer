@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SummaryBucket } from '../lib/types';
 import { formatUTCShort } from './RequestsHelpers';
 
@@ -10,24 +10,50 @@ export interface RequestsTrendProps {
   loading?: boolean;
 }
 
-interface TimeLabel {
+interface TimeTick {
+  index: number;
   text: string;
-  x: number;
+  left: number;
+  align: 'start' | 'center' | 'end';
 }
+
+const MIN_TICK_WIDTH = 130;
 
 export function RequestsTrend({ series }: RequestsTrendProps) {
   const buckets = series?.buckets || [];
   const granularity = series?.granularity || 'day';
+  const chartRef = useRef<HTMLDivElement>(null);
+  const [chartWidth, setChartWidth] = useState(0);
 
-  const { reqPoints, failPoints, maxVal, hasData, timeLabels } = useMemo<{
+  useEffect(() => {
+    const el = chartRef.current;
+    if (!el) return;
+    const applyWidth = (next: number) => {
+      setChartWidth((prev) => (prev === next ? prev : next));
+    };
+    const fallbackWidth = () => el.getBoundingClientRect().width || el.clientWidth || 0;
+    const updateWidth = () => applyWidth(fallbackWidth());
+    updateWidth();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateWidth);
+      return () => window.removeEventListener('resize', updateWidth);
+    }
+    const observer = new ResizeObserver((entries) => {
+      const measured = entries[0]?.contentRect.width;
+      applyWidth(measured && measured > 0 ? measured : fallbackWidth());
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const { reqPoints, failPoints, maxVal, hasData } = useMemo<{
     reqPoints: string;
     failPoints: string;
     maxVal: number;
     hasData: boolean;
-    timeLabels: TimeLabel[];
   }>(() => {
     if (!buckets.length) {
-      return { reqPoints: '', failPoints: '', maxVal: 0, hasData: false, timeLabels: [] };
+      return { reqPoints: '', failPoints: '', maxVal: 0, hasData: false };
     }
 
     let max = 0;
@@ -36,38 +62,11 @@ export function RequestsTrend({ series }: RequestsTrendProps) {
       if ((b.failures || 0) > max) max = b.failures || 0;
     }
 
-    const len = buckets.length;
-    const labels: TimeLabel[] = [];
-    if (len > 0) {
-      labels.push({
-        text: formatUTCShort(buckets[0].time, false),
-        x: 20,
-      });
-      if (len > 2) {
-        const midIdx = Math.floor(len / 2);
-        labels.push({
-          text: formatUTCShort(buckets[midIdx].time, false),
-          x: 500,
-        });
-      }
-      if (len > 1) {
-        labels.push({
-          text: formatUTCShort(buckets[len - 1].time, false),
-          x: 980,
-        });
-      }
-    }
-
     if (max === 0) {
-      return {
-        reqPoints: '',
-        failPoints: '',
-        maxVal: 0,
-        hasData: false,
-        timeLabels: labels,
-      };
+      return { reqPoints: '', failPoints: '', maxVal: 0, hasData: false };
     }
 
+    const len = buckets.length;
     const reqPts: string[] = [];
     const failPts: string[] = [];
 
@@ -84,9 +83,36 @@ export function RequestsTrend({ series }: RequestsTrendProps) {
       failPoints: failPts.join(' '),
       maxVal: max,
       hasData: true,
-      timeLabels: labels,
     };
   }, [buckets]);
+
+  const timeTicks = useMemo<TimeTick[]>(() => {
+    const len = buckets.length;
+    if (!hasData || len === 0) return [];
+
+    if (len === 1) {
+      return [{
+        index: 0,
+        text: formatUTCShort(buckets[0].time, false),
+        left: 50,
+        align: 'center',
+      }];
+    }
+
+    const maxTicks = Math.max(2, Math.min(8, Math.floor(chartWidth / MIN_TICK_WIDTH)));
+    const tickCount = Math.min(len, maxTicks);
+    const indices = new Set<number>();
+    for (let i = 0; i < tickCount; i++) {
+      indices.add(Math.round((i * (len - 1)) / (tickCount - 1)));
+    }
+
+    return Array.from(indices).map((index) => ({
+      index,
+      text: formatUTCShort(buckets[index].time, false),
+      left: (index / (len - 1)) * 100,
+      align: index === 0 ? 'start' : index === len - 1 ? 'end' : 'center',
+    }));
+  }, [buckets, chartWidth, hasData]);
 
   return (
     <div className="requests-trend-container" data-testid="requests-trend">
@@ -112,7 +138,7 @@ export function RequestsTrend({ series }: RequestsTrendProps) {
         </div>
       </div>
 
-      <div className="requests-trend-svg-wrap">
+      <div className="requests-trend-svg-wrap" ref={chartRef}>
         {!hasData ? (
           <div className="requests-trend-empty">所选区间暂无趋势数据</div>
         ) : (
@@ -153,24 +179,37 @@ export function RequestsTrend({ series }: RequestsTrendProps) {
                 strokeLinecap="round"
               />
             )}
-
-            {/* Time labels along the bottom */}
-            {timeLabels.map((lbl, idx) => (
-              <text
-                key={idx}
-                x={lbl.x}
-                y="132"
-                textAnchor={lbl.x < 100 ? 'start' : lbl.x > 800 ? 'end' : 'middle'}
-                fill="var(--text-secondary)"
-                fontSize="11"
-                fontFamily="var(--font-mono, monospace)"
-              >
-                {lbl.text}
-              </text>
-            ))}
           </svg>
         )}
       </div>
+
+      {hasData && (
+        <div
+          className="requests-trend-axis"
+          data-testid="requests-trend-axis"
+          role="group"
+          aria-label="趋势时间轴"
+        >
+          {timeTicks.map((tick) => (
+            <span
+              key={`${tick.index}-${tick.text}`}
+              className="requests-trend-axis-tick"
+              data-testid="requests-trend-axis-tick"
+              data-index={tick.index}
+              style={{
+                left: `${tick.left}%`,
+                transform: tick.align === 'start'
+                  ? undefined
+                  : tick.align === 'end'
+                  ? 'translateX(-100%)'
+                  : 'translateX(-50%)',
+              }}
+            >
+              {tick.text}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

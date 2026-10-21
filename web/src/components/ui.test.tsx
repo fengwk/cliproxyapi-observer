@@ -79,6 +79,134 @@ describe('UI components', () => {
   });
 
   /**
+   * 意图：有 onSearchChange 时仍对当前 options 本地过滤；搜索非空时隐藏“全部”，
+   * Enter 选择首个可见匹配项；无匹配不清空/关闭；选择/ Escape 统一清理搜索状态。
+   */
+  it('filters locally with onSearchChange, selects matches, and keeps selection on no match', () => {
+    const handleSearchChange = vi.fn();
+
+    function Harness({ options }: { options: Array<{ value: string; label: string }> }) {
+      const [value, setValue] = useState('gpt-4o');
+      return (
+        <Select
+          value={value}
+          onChange={setValue}
+          aria-label="模型筛选"
+          searchable
+          onSearchChange={handleSearchChange}
+          options={options}
+        />
+      );
+    }
+
+    render(
+      <Harness
+        options={[
+          { value: '', label: '全部模型' },
+          { value: 'gpt-4o', label: 'GPT-4o' },
+          { value: 'claude-3-5-sonnet', label: 'Claude 3.5 Sonnet' },
+        ]}
+      />
+    );
+
+    const trigger = screen.getByRole('combobox', { name: '模型筛选' });
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    let searchInput = screen.getByRole('textbox', { name: '搜索选项' });
+
+    // Case-insensitive local filtering hides the non-matching all-option.
+    fireEvent.change(searchInput, { target: { value: 'CLAUDE' } });
+    expect(screen.getByRole('option', { name: 'Claude 3.5 Sonnet' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: '全部模型' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'GPT-4o' })).not.toBeInTheDocument();
+
+    fireEvent.keyDown(searchInput, { key: 'Enter' });
+    expect(trigger).toHaveTextContent('Claude 3.5 Sonnet');
+    expect(screen.queryByRole('textbox', { name: '搜索选项' })).not.toBeInTheDocument();
+    expect(handleSearchChange).toHaveBeenLastCalledWith('');
+
+    // Reopen keeps the selected value; a no-match Enter neither clears nor closes it.
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    searchInput = screen.getByRole('textbox', { name: '搜索选项' });
+    expect(searchInput).toHaveValue('');
+    fireEvent.change(searchInput, { target: { value: 'zzz-no-match' } });
+    expect(screen.getByText('无匹配项')).toBeInTheDocument();
+    fireEvent.keyDown(searchInput, { key: 'Enter' });
+    expect(trigger).toHaveTextContent('Claude 3.5 Sonnet');
+    expect(screen.getByRole('textbox', { name: '搜索选项' })).toBeInTheDocument();
+
+    // Escape closes through the shared cleanup path.
+    fireEvent.keyDown(searchInput, { key: 'Escape' });
+    expect(screen.queryByRole('textbox', { name: '搜索选项' })).not.toBeInTheDocument();
+    expect(handleSearchChange).toHaveBeenLastCalledWith('');
+
+    // An empty query still exposes and selects the all-option.
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    searchInput = screen.getByRole('textbox', { name: '搜索选项' });
+    expect(screen.getByRole('option', { name: '全部模型' })).toBeInTheDocument();
+    fireEvent.keyDown(searchInput, { key: 'Enter' });
+    expect(trigger).toHaveTextContent('全部模型');
+  });
+
+  /**
+   * 意图：远端 facet 结果晚到时，当前搜索词仍继续过滤新选项，
+   * 后续选项补充不会重置或丢失已选择的值。
+   */
+  it('keeps active search and selection when remote options arrive late', () => {
+    const baseOptions = [
+      { value: '', label: '全部模型' },
+      { value: 'gpt-4o', label: 'GPT-4o' },
+    ];
+
+    function Harness({ options }: { options: Array<{ value: string; label: string }> }) {
+      const [value, setValue] = useState('gpt-4o');
+      return (
+        <Select
+          value={value}
+          onChange={setValue}
+          aria-label="远端模型"
+          searchable
+          onSearchChange={vi.fn()}
+          options={options}
+        />
+      );
+    }
+
+    const { rerender } = render(<Harness options={baseOptions} />);
+    const trigger = screen.getByRole('combobox', { name: '远端模型' });
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    const searchInput = screen.getByRole('textbox', { name: '搜索选项' });
+    fireEvent.change(searchInput, { target: { value: 'legacy' } });
+    expect(screen.getByText('无匹配项')).toBeInTheDocument();
+
+    // Simulate a late remote/history facet supplement.
+    rerender(
+      <Harness
+        options={[
+          ...baseOptions,
+          { value: 'legacy-model-v1', label: 'legacy-model-v1 (历史)' },
+        ]}
+      />
+    );
+    expect(screen.getByRole('option', { name: 'legacy-model-v1 (历史)' })).toBeInTheDocument();
+    expect(searchInput).toHaveValue('legacy');
+
+    fireEvent.keyDown(searchInput, { key: 'Enter' });
+    expect(trigger).toHaveTextContent('legacy-model-v1 (历史)');
+
+    // Additional facet additions after selection must not change the selection.
+    rerender(
+      <Harness
+        options={[
+          ...baseOptions,
+          { value: 'legacy-model-v1', label: 'legacy-model-v1 (历史)' },
+          { value: 'legacy-model-v2', label: 'legacy-model-v2 (历史)' },
+        ]}
+      />
+    );
+    expect(trigger).toHaveTextContent('legacy-model-v1 (历史)');
+  });
+
+  /**
    * 意图：验证使用真实键盘流：在搜索框输入文字 -> 按 ArrowDown 转移焦点到首个匹配选项 -> 按 Enter 选中。
    * 确保按键隔离没有阻断 ArrowDown / Enter，支持纯键盘无障碍操作。
    */

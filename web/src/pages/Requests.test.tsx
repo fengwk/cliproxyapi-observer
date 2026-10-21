@@ -769,6 +769,101 @@ describe('RequestsPage and RequestsHelpers', () => {
 
   /**
    * Why covered:
+   * Proves model and Key pickers still filter their current options locally when
+   * onSearchChange is used for remote facets, Enter picks the visible match rather
+   * than the all-option, and no-match Enter leaves the selected value untouched.
+   */
+  it('model and key filters narrow locally with remote search callback and select matches', async () => {
+    const api = createMockApiClient();
+    render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
+
+    const modelTrigger = await screen.findByRole('combobox', { name: '模型' });
+    fireEvent.keyDown(modelTrigger, { key: 'ArrowDown' });
+    let searchInput = await screen.findByRole('textbox', { name: '搜索选项' });
+    fireEvent.change(searchInput, { target: { value: 'CLAUDE' } });
+
+    expect(screen.getByRole('option', { name: 'claude-3-5-sonnet' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: '全部模型' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'gpt-4o' })).not.toBeInTheDocument();
+
+    fireEvent.keyDown(searchInput, { key: 'Enter' });
+    await waitFor(() => {
+      expect(modelTrigger).toHaveTextContent('claude-3-5-sonnet');
+    });
+
+    const keyTrigger = screen.getByRole('combobox', { name: '客户端 Key' });
+    fireEvent.keyDown(keyTrigger, { key: 'ArrowDown' });
+    searchInput = await screen.findByRole('textbox', { name: '搜索选项' });
+    fireEvent.change(searchInput, { target: { value: 'prod' } });
+
+    expect(screen.getByRole('option', { name: 'Production Key' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: '全部 Key' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Archived Key (已删除)' })).not.toBeInTheDocument();
+
+    fireEvent.keyDown(searchInput, { key: 'Enter' });
+    await waitFor(() => {
+      expect(keyTrigger).toHaveTextContent('Production Key');
+    });
+
+    // A no-match Enter leaves the existing selection and open search intact.
+    fireEvent.keyDown(keyTrigger, { key: 'ArrowDown' });
+    searchInput = await screen.findByRole('textbox', { name: '搜索选项' });
+    fireEvent.change(searchInput, { target: { value: 'no-such-key' } });
+    expect(screen.getByText('无匹配项')).toBeInTheDocument();
+    fireEvent.keyDown(searchInput, { key: 'Enter' });
+    expect(keyTrigger).toHaveTextContent('Production Key');
+    expect(screen.getByRole('textbox', { name: '搜索选项' })).toBeInTheDocument();
+
+    // Escape uses the shared close cleanup so the next open starts with an empty query.
+    fireEvent.keyDown(searchInput, { key: 'Escape' });
+    fireEvent.keyDown(keyTrigger, { key: 'ArrowDown' });
+    expect(await screen.findByRole('textbox', { name: '搜索选项' })).toHaveValue('');
+    expect(screen.getByRole('option', { name: '全部 Key' })).toBeInTheDocument();
+  });
+
+  /**
+   * Why covered:
+   * Proves a late remote/history facet result joins the still-active local search
+   * and can be selected without losing the typed query or the chosen value.
+   */
+  it('late model facet results join the active search without breaking selection', async () => {
+    let resolveLateFacet: (value: FacetPage) => void = () => {};
+    const base = createMockApiClient();
+    const api = createMockApiClient({
+      request: vi.fn((path: string, options?: { signal?: AbortSignal }) => {
+        if (path.startsWith('/requests/facets')) {
+          const params = new URLSearchParams(path.slice(path.indexOf('?') + 1));
+          if (params.get('field') === 'model' && params.get('search') === 'late') {
+            return new Promise<FacetPage>((resolve) => {
+              resolveLateFacet = resolve;
+            });
+          }
+        }
+        return base.request(path, options);
+      }) as ApiClient['request'],
+    });
+    render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
+
+    const trigger = await screen.findByRole('combobox', { name: '模型' });
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    const searchInput = await screen.findByRole('textbox', { name: '搜索选项' });
+    fireEvent.change(searchInput, { target: { value: 'late' } });
+    expect(screen.getByText('无匹配项')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveLateFacet({
+        items: [{ value: 'late-model-v1', label: 'late-model-v1 (历史)' }],
+      });
+    });
+
+    expect(screen.getByRole('option', { name: 'late-model-v1 (历史)' })).toBeInTheDocument();
+    expect(searchInput).toHaveValue('late');
+    fireEvent.keyDown(searchInput, { key: 'Enter' });
+    expect(trigger).toHaveTextContent('late-model-v1 (历史)');
+  });
+
+  /**
+   * Why covered:
    * Proves that Key labels display friendly names, deleted keys show [已删除] tag,
    * 64-hex IDs are truncated with a full-ID tooltip, and no copy-ID action is shown.
    */
