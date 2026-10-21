@@ -13,7 +13,7 @@ v0.6/v0.7/v0.8 发布说明保留各版本历史行为。当前采用最小非�
 | R03 稳定刷新 | 仅请求页单在途定时器、失败退避、原位保留旧行 | `Requests.test.tsx` 的暂停/迟到响应/失败测试、浏览器 12 次实际 5 秒刷新 |
 | R04 UTC 日期 | 草稿快捷范围，包含结束日，今天截止查询时刻 | `statistics_test.go`、`management_query_test.go`、`Requests.test.tsx` |
 | R05 平铺筛选 | 查询/Enter 才应用，历史维度及下线模型可选 | `ui.test.tsx`、`Requests.test.tsx`、真实宿主 `rebuild_test.go` |
-| R06 细分统计 | 事务性小时/日汇总、一致视图、四种分组、样本覆盖 | `statistics*_test.go`、`load_acceptance_test.go`、真实升级测试 |
+| R06 细分统计 | 事务性小时/日汇总、一致视图、五种分组、样本覆盖 | `statistics*_test.go`、`load_acceptance_test.go`、真实升级测试 |
 | R07 终态删除 | 墓碑清哈希，busy/幂等/410，保留账本 | `key_lifecycle_test.go`、`rebuild_test.go`、浏览器删除流程 |
 | R08 ID/密钥 | `sk-` + 48 字母数字，内部 ID 保留关联；当前明文持久展示/复制 | `key_material_test.go`、`custom_keys_preview_test.go`、Key 页面测试 |
 | R09 可解释计费 | 共用解析器、完整身份、候选和显式映射、历史报价固定 | `internal/pricing/*test.go`、`upgrade_test.go`、设置页草稿隔离测试 |
