@@ -204,6 +204,54 @@ func secretField(k string) bool {
 		strings.HasSuffix(compact, "token") ||
 		compact == "key"
 }
+
+// secretHeader adds header-specific auth/token recognition without widening
+// secretField, whose narrower rules also redact ordinary JSON body fields.
+func secretHeader(k string) bool {
+	if secretField(k) {
+		return true
+	}
+	compact := strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.ToLower(k))
+	return strings.Contains(compact, "auth") ||
+		strings.Contains(compact, "token") ||
+		strings.Contains(compact, "bearer")
+}
+
+// copyCaptureHeaders copies all non-credential names and values without
+// touching the caller's map. Names and retained (possibly URL-redacted) values
+// share the header budget; overflow drops the whole group rather than a partial
+// copy. Excluded credential headers are omitted before any budget accounting.
+func copyCaptureHeaders(src http.Header) (http.Header, bool, bool) {
+	headers := http.Header{}
+	size := 0
+	redacted := false
+	for k, values := range src {
+		if secretHeader(k) {
+			continue
+		}
+		name := http.CanonicalHeaderKey(k)
+		if len(name) > captureHeaderLimit-size {
+			return http.Header{}, false, true
+		}
+		size += len(name)
+		for _, value := range values {
+			// Bound the raw value before redactURL allocates for a huge input.
+			if len(value) > captureHeaderLimit-size {
+				return http.Header{}, false, true
+			}
+			value, changed := redactURL(value)
+			if changed {
+				redacted = true
+			}
+			if len(value) > captureHeaderLimit-size {
+				return http.Header{}, false, true
+			}
+			size += len(value)
+			headers.Add(name, value)
+		}
+	}
+	return headers, redacted, false
+}
 func redactURL(text string) (string, bool) {
 	u, e := url.Parse(text)
 	if e != nil || u.Scheme == "" || u.Host == "" {
@@ -281,27 +329,10 @@ func (s *Store) Capture(v CaptureInput) bool {
 	v.generation = s.captureGeneration
 	v.originalBytes = int64(len(v.Body))
 
-	headers := http.Header{}
-	size := 0
-	for _, k := range []string{"Content-Type", "Accept", "User-Agent"} {
-		for _, value := range v.Headers.Values(k) {
-			size += len(value)
-			if size > captureHeaderLimit {
-				v.headersTooWide = true
-				break
-			}
-			redacted, changed := redactURL(value)
-			if changed {
-				v.headersRedact = true
-			}
-			headers.Add(k, redacted)
-		}
-		if v.headersTooWide {
-			headers = http.Header{}
-			break
-		}
-	}
+	headers, headersRedact, headersTooWide := copyCaptureHeaders(v.Headers)
 	v.Headers = headers
+	v.headersRedact = headersRedact
+	v.headersTooWide = headersTooWide
 	if mode == CaptureModeHeaders {
 		v.Body = nil
 	} else if len(v.Body) > s.settings.MaxBodyBytes {

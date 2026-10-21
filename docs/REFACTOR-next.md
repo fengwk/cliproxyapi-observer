@@ -269,9 +269,9 @@ TPS 只在流式、Token 口径完整且 `0 < TTFT < 总耗时` 时展示。分�
 
 采集对象只限被 Observer 接受的生成请求的客户端入站副本。不是上游发送实录，不记录响应体，也不是所有 CPA 流量。
 
-白名单安全头策略继续 fail-closed；首版保证现有 Content-Type/Accept/User-Agent，扩展字段必须经审计与测试，不能改成“只过滤几个密钥头，其余全收”。UI 明示范围。
+请求头采集范围为认证前客户端入站副本，不是上游发送实录。除 Authorization/Proxy-Authorization、Cookie/Set-Cookie、API Key、Token、Secret/Password/Credential/Private Key 及认证相关头外，其余头名称与多值均保留，字段名大小写不敏感。敏感头整体省略，不复制原值、不落盘；不得采集上游请求头或上游凭据。头名称与保留值累计受 16KiB 上限约束，越界丢弃整组头并标记 `headers_too_large`，仅被排除的敏感头不占预算。URL 用户信息与敏感查询参数继续脱敏。UI 明示范围。
 
-入站副本进行大小限制、JSON 校验、敏感字段与 URL 查询凭据脱敏，再异步 gzip 入库。修正 `max_tokens` 等正常参数被宽泛 `token` 规则误伤的问题；不能为此放松真正秘密字段的脱敏。所有处理只作用于副本。
+入站副本进行大小限制、JSON 校验、敏感字段与 URL 查询凭据脱敏，再异步 gzip 入库。修正正文中 `max_tokens` 等正常参数被宽泛 `token` 规则误伤的问题；不能为此放松真正秘密字段的脱敏。所有处理只作用于副本。
 
 正文超限整份不保存，不存可能泄密或无法解析的截断前缀；安全头仍可独立保留。非 JSON 首版明确“不支持此正文格式”，不伪装为“已脱敏”。
 
@@ -494,7 +494,7 @@ coverage {各类保留起点、缺失指标、回填状态}
 - 认证越界见 [全局独占声明](https://github.com/fengwk/cliproxyapi-observer/blob/37a2468f055c698158e50cde9b1758a8417e487e/internal/plugin/plugin.go#L27)、[认证与未知 scope 拒绝](https://github.com/fengwk/cliproxyapi-observer/blob/37a2468f055c698158e50cde9b1758a8417e487e/internal/plugin/manager.go#L335)。原 [模型发现测试](https://github.com/fengwk/cliproxyapi-observer/blob/37a2468f055c698158e50cde9b1758a8417e487e/tests/integration/models_test.go#L128) 将原生 Key 的目录请求拒绝当作预期，必须按新边界替换而不是拿它证明“不影响 CPA”。
 - 当前细分字段尚存，但汇总只有四项，见 [类型](https://github.com/fengwk/cliproxyapi-observer/blob/37a2468f055c698158e50cde9b1758a8417e487e/internal/engine/types.go#L78)、[汇总写入](https://github.com/fengwk/cliproxyapi-observer/blob/37a2468f055c698158e50cde9b1758a8417e487e/internal/engine/accounting.go#L118)、[查询](https://github.com/fengwk/cliproxyapi-observer/blob/37a2468f055c698158e50cde9b1758a8417e487e/internal/engine/query.go#L70)。
 - v0.5.6 的日志、分组、独立请求体保留期及最旧淘汰，见 [旧界面](https://github.com/fengwk/cliproxyapi-observer/blob/v0.5.6/internal/web/ui.html#L123)、[旧配置](https://github.com/fengwk/cliproxyapi-observer/blob/v0.5.6/internal/observer/config.go#L62)、[旧内容淘汰](https://github.com/fengwk/cliproxyapi-observer/blob/v0.5.6/internal/observer/store.go#L1268)。旧版未提供完整请求头归档，不能把新增诉求冒称旧版已有。
-- 当前内容能力存在，但有三头白名单、满额拒新、共享 TTL、粗粒度状态和维护错误忽略，见 [采集](https://github.com/fengwk/cliproxyapi-observer/blob/37a2468f055c698158e50cde9b1758a8417e487e/internal/engine/capture.go)、[维护](https://github.com/fengwk/cliproxyapi-observer/blob/37a2468f055c698158e50cde9b1758a8417e487e/internal/engine/maintenance.go)、[调度](https://github.com/fengwk/cliproxyapi-observer/blob/37a2468f055c698158e50cde9b1758a8417e487e/internal/plugin/manager.go#L245)。
+- 该基线的内容能力只有三头白名单、满额拒新、共享 TTL、粗粒度状态和维护错误忽略，见 [采集](https://github.com/fengwk/cliproxyapi-observer/blob/37a2468f055c698158e50cde9b1758a8417e487e/internal/engine/capture.go)、[维护](https://github.com/fengwk/cliproxyapi-observer/blob/37a2468f055c698158e50cde9b1758a8417e487e/internal/engine/maintenance.go)、[调度](https://github.com/fengwk/cliproxyapi-observer/blob/37a2468f055c698158e50cde9b1758a8417e487e/internal/plugin/manager.go#L245)。
 - CPA 主色、圆角、间距与浮动工具条来自已检查的 Management Center 1.26.5 解包源码及既有官方壳验收记录；解包目录没有 Git 元数据，目录名本身不作为 commit/tag 证明。
 - 公开目录样本来自 `https://models.dev/api.json`，SHA-256：`8700799debe7b107f438bcc77305847333b6eb232274bb43d4b285b2b0dbca41`。当次含 232 个 Provider、9103 个模型，v0.7 解析出 8648 条报价；用户十个公开名称在无 Provider 预览中均未定价。它是固定调查样本，不代表未来目录或某实例的实时状态。
 - 尚未确认生产实例的采集开关、目录下载状态及具体丢弃原因；不需要真实凭据即可完成上述设计与隔离实现。

@@ -130,8 +130,12 @@ reasoning 属于输出子集，不重复计费。未知用量语义保留原始 
 
 ## 数据、隐私与故障边界
 
-内容采集默认 `off`，可选 `headers`（仅安全请求头）或 `headers_and_body`（加 JSON 正文），
-**不保存响应内容**。仅保存 Content-Type/Accept/User-Agent 三种白名单头，
+内容采集默认 `off`，可选 `headers`（请求头副本）或 `headers_and_body`（加 JSON 正文），
+**不保存响应内容，也不采集上游发送的请求头或上游凭据**。采集的是认证前的客户端
+入站请求头副本：除 Authorization/Proxy-Authorization、Cookie/Set-Cookie、API Key、
+Token、Secret/Password/Credential/Private Key 及认证相关头外，其余头名称和多值均保留，
+字段名大小写不敏感；敏感头整体省略，不复制、不落盘。头名称与保留值累计受 **16KiB**
+上限约束，超限丢弃整组请求头并标记为超限；仅被排除的敏感头不占预算。
 正文递归脱敏敏感 JSON 字段和 URL 查询凭据，普通 `max_tokens` 等计数保留。
 内容单层 gzip 压缩、有界非阻塞队列，仍可读取 schema2 的旧双层压缩内容。
 独立内容保留期精确到秒，范围 60 秒至原始明细保留上限；关闭/缩小模式限制历史读取，

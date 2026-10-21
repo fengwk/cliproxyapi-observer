@@ -51,9 +51,14 @@ session affinity remain untouched. SDK baseline v8.0.30, schema 6 minimum.
 - Preserve raw SDK counters and canonical normalized token buckets. Use the
   pinned CPA token helper for known providers; unknown semantics must not
   invent overlapping buckets. Missing price costs zero, never blocks inference.
-- Capture is opt-in, queued, bounded, gzip, expires on reads. Redact secrets
-  recursively in JSON plus header/query credentials; don't persist failure
-  bodies. Disabled capture is explicit, not an empty successful body.
+- Capture is opt-in, queued, bounded, gzip, expires on reads. Store only the
+  client inbound, pre-auth header copy plus recursively redacted JSON; never
+  upstream-sent headers, upstream credentials or failure bodies. Preserve every
+  non-credential header name and multi-value with case-insensitive exclusion of
+  auth/cookie/API-key/token/secret/password/credential/private-key fields.
+  Header names and retained values share a 16KiB cap; overflow discards the
+  whole group as too_large, while excluded credential headers consume no budget.
+  Disabled capture is explicit, not an empty successful body.
 - Usage write failure: retain the already quoted event for bounded retry, block
   subsequent admissions for the affected Key, expose health; recovery retries
   the same quote. Never silently drop money or reprice a retried event.
