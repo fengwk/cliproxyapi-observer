@@ -354,7 +354,8 @@
 .requests-trend-axis {
   position: relative;
   flex: 0 0 16px;
-  width: 100%;
+  width: 96%;
+  margin-inline: 2%;
   height: 16px;
   overflow: hidden;
   color: var(--text-secondary);

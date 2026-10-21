@@ -437,22 +437,6 @@ export function formatAvgSeconds(totalMs?: number, samples?: number): string {
 }
 
 /**
- * Formats average latency.
- */
-export function formatAvgLatency(latencyMs?: number, samples?: number): string {
-  if (!samples || samples <= 0 || latencyMs === undefined) return '—';
-  return `${Math.round(latencyMs / samples)} ms`;
-}
-
-/**
- * Formats average TTFT.
- */
-export function formatAvgTTFT(ttftMs?: number, samples?: number): string {
-  if (!samples || samples <= 0 || ttftMs === undefined) return '—';
-  return `${Math.round(ttftMs / samples)} ms`;
-}
-
-/**
  * Formats numbers with comma separators.
  */
 export function formatNumber(n?: number): string {

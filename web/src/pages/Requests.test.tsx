@@ -401,7 +401,8 @@ describe('RequestsPage and RequestsHelpers', () => {
       expect(screen.getByTestId('metric-failures')).toHaveTextContent('2');
       expect(screen.getByTestId('metric-tokens')).toHaveTextContent('45,000');
       expect(screen.getByTestId('metric-cache')).toHaveTextContent('23.8%'); // 10000 / (30000+10000+2000)
-      expect(screen.getByTestId('metric-latency')).toHaveTextContent('200 ms'); // 2400 / 12
+      expect(screen.getByTestId('metric-latency')).toHaveTextContent('0.20 s'); // 2400 / 12
+      expect(screen.getByTestId('metric-latency')).toHaveTextContent('TTFT: 0.06 s'); // 600 / 10
       expect(screen.getByTestId('metric-cost')).toHaveTextContent('$1.5');
     });
 
@@ -720,7 +721,8 @@ describe('RequestsPage and RequestsHelpers', () => {
     // Group average: 1400/7 = 200ms -> 0.20 s; TTFT 350/5 = 70ms -> 0.07 s.
     fireEvent.click(screen.getByRole('tab', { name: '模型分组' }));
     await waitFor(() => {
-      expect(screen.getByText('0.20 s')).toBeInTheDocument();
+      // The summary card and group row both show 0.20 s after the metrics switch.
+      expect(screen.getAllByText('0.20 s')).toHaveLength(2);
       expect(screen.getByText('TTFT: 0.07 s')).toBeInTheDocument();
     });
 
