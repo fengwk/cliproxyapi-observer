@@ -298,7 +298,7 @@ export function RequestsTable({
                       : view === 'key'
                       ? '客户端 Key'
                       : view === 'account'
-                      ? '账户 (AuthIndex)'
+                      ? '账户'
                       : '提供商'}
                   </th>
                   <th>请求数</th>
@@ -352,9 +352,14 @@ export function RequestsTable({
                       </div>
                     );
                   } else if (view === 'account') {
+                    const accountId = g.auth_index || g.key;
+                    const accountName = g.label || accountId || '未归属';
                     groupLabel = (
-                      <span className="requests-primary-text">
-                        {g.auth_index || g.key || '未归属'}
+                      <span
+                        className="requests-primary-text requests-account-name"
+                        title={accountId ? `${accountName}\nAuthIndex: ${accountId}` : accountName}
+                      >
+                        {accountName}
                       </span>
                     );
                   } else if (view === 'provider') {
