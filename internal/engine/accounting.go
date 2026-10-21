@@ -20,7 +20,7 @@ func add(a, b int64) (int64, error) {
 }
 func normalize(u pluginapi.UsageRecord) Record {
 	d := u.Detail
-	b := usage.EnsureTokenBreakdownForProvider(usage.Detail{InputTokens: d.InputTokens, OutputTokens: d.OutputTokens, ReasoningTokens: d.ReasoningTokens, CachedTokens: d.CachedTokens, CacheReadTokens: d.CacheReadTokens, CacheCreationTokens: d.CacheCreationTokens, TotalTokens: d.TotalTokens}, u.Provider, u.ExecutorType).TokenBreakdown
+	b := canonicalTokenBreakdown(d, u.Provider, u.ExecutorType)
 	r := Record{ID: u.RequestID, TraceID: u.TraceID, KeyID: strings.TrimPrefix(u.APIKey, "observer:"), Time: u.RequestedAt.UTC(), Model: u.Model, Provider: u.Provider, AuthIndex: u.AuthIndex, Failed: u.Failed, StatusCode: u.Failure.StatusCode, Stream: u.Stream, LatencyMS: u.Latency.Milliseconds(), TTFTMS: u.TTFT.Milliseconds(), RawUsage: d, AccountingQuality: string(b.Quality)}
 	r.Tokens.Total = b.TotalTokens
 	if b.Quality == usage.TokenAccountingQualityComplete {
