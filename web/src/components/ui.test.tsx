@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { Button, Input, Field, Switch, Badge, Notice, EmptyState, Select } from './ui';
 
 describe('UI components', () => {
@@ -76,6 +77,49 @@ describe('UI components', () => {
     fireEvent.change(searchInput, { target: { value: 'query-term' } });
 
     expect(handleSearchChange).toHaveBeenCalledWith('query-term');
+  });
+
+  // Filtering removes Radix's selected all-option. Use actual keyboard input,
+  // not fireEvent.change/fill, so a lost focus prevents the remaining characters.
+  it('keeps search focused while typing and when remote options update', async () => {
+    // JSDOM has no scrolling; preserve Radix's real focus behavior.
+    Element.prototype.scrollIntoView = vi.fn();
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const onSearchChange = vi.fn();
+    const options = [
+      { value: '', label: '全部模型' },
+      { value: 'gpt-4o', label: 'GPT-4o' },
+      { value: 'claude-sonnet', label: 'Claude Sonnet' },
+    ];
+    const select = (items: typeof options) => (
+      <Select value="" onChange={onChange} options={items} searchable
+        onSearchChange={onSearchChange} aria-label="连续搜索" />
+    );
+    const { rerender } = render(select(options));
+    fireEvent.keyDown(screen.getByRole('combobox', { name: '连续搜索' }), { key: 'ArrowDown' });
+    const input = screen.getByRole('textbox', { name: '搜索选项' });
+    await waitFor(() => expect(screen.getByRole('option', { name: '全部模型' })).toHaveFocus());
+    await user.click(input);
+
+    await user.keyboard('c');
+    expect(input).toHaveValue('c');
+    expect(input).toHaveFocus();
+    await user.keyboard('laude');
+    expect(input).toHaveValue('claude');
+    expect(input).toHaveFocus();
+
+    rerender(select([...options, { value: 'claude-opus', label: 'Claude Opus' }]));
+    expect(input).toHaveFocus();
+    await user.keyboard('-opus');
+    expect(input).toHaveValue('claude-opus');
+    expect(input).toHaveFocus();
+    await user.keyboard('{ArrowDown}');
+    expect(screen.getByRole('option', { name: 'Claude Opus' })).toHaveFocus();
+    await user.keyboard('{ArrowUp}');
+    expect(input).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(onChange).toHaveBeenCalledWith('claude-opus');
   });
 
   /**

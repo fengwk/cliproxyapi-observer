@@ -116,6 +116,7 @@ export function Select({
 }: SelectProps) {
   const [open, setOpen] = React.useState(false);
   const [searchQuery, setSearchQuery] = React.useState('');
+  const searchInputRef = React.useRef<HTMLInputElement>(null);
 
   const handleOpenChange = (nextOpen: boolean) => {
     setOpen(nextOpen);
@@ -177,6 +178,13 @@ export function Select({
           className="cpa-select-content"
           position="popper"
           sideOffset={4}
+          onFocus={(e) => {
+            // Removing the selected item makes Radix focus its listbox.
+            // Keep typing in search, but leave explicit option focus alone.
+            if (searchable && e.target === e.currentTarget) {
+              searchInputRef.current?.focus({ preventScroll: true });
+            }
+          }}
           onKeyDown={(e) => {
             if (e.key === 'ArrowUp') {
               const activeEl = document.activeElement;
@@ -195,6 +203,7 @@ export function Select({
           {searchable && (
             <div className="cpa-select-search">
               <input
+                ref={searchInputRef}
                 type="text"
                 className="cpa-input cpa-select-search-input"
                 value={searchQuery}
