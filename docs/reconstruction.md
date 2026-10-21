@@ -97,6 +97,9 @@ latency_ms/latency_samples/ttft_ms/ttft_samples
 
 总延迟/TTFT 按各自有效样本数计算平均，细分 Token/缓存命中率只用完整样本集合的合计计算，
 reasoning 已在 output 内。每条 TPS 仅用于完整、有效流式样本，不提供平均 TPS。
+缓存命中率为 `Σcache_read_tokens / Σ(input_tokens + cache_read_tokens + cache_write_tokens)`，
+其中 input 是未缓存输入；不包含输出/reasoning，也不平均每请求百分比，显示一位小数。
+样本覆盖不足时不代表全量请求的缓存命中率；分母为零显示 `—`，不补造缺失细分。
 旧日汇总没有细分时 `detailed_requests=0`，不能把缺失视为已知零。
 可用原始明细只在查询范围/不足一小时的边界解码，完整小时复用小时汇总；
 跨日图表仍按天合并，不把小时直接塞进日图。
