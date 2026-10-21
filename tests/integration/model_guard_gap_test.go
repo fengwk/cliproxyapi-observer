@@ -5,7 +5,6 @@ package integration
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +12,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // This is a documented SDK-gap reproduction, NOT a test proving a repaired
@@ -58,28 +59,34 @@ func TestSDKAlphaSearchExecutionBypassesModelGuard(t *testing.T) {
 
 	h := newHarness(t)
 	h.awaitGracefulRestartReady(t, 0)
+	h.Stop()
 	path := filepath.Join(h.dir, "config.yaml")
 	cfg, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Count(cfg, []byte("\nplugins:")) != 1 {
-		t.Fatal("isolated fixture must have exactly one plugin config section")
+	var fields map[string]any
+	if err := yaml.Unmarshal(cfg, &fields); err != nil {
+		t.Fatal(err)
+	}
+	families, ok := fields["api-keys"].(map[string]any)
+	if !ok {
+		t.Fatal("isolated fixture must have a v8 api-keys map")
 	}
 	// The v8 config keeps the endpoint/models on the Codex group and opts
-	// the fake API key into Alpha Search. Every upstream URL stays loopback.
-	addition := fmt.Sprintf(`
- codex:
-  - name: "observer-alpha-gap-fixture"
-    base-url: %q
-    keys:
-      - api-key: "fake-alpha-upstream-key"
-        alpha-search: true
-    models:
-      - name: "observer-alpha-gap-model"
-        alias: "observer-alpha-gap-model"
-`, alpha.URL+"/v1")
-	cfg = bytes.Replace(cfg, []byte("\nplugins:"), []byte(addition+"\nplugins:"), 1)
+	// the fake API key into Alpha Search. The host normalizes YAML indentation
+	// on startup, so modify decoded data rather than splice indented text.
+	// Every upstream URL stays loopback.
+	families["codex"] = []map[string]any{{
+		"name":     "observer-alpha-gap-fixture",
+		"base-url": alpha.URL + "/v1",
+		"keys":     []map[string]any{{"api-key": "fake-alpha-upstream-key", "alpha-search": true}},
+		"models":   []map[string]any{{"name": "observer-alpha-gap-model", "alias": "observer-alpha-gap-model"}},
+	}}
+	cfg, err = yaml.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, cfg, 0o600); err != nil {
 		t.Fatal(err)
 	}
