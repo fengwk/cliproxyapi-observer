@@ -44,7 +44,7 @@ func TestDeliveryBuildVersion(t *testing.T) {
 	fallback.Dir = t.TempDir()
 	fallback.Env = append(os.Environ(), "PLUGIN_VERSION=")
 	out, err := fallback.Output()
-	if err != nil || strings.TrimSpace(string(out)) != "0.8.0-dev" {
+	if err != nil || strings.TrimSpace(string(out)) != "0.9.0-dev" {
 		t.Fatalf("fallback version %q, error %v", out, err)
 	}
 	for _, tc := range []struct {
@@ -53,7 +53,8 @@ func TestDeliveryBuildVersion(t *testing.T) {
 	}{
 		{"v0.7.0", "0.7.0"},
 		{"v0.8.0", "0.8.0"},
-		{"0.8.0-dev+test", "0.8.0-dev+test"},
+		{"v0.9.0", "0.9.0"},
+		{"0.9.0-dev+test", "0.9.0-dev+test"},
 		{"not-a-version", ""},
 	} {
 		cmd := exec.Command("bash", "scripts/plugin-version.sh")
