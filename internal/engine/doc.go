@@ -2,9 +2,11 @@
 //
 // Usage is priced at receipt. Its immutable quote, execution deduplication,
 // independent Key counters, compressed raw row, daily/hourly/minute aggregates
-// commit in one bbolt transaction. Minute aggregates live for the daily
-// retention window so timezone-local calendar queries remain exact after raw
-// records expire. Trace IDs are never accounting identities.
+// commit in one bbolt transaction. Minute aggregates live for at least the
+// daily retention window and at least the raw window when that is longer, so
+// timezone-local calendar queries remain exact after raw records expire. They
+// never extend raw detail retention themselves. Trace IDs are never accounting
+// identities.
 //
 // Failed writes retain at most 1024 already-quoted events for bounded retries.
 // Each Key is unblocked only after its own retained events succeed. Lost or

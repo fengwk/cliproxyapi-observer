@@ -46,6 +46,7 @@ func (s *Store) Maintenance() error {
 	now := s.now().UTC()
 	cut := now.Add(-time.Duration(s.settings.RawRetentionHours) * time.Hour)
 	dc := day(now).AddDate(0, 0, -s.settings.DailyRetentionDays)
+	mc := minuteRetentionCut(cut, dc)
 	var cleaned CleanupResult
 	maintenanceErr := ""
 	e := s.db.Update(func(tx *bolt.Tx) error {
@@ -99,9 +100,9 @@ func (s *Store) Maintenance() error {
 					if e := decode(v, &d); e != nil {
 						return e
 					}
-					// Minute aggregates are a long-lived historical source and
-					// therefore follow daily retention, never raw retention.
-					expired = d.Bucket.Time.Before(dc)
+					// Minute aggregates remain while either the daily history or
+					// the raw window still needs them; raw detail is unchanged.
+					expired = d.Bucket.Time.Before(mc)
 				case "dedup":
 					var entry dedupEntry
 					if e := decode(v, &entry); e != nil {
