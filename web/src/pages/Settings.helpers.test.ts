@@ -9,6 +9,7 @@ import {
   conditionSummary,
   conditionToDraft,
   definitionToDraft,
+  definitionsSemanticallyEqual,
   emptyConditionDraft,
   emptyDefinitionDraft,
   formatRateDisplay,
@@ -23,6 +24,7 @@ import {
   parseTtlSeconds,
   pricingSourceLabel,
   rateSetToDraft,
+  roundTripDefinition,
   sourceLabel,
   splitBytesToCapacity,
   validTimeRange,
@@ -86,6 +88,8 @@ describe('Settings.helpers', () => {
       expect(validTimeRange('22:00-06:00')).toBe(true);
       expect(validTimeRange('12:00-12:00')).toBe(false);
       expect(validTimeRange('24:00-06:00')).toBe(false);
+      expect(validTimeRange('00:00-24:00')).toBe(true);
+      expect(validTimeRange('08:00-24:00')).toBe(true);
       expect(validTimeRange('8:00-18:00')).toBe(false);
     });
   });
@@ -176,6 +180,7 @@ describe('Settings.helpers', () => {
             cache_write: '',
             reasoningMode: 'same_output',
             reasoning: '',
+            ttlMode: 'inherit',
             ttls: [],
           },
         },
@@ -248,6 +253,7 @@ describe('Settings.helpers', () => {
             cache_write: '',
             reasoningMode: 'inherit',
             reasoning: '',
+            ttlMode: 'inherit',
             ttls: [],
           },
         },
@@ -277,6 +283,7 @@ describe('Settings.helpers', () => {
             cache_write: '',
             reasoningMode: 'inherit',
             reasoning: '',
+            ttlMode: 'inherit',
             ttls: [],
           },
         },
@@ -296,6 +303,7 @@ describe('Settings.helpers', () => {
             cache_write: '',
             reasoningMode: 'inherit',
             reasoning: '',
+            ttlMode: 'inherit',
             ttls: [],
           },
         },
@@ -310,6 +318,7 @@ describe('Settings.helpers', () => {
         cache_write: '',
         reasoningMode: 'inherit' as const,
         reasoning: '',
+        ttlMode: 'inherit' as const,
         ttls: [],
       };
       duplicateIds.overrides = [
@@ -401,6 +410,34 @@ describe('Settings.helpers', () => {
 
       const changedDefinition = [manualDraft('test/model', '', baseDefinition({ input: 1 }))];
       expect(isPricingDraftEqual(true, 'models_dev_v2', changedDefinition, confirmed)).toBe(false);
+    });
+
+    it('round-trips explicit empty TTL overrides, empty condition collections and 24:00', () => {
+      const source: PricingDefinition = {
+        base: {
+          input: 1, output: 2, cache_read: 3, cache_write: 4,
+          cache_write_by_ttl: {}, reasoning: null,
+        },
+        overrides: [
+          {
+            id: 'clear-ttl',
+            when: { serviceTier: [], all: [], any: [] },
+            rates: { cache_write_by_ttl: {} },
+          },
+          {
+            id: 'all-day',
+            when: { time: { start: '00:00', end: '24:00', timezone: 'UTC', weekdays: [1] } },
+            rates: { input: 5 },
+          },
+        ],
+        multipliers: [],
+      };
+      const roundTripped = roundTripDefinition(source);
+      // Empty patch TTL means clear, and empty any means false; neither may collapse to omission.
+      expect(roundTripped.overrides[0].rates.cache_write_by_ttl).toEqual({});
+      expect(roundTripped.overrides[0].when).toEqual({ serviceTier: [], all: [], any: [] });
+      expect(roundTripped.overrides[1].when.time?.end).toBe('24:00');
+      expect(definitionsSemanticallyEqual(source, roundTripped)).toBe(true);
     });
 
     it('moves rules and generates collision-free IDs', () => {

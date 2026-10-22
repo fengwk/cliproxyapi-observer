@@ -942,10 +942,11 @@ function validateCondition(condition, name, depth = 0, state = { nodes: 0 }) {
       throw failure(400, 'invalid_json', name + '.time must be an object');
     }
     rejectUnknown(time, new Set(['start', 'end', 'timezone', 'weekdays']), name + '.time');
-    for (const field of ['start', 'end']) {
-      if (typeof time[field] !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time[field])) {
-        throw failure(400, 'invalid_json', name + '.time.' + field + ' must be HH:mm');
-      }
+    if (typeof time.start !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time.start)) {
+      throw failure(400, 'invalid_json', name + '.time.start must be HH:mm');
+    }
+    if (typeof time.end !== 'string' || !/^(?:(?:[01]\d|2[0-3]):[0-5]\d|24:00)$/.test(time.end)) {
+      throw failure(400, 'invalid_json', name + '.time.end must be HH:mm or 24:00');
     }
     if (time.start === time.end) throw failure(400, 'invalid_json', name + '.time.start must differ from end');
     if (typeof time.timezone !== 'string' || !time.timezone || time.timezone.length > 128) {
@@ -1014,7 +1015,7 @@ function validatePricingDefinition(definition, name) {
   if (!Array.isArray(definition.overrides) || !Array.isArray(definition.multipliers)) {
     throw failure(400, 'invalid_json', name + '.overrides and multipliers must be arrays');
   }
-  if (definition.overrides.length > 4096 || definition.multipliers.length > 4096) {
+  if (definition.overrides.length > 64 || definition.multipliers.length > 64) {
     throw failure(400, 'invalid_json', name + ' has too many rules');
   }
   const overrideIds = new Set();
