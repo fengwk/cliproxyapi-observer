@@ -1,4 +1,5 @@
 import { Button, Field, Input, Notice, Select } from '../components/ui';
+import { formatDateTime } from '../lib/format';
 import type {
   ConditionDraft,
   DefinitionDraft,
@@ -51,6 +52,16 @@ const upperOptions = [
   { value: 'lt', label: '<' },
   { value: 'lte', label: '≤' },
 ];
+
+function dateBoundaryHint(value: string, edge: 'gte' | 'lt'): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return '按 UTC 日历判定；填入完整日期后显示浏览器本地时刻预览。';
+  }
+  const local = formatDateTime(`${value}T00:00:00Z`);
+  return edge === 'gte'
+    ? `按 UTC 日历判定；本地生效：从 ${local} 起。`
+    : `按 UTC 日历判定；本地生效：至 ${local} 前（不含）。`;
+}
 
 function TtlRows({
   label,
@@ -279,7 +290,7 @@ function ConditionEditor({
             onChange={(event) => patch({ serviceTier: event.target.value, serviceTierPresent: true })}
           />
         </Field>
-        <Field label="日期下限（UTC）">
+        <Field label="日期下限（UTC 日历）" hint={dateBoundaryHint(draft.dateGte, 'gte')}>
           <Input
             type="date"
             value={draft.dateGte}
@@ -288,7 +299,7 @@ function ConditionEditor({
             onChange={(event) => patch({ dateGte: event.target.value })}
           />
         </Field>
-        <Field label="日期上限（不含）">
+        <Field label="日期上限（UTC 日历，不含）" hint={dateBoundaryHint(draft.dateLt, 'lt')}>
           <Input
             type="date"
             value={draft.dateLt}
@@ -297,7 +308,7 @@ function ConditionEditor({
             onChange={(event) => patch({ dateLt: event.target.value })}
           />
         </Field>
-        <Field label="每日开始">
+        <Field label="每日开始" hint="按下方规则自身 IANA 时区解释。">
           <Input
             value={draft.timeStart}
             disabled={disabled}
@@ -307,7 +318,7 @@ function ConditionEditor({
             onChange={(event) => patch({ timeStart: event.target.value })}
           />
         </Field>
-        <Field label="每日结束" hint="左闭右开，支持跨午夜；可填 24:00 表示全天结束">
+        <Field label="每日结束" hint="左闭右开，支持跨午夜；可填 24:00 表示全天结束。">
           <Input
             value={draft.timeEnd}
             disabled={disabled}
@@ -317,7 +328,10 @@ function ConditionEditor({
             onChange={(event) => patch({ timeEnd: event.target.value })}
           />
         </Field>
-        <Field label="IANA 时区">
+        <Field
+          label="IANA 时区（规则自身）"
+          hint="已保存规则保持其自身时区；新建时间规则的默认值是浏览器时区。"
+        >
           <Input
             value={draft.timezone}
             disabled={disabled}

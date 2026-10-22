@@ -5,6 +5,7 @@ import { PriceDefinitionEditor } from './PricingDefinitionEditor';
 import { definitionToDraft, parseDefinition } from './Settings.helpers';
 import type { DefinitionDraft } from './Settings.helpers';
 import type { PricingDefinition } from '../lib/types';
+import { formatDateTime } from '../lib/format';
 
 function Harness({ initial, onChange }: {
   initial: PricingDefinition;
@@ -46,5 +47,27 @@ describe('PriceDefinitionEditor semantic controls', () => {
     expect(parseDefinition(latest, '测试').overrides[0].rates.cache_write_by_ttl).toEqual({});
     expect(parseDefinition(latest, '测试').overrides[0].when.time?.end).toBe('24:00');
     expect(screen.getByText(/显式空覆盖/)).toBeInTheDocument();
+  });
+
+  it('previews UTC date boundaries in browser-local time without rewriting the saved UTC rule', () => {
+    const definition: PricingDefinition = {
+      base: { input: 1, output: 2, cache_read: 0, cache_write: 0, reasoning: null },
+      overrides: [{
+        id: 'date-rule',
+        when: {
+          date: { gte: '2026-10-20', lt: '2026-10-21' },
+          time: { start: '08:00', end: '09:00', timezone: 'UTC' },
+        },
+        rates: { input: 2 },
+      }],
+      multipliers: [],
+    };
+    render(<Harness initial={definition} onChange={vi.fn()} />);
+
+    const startLocal = formatDateTime('2026-10-20T00:00:00Z');
+    const endLocal = formatDateTime('2026-10-21T00:00:00Z');
+    expect(screen.getByText((content) => content.includes(`本地生效：从 ${startLocal} 起`))).toBeInTheDocument();
+    expect(screen.getByText((content) => content.includes(`本地生效：至 ${endLocal} 前`))).toBeInTheDocument();
+    expect(screen.getByLabelText('测试 价格覆盖 1 时区')).toHaveValue('UTC');
   });
 });

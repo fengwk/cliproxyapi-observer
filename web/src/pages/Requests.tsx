@@ -649,7 +649,7 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
                 style={{ marginLeft: 12 }}
                 onClick={handleCorrectiveWholeDate}
               >
-                修正为整日 UTC 范围
+                修正为本地整日范围
               </Button>
             ) : (
               <Button

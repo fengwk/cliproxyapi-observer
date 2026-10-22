@@ -1,5 +1,5 @@
 import type { Key } from '../lib/types';
-import { formatUSD } from '../lib/format';
+import { formatUSD, formatUTCOffset, getBrowserTimeZone } from '../lib/format';
 
 export interface FilterState {
   from: string;
@@ -15,92 +15,77 @@ export type PresetRange = 'today' | 'last7days' | 'last30days' | 'custom';
 export type ViewTab = 'requests' | 'model' | 'key' | 'key_model' | 'account' | 'provider';
 
 /**
- * Returns today's UTC date as YYYY-MM-DD.
+ * Returns the browser-local date as YYYY-MM-DD.
  */
-export function getTodayUTCDateString(now: Date = new Date()): string {
-  const year = now.getUTCFullYear();
-  const month = String(now.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(now.getUTCDate()).padStart(2, '0');
+export function getTodayLocalDateString(now: Date = new Date()): string {
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
 }
 
 /**
- * Returns the date N days before today in UTC as YYYY-MM-DD.
+ * Returns the date N local calendar days before today as YYYY-MM-DD.
+ * Uses calendar setters rather than fixed 24-hour arithmetic so DST days keep
+ * the same wall-clock date boundary.
  */
-export function getPastUTCDateString(daysAgo: number, now: Date = new Date()): string {
-  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysAgo));
-  const year = d.getUTCFullYear();
-  const month = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(d.getUTCDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+export function getPastLocalDateString(daysAgo: number, now: Date = new Date()): string {
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  d.setDate(d.getDate() - daysAgo);
+  return getTodayLocalDateString(d);
 }
 
 /**
- * Returns tomorrow's UTC date as YYYY-MM-DD.
- */
-export function getTomorrowUTCDateString(now: Date = new Date()): string {
-  return getPastUTCDateString(-1, now);
-}
-
-/**
- * Returns inclusive preset range:
+ * Returns inclusive preset range in the browser-local calendar:
  * - today: [today, today]
  * - last7days: [6 days ago, today] (covers 7 inclusive days)
  * - last30days: [29 days ago, today] (covers 30 inclusive days)
  */
 export function getPresetRange(preset: PresetRange, now: Date = new Date()): { from: string; to: string } {
-  const today = getTodayUTCDateString(now);
+  const today = getTodayLocalDateString(now);
   if (preset === 'today') {
     return { from: today, to: today };
   }
   if (preset === 'last7days') {
-    return { from: getPastUTCDateString(6, now), to: today };
+    return { from: getPastLocalDateString(6, now), to: today };
   }
   if (preset === 'last30days') {
-    return { from: getPastUTCDateString(29, now), to: today };
+    return { from: getPastLocalDateString(29, now), to: today };
   }
   return { from: today, to: today };
 }
 
 /**
- * Compatibility preset bounds.
- */
-export function getTodayPresetRange(now: Date = new Date()): { from: string; to: string } {
-  return getPresetRange('today', now);
-}
-
-export function getLast7DaysPresetRange(now: Date = new Date()): { from: string; to: string } {
-  return getPresetRange('last7days', now);
-}
-
-/**
- * Returns whether the query range is currently dynamic (ending on today).
+ * Returns whether the query range is currently dynamic (ending on local today).
  * Historical queries ending in the past pause auto-refresh.
  */
 export function isDynamicRange(toDate: string, now: Date = new Date()): boolean {
   if (!toDate) return true;
-  const today = getTodayUTCDateString(now);
+  const today = getTodayLocalDateString(now);
   return toDate.slice(0, 10) === today;
 }
 
 /**
  * Builds URLSearchParams query string for GET /requests/view.
- * Uses inclusive dates (from_date, to_date) formatted as YYYY-MM-DD.
+ * Dates are inclusive browser-local calendar dates (YYYY-MM-DD); `timezone`
+ * tells the backend which local calendar interprets them.
  */
 export function buildRequestViewParams(
   filters: FilterState,
   view: ViewTab,
   page: number,
   pageSize = 25,
-  now: Date = new Date()
+  now: Date = new Date(),
+  timeZone: string = getBrowserTimeZone()
 ): string {
   const params = new URLSearchParams();
-  const today = getTodayUTCDateString(now);
+  const today = getTodayLocalDateString(now);
   const fromVal = filters.from.trim() ? filters.from.trim().slice(0, 10) : today;
   const toVal = filters.to.trim() ? filters.to.trim().slice(0, 10) : today;
 
   params.set('from_date', fromVal);
   params.set('to_date', toVal);
+  params.set('timezone', timeZone || 'UTC');
   params.set('view', view);
   params.set('page', String(page));
   params.set('page_size', String(pageSize));
@@ -115,51 +100,14 @@ export function buildRequestViewParams(
 }
 
 /**
- * Compatibility query param builder for legacy test assertions.
- */
-export function buildRequestsQueryParams(
-  filters: FilterState,
-  page: number,
-  pageSize = 25,
-  nowIso = new Date().toISOString()
-): string {
-  const params = new URLSearchParams();
-  params.set('page', String(page));
-  params.set('page_size', String(pageSize));
-
-  const rawFrom = filters.from.trim();
-  const today = getTodayUTCDateString(new Date(nowIso));
-  if (rawFrom) {
-    params.set('from', rawFrom.includes('T') ? rawFrom : `${rawFrom.slice(0, 10)}T00:00:00Z`);
-  } else {
-    params.set('from', `${today}T00:00:00Z`);
-  }
-
-  const rawTo = filters.to.trim();
-  if (rawTo) {
-    params.set('to', rawTo.includes('T') ? rawTo : `${rawTo.slice(0, 10)}T00:00:00Z`);
-  } else {
-    params.set('to', nowIso);
-  }
-
-  if (filters.key_id) params.set('key_id', filters.key_id);
-  if (filters.model) params.set('model', filters.model);
-  if (filters.provider) params.set('provider', filters.provider);
-  if (filters.auth_index) params.set('auth_index', filters.auth_index);
-  if (filters.status) params.set('status', filters.status);
-
-  return params.toString();
-}
-
-/**
- * Snaps range to whole dates for error recovery.
+ * Snaps range to whole local calendar dates for error recovery.
  */
 export function snapToWholeDateRange(
   fromVal: string,
   toVal: string,
   now: Date = new Date()
 ): { from: string; to: string } {
-  const today = getTodayUTCDateString(now);
+  const today = getTodayLocalDateString(now);
   let cleanFrom = fromVal ? fromVal.slice(0, 10) : today;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanFrom)) {
     cleanFrom = today;
@@ -195,7 +143,7 @@ export function isHistoricalDateQueryError(
   const isQueryInvalid =
     lower.includes('invalid') || lower.includes('date') || lower.includes('range') || lower.includes('400');
   if (!isQueryInvalid) return false;
-  const today = getTodayUTCDateString();
+  const today = getTodayLocalDateString();
   const fromDay = fromVal ? fromVal.slice(0, 10) : today;
   return fromDay < today || fromVal.includes('T') || toVal.includes('T');
 }
@@ -346,23 +294,37 @@ export function redactBody(body: unknown): unknown {
 }
 
 /**
- * Formats a raw ISO timestamp to UTC short string.
- * e.g. YYYY-MM-DD HH:mm:ss UTC
+ * Formats a raw ISO timestamp in browser-local time with an explicit numeric
+ * UTC offset, e.g. `2026-10-20 18:00:00 UTC+08:00`.
  */
-export function formatUTCDateTime(iso?: string | null): string {
+export function formatLocalDateTime(iso?: string | null): string {
   if (!iso) return '—';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return String(iso);
-  const s = d.toISOString();
-  return `${s.slice(0, 10)} ${s.slice(11, 19)} UTC`;
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hours = String(d.getHours()).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+  const seconds = String(d.getSeconds()).padStart(2, '0');
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds} ${formatUTCOffset(-d.getTimezoneOffset())}`;
 }
 
-export function formatUTCShort(iso: string, withYear = true): string {
+/**
+ * Formats a chart timestamp in browser-local time. The numeric offset keeps
+ * the two wall-clock hours of a DST fall-back distinguishable.
+ */
+export function formatLocalShort(iso: string, withYear = true): string {
   if (!iso) return '—';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return String(iso);
-  const isoStr = d.toISOString();
-  return (withYear ? isoStr.slice(0, 10) : isoStr.slice(5, 10)) + ' ' + isoStr.slice(11, 16) + ' UTC';
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hours = String(d.getHours()).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+  const datePart = withYear ? `${year}-${month}-${day}` : `${month}-${day}`;
+  return `${datePart} ${hours}:${minutes} ${formatUTCOffset(-d.getTimezoneOffset())}`;
 }
 
 /**

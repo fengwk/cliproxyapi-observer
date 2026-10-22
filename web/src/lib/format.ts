@@ -69,7 +69,34 @@ export function errorMessage(error: unknown): string {
 }
 
 /**
- * Formats an ISO timestamp to local readable time with timezone info.
+ * Returns the browser's current IANA timezone.
+ * An empty environment (some embedded webviews) falls back to UTC, matching the
+ * backend's missing-timezone semantics instead of sending an invalid value.
+ */
+export function getBrowserTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch {
+    return 'UTC';
+  }
+}
+
+/**
+ * Formats a numeric UTC offset in minutes east of UTC as `UTC+08:00`.
+ * The explicit offset is what distinguishes both occurrences of a DST-repeated
+ * local hour; a bare zone abbreviation is not sufficient in every locale.
+ */
+export function formatUTCOffset(offsetMinutesEast: number): string {
+  if (offsetMinutesEast === 0) return 'UTC';
+  const sign = offsetMinutesEast > 0 ? '+' : '-';
+  const abs = Math.abs(offsetMinutesEast);
+  const hours = String(Math.floor(abs / 60)).padStart(2, '0');
+  const minutes = String(abs % 60).padStart(2, '0');
+  return `UTC${sign}${hours}:${minutes}`;
+}
+
+/**
+ * Formats an ISO timestamp to browser-local readable time with timezone info.
  */
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) {
@@ -87,7 +114,7 @@ export function formatDateTime(iso: string | null | undefined): string {
     minute: '2-digit',
     second: '2-digit',
     timeZoneName: 'short',
-    hour12: false,
+    hourCycle: 'h23',
   }).format(date);
 }
 
@@ -111,8 +138,68 @@ export function toLocalDatetimeInput(iso: string | null | undefined): string {
 }
 
 /**
+ * Parses a `datetime-local` value as browser-local wall-clock time.
+ * Nonexistent times (spring-forward gap) and repeated times (fall-back overlap)
+ * are rejected instead of silently drifting to another instant.
+ */
+export function parseLocalDatetimeInput(
+  inputVal: string
+): { date: Date | null; error?: string } {
+  const trimmed = inputVal.trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(trimmed);
+  if (!match) {
+    return { date: null, error: '指定的过期时间无效' };
+  }
+  const [year, month, day, hours, minutes, seconds] = match
+    .slice(1)
+    .map((value) => (value === undefined ? 0 : Number(value)));
+  const date = new Date(0);
+  date.setFullYear(year, month - 1, day);
+  date.setHours(hours, minutes, seconds, 0);
+
+  const matchesWallClock = (candidate: Date) =>
+    candidate.getFullYear() === year &&
+    candidate.getMonth() === month - 1 &&
+    candidate.getDate() === day &&
+    candidate.getHours() === hours &&
+    candidate.getMinutes() === minutes &&
+    candidate.getSeconds() === seconds;
+
+  if (!matchesWallClock(date)) {
+    return { date: null, error: '该本地时间在时区切换时不存在，请选择其他时间' };
+  }
+
+  // A repeated wall-clock time maps to two distinct instants. Scan the nearby
+  // transition window so a fall-back overlap cannot be applied silently.
+  const start = date.getTime();
+  const instants = new Set<number>();
+  for (let delta = -180; delta <= 180; delta += 15) {
+    const candidate = new Date(start + delta * 60000);
+    if (matchesWallClock(candidate)) instants.add(candidate.getTime());
+  }
+  if (instants.size > 1) {
+    return { date: null, error: '该本地时间在时区切换时重复，请避开重复时段' };
+  }
+
+  return { date };
+}
+
+/**
+ * Returns true only when the control's exact minute-precision value equals the
+ * stored instant's browser-local minute representation. Strings with trailing
+ * junk, explicit seconds, or another wall-clock time must be parsed normally.
+ */
+export function isUnchangedLocalDatetime(
+  originalISO: string | null | undefined,
+  inputVal: string
+): boolean {
+  if (!originalISO) return false;
+  return inputVal.trim() === toLocalDatetimeInput(originalISO);
+}
+
+/**
  * Converts a datetime-local input value to ISO string, while preserving the exact original
- * RFC3339 string (including nanoseconds) if unchanged.
+ * RFC3339 string (including nanoseconds) if its local wall-clock minute is unchanged.
  */
 export function preserveOriginalExpiry(
   originalISO: string | null | undefined,
@@ -122,22 +209,11 @@ export function preserveOriginalExpiry(
   if (!trimmed) {
     return null;
   }
-  const inputDate = new Date(trimmed);
-  if (isNaN(inputDate.getTime())) {
-    return null;
+  if (isUnchangedLocalDatetime(originalISO, trimmed)) {
+    return originalISO ?? null;
   }
-
-  if (originalISO) {
-    const originalDate = new Date(originalISO);
-    if (!isNaN(originalDate.getTime())) {
-      const diffMs = Math.abs(inputDate.getTime() - originalDate.getTime());
-      if (diffMs < 60000 && Math.floor(inputDate.getTime() / 60000) === Math.floor(originalDate.getTime() / 60000)) {
-        return originalISO;
-      }
-    }
-  }
-
-  return inputDate.toISOString();
+  const parsed = parseLocalDatetimeInput(trimmed);
+  return parsed.date ? parsed.date.toISOString() : null;
 }
 
 /**

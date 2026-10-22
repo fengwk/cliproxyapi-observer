@@ -5,6 +5,8 @@ v1.26.5**，由 CPA 自己渲染侧栏、浮动工具栏和插件 iframe，不�
 本目录只用于开发测试，不参与 `go:embed`。
 
 - `run.cjs`：浏览器行为检查、布局矩形检查、截图和错误报告。
+- `timezone-check.cjs`：Asia/Shanghai / America/New_York 真实 Chrome 时区验收，
+  检查本地日期 query、UTC 日界、DST 重复小时、Key 到期往返与本地时间预览。
 - `contrast.cjs`：测量实际渲染文字与共享控件边界的 sRGB 对比度。
 - `shell-helper.cjs`：在独立临时目录下载官方 `management.html` 并验证 SHA-256。
 - `mock-server.cjs`：仅监听回环地址，提供假宿主管理 API 与已编译的插件资源。
@@ -18,6 +20,8 @@ make frontend
 node --test internal/web/browser/mock-server.test.cjs
 CHROME_BIN=/usr/bin/google-chrome-stable \
   BROWSER_REPORT_DIR=/tmp/observer-browser-report make browser
+CHROME_BIN=/usr/bin/google-chrome-stable \
+  node internal/web/browser/timezone-check.cjs --report-dir /tmp/observer-tz-report
 ```
 
 `make build` 使用已提交的 `internal/web/dist`。更改前端源码后必须重新构建，

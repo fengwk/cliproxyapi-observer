@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SummaryBucket } from '../lib/types';
-import { formatUTCShort } from './RequestsHelpers';
+import { formatLocalShort } from './RequestsHelpers';
 
 export interface RequestsTrendProps {
   series?: {
@@ -17,7 +17,9 @@ interface TimeTick {
   align: 'start' | 'center' | 'end';
 }
 
-const MIN_TICK_WIDTH = 130;
+// Local labels include an explicit UTC offset so DST-repeated hours stay
+// distinguishable; reserve enough room for that longer text.
+const MIN_TICK_WIDTH = 200;
 
 export function RequestsTrend({ series }: RequestsTrendProps) {
   const buckets = series?.buckets || [];
@@ -93,7 +95,7 @@ export function RequestsTrend({ series }: RequestsTrendProps) {
     if (len === 1) {
       return [{
         index: 0,
-        text: formatUTCShort(buckets[0].time, false),
+        text: formatLocalShort(buckets[0].time, false),
         left: 50,
         align: 'center',
       }];
@@ -108,7 +110,7 @@ export function RequestsTrend({ series }: RequestsTrendProps) {
 
     return Array.from(indices).map((index) => ({
       index,
-      text: formatUTCShort(buckets[index].time, false),
+      text: formatLocalShort(buckets[index].time, false),
       left: (index / (len - 1)) * 100,
       align: index === 0 ? 'start' : index === len - 1 ? 'end' : 'center',
     }));

@@ -1,5 +1,5 @@
 import type { Limits } from '../lib/types';
-import { parseUSD, errorMessage, preserveOriginalExpiry } from '../lib/format';
+import { parseUSD, errorMessage, parseLocalDatetimeInput, isUnchangedLocalDatetime } from '../lib/format';
 
 export interface QuotaDescriptor {
   key: keyof Limits;
@@ -96,6 +96,7 @@ export function parseQuotaLimit(
 /**
  * 校验有效期。
  * 开启有效期但未指定日期时拒绝；未修改日期时保留原始 RFC3339 纳秒和时区。
+ * 修改后的 datetime-local 按浏览器本地时区解释；DST 不存在/重复时间拒绝而非静默漂移。
  */
 export function validateExpiry(
   enabled: boolean,
@@ -109,12 +110,14 @@ export function validateExpiry(
   if (!trimmed) {
     return { valid: false, iso: null, error: '开启有效期后必须指定到期时间' };
   }
-  const inputDate = new Date(trimmed);
-  if (isNaN(inputDate.getTime())) {
-    return { valid: false, iso: null, error: '指定的过期时间无效' };
+  if (isUnchangedLocalDatetime(originalISO, trimmed)) {
+    return { valid: true, iso: originalISO ?? null };
   }
-  const preserved = preserveOriginalExpiry(originalISO, trimmed);
-  return { valid: true, iso: preserved || inputDate.toISOString() };
+  const parsed = parseLocalDatetimeInput(trimmed);
+  if (!parsed.date) {
+    return { valid: false, iso: null, error: parsed.error || '指定的过期时间无效' };
+  }
+  return { valid: true, iso: parsed.date.toISOString() };
 }
 
 /**
