@@ -1104,7 +1104,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
                 aria-label="搜索可用模型"
               />
             </div>
-            <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+            <div className="settings-preview-count">
               共 {filteredPreview.length} 个模型
             </div>
           </div>

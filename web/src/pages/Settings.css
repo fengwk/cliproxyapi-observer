@@ -445,17 +445,37 @@
 
 /* Search filter input wrapper */
 .settings-table-filter-bar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 180px) minmax(0, 280px) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
   margin: 10px 0;
-  flex-wrap: wrap;
+}
+
+.settings-table-filter-bar .cpa-select-trigger {
+  min-width: 0;
+  width: 100%;
+}
+
+.settings-table-filter-bar .cpa-select-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-table-filter-bar .cpa-select-icon {
+  flex-shrink: 0;
+  margin-left: 4px;
 }
 
 .settings-table-filter-bar .settings-search-input {
-  max-width: 280px;
-  width: 100%;
+  min-width: 0;
+}
+
+.settings-preview-count {
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 /* Capacity input + unit row */
@@ -509,7 +529,11 @@
   .settings-condition-child {
     padding-left: 6px;
   }
-  .settings-table-filter-bar .settings-search-input {
-    max-width: 100%;
+  .settings-table-filter-bar {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+    gap: 8px;
+  }
+  .settings-preview-count {
+    grid-column: 1 / -1;
   }
 }

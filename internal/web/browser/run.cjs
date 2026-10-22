@@ -475,6 +475,14 @@ async function readonlyPages(env, name) {
   await settingsTab(frame).click();
   await frame.getByTestId('observer-settings').waitFor();
   await frame.locator('.settings-table tbody tr').first().waitFor();
+  // Status and search stay on one row, including narrow and zoomed viewports.
+  const previewStatus = await frame.getByRole('combobox', { name: '价格匹配状态', exact: true }).boundingBox();
+  const previewSearch = await frame.getByRole('textbox', { name: '搜索可用模型', exact: true }).boundingBox();
+  check(name + ': pricing status and search share one row',
+    previewStatus && previewSearch &&
+    Math.abs(previewStatus.y - previewSearch.y) <= 2 &&
+    previewStatus.x + previewStatus.width <= previewSearch.x &&
+    previewSearch.width > 0, JSON.stringify({ previewStatus, previewSearch }));
   await frame.locator('#content').evaluate(el => { el.scrollTop = 0; });
   await verifySafeRects(env, name + '-settings');
   await verifyContentPane(env, name + ': settings top');
