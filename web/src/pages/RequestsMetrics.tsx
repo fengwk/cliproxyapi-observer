@@ -57,10 +57,7 @@ export function RequestsMetrics({ summary, coverage }: RequestsMetricsProps) {
 
   // 6. Cost
   const totalCost = summary ? `$${formatCostExact(summary.cost_micro_usd)}` : '—';
-  const costSub =
-    summary?.unpriced_requests && summary.unpriced_requests > 0
-      ? `${summary.unpriced_requests} 条未定价按 $0`
-      : summary?.detailed_requests === 0 ? '历史定价覆盖未保存' : '按请求入库价格，历史不重算';
+  const costSub = summary?.detailed_requests === 0 ? '历史定价覆盖未保存' : '按请求入库价格，历史不重算';
 
   return (
     <div className="requests-metrics-section">

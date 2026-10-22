@@ -50,41 +50,113 @@ export interface Key {
   revoked?: boolean;
 }
 
-export interface Rates {
+/** Prices are integer micro-USD per million tokens; multipliers are exact decimal strings. */
+export type PricingSource = 'models_dev_v2' | 'models_dev_v1';
+
+export interface RateSet {
   input: number;
   output: number;
   cache_read: number;
   cache_write: number;
+  /** Keys are positive integer seconds and are serialized as exact JSON strings. */
+  cache_write_by_ttl?: Record<string, number>;
+  /** null/omitted inherits output; a number (including 0) is an independent rate. */
   reasoning?: number | null;
+}
+
+export interface RatePatch {
+  input?: number;
+  output?: number;
+  cache_read?: number;
+  cache_write?: number;
+  cache_write_by_ttl?: Record<string, number>;
+  /** Omitted keeps the inherited value; null means inherit output; a number is explicit. */
+  reasoning?: number | null;
+}
+
+export interface ContextCondition {
+  gt?: number;
+  gte?: number;
+  lt?: number;
+  lte?: number;
+}
+
+export interface DateCondition {
+  gte?: string;
+  lt?: string;
+}
+
+export interface TimeCondition {
+  start: string;
+  end: string;
+  timezone: string;
+  weekdays?: number[];
+}
+
+export interface Condition {
+  context?: ContextCondition;
+  serviceTier?: string[];
+  date?: DateCondition;
+  time?: TimeCondition;
+  all?: Condition[];
+  any?: Condition[];
+  not?: Condition;
+}
+
+export interface Override {
+  id: string;
+  when: Condition;
+  rates: RatePatch;
+}
+
+export interface FactorSet {
+  input?: string;
+  output?: string;
+  cache_read?: string;
+  cache_write?: string;
+  reasoning?: string;
+}
+
+export interface Multiplier {
+  id: string;
+  when: Condition;
+  factors: FactorSet;
+}
+
+export interface PricingDefinition {
+  base: RateSet;
+  overrides: Override[];
+  multipliers: Multiplier[];
+}
+
+/** Complete manual pricing identity: no provider means the truly empty provider. */
+export interface ManualPrice {
+  model: string;
+  provider?: string;
+  definition: PricingDefinition;
 }
 
 export interface PriceCandidate {
   provider: string;
   model: string;
-  rates?: Rates;
-  missing_rates?: string[];
+  rates?: RateSet;
+  definition: PricingDefinition;
+  pricing_supported: boolean;
+  support_issues?: string[];
 }
 
-export interface Price {
-  model: string;
-  provider?: string;
-  rates: Rates;
+export interface Price extends ManualPrice {
+  /** Effective base rates for display; the definition remains the editable contract. */
+  rates: RateSet;
   source: string;
   reason?: string;
   match?: string;
   catalog_provider?: string;
   catalog_model?: string;
   catalog_time?: string;
-  missing_rates?: string[];
+  pricing_supported: boolean;
+  support_issues?: string[];
   candidates?: PriceCandidate[];
-}
-
-export interface Rule {
-  id: string;
-  model: string;
-  input_tokens_gt?: number | null;
-  time_range?: string | null;
-  rates: Rates;
 }
 
 export interface ModelMapping {
@@ -95,8 +167,8 @@ export interface ModelMapping {
 
 export interface PricingConfig {
   auto: boolean;
-  prices: Price[];
-  rules: Rule[];
+  source: PricingSource;
+  prices: ManualPrice[];
   mappings?: ModelMapping[];
 }
 
@@ -119,20 +191,22 @@ export interface PriceSnapshot {
   error?: string;
   refreshing: boolean;
   catalog_entries?: number;
+  source: PricingSource;
 }
 
 export interface PricePreviewItem {
   model: string;
   provider?: string;
-  rates: Rates;
+  rates: RateSet;
+  definition: PricingDefinition;
   source: string;
-  has_rules: boolean;
   reason?: string;
   match?: string;
   catalog_provider?: string;
   catalog_model?: string;
   catalog_time?: string;
-  missing_rates?: string[];
+  pricing_supported: boolean;
+  support_issues?: string[];
   candidates?: PriceCandidate[];
 }
 
@@ -190,9 +264,9 @@ export interface RequestRecord {
   ttft_ms: number;
   tokens: RequestTokens;
   raw_usage?: unknown;
+  response_service_tier?: string;
   cost_micro_usd: number;
   price_source: string;
-  rule_id?: string;
   accounting_quality: string;
 }
 
@@ -218,7 +292,6 @@ export interface Aggregate {
   latency_samples?: number;
   ttft_ms?: number;
   ttft_samples?: number;
-  unpriced_requests?: number;
   detailed_requests?: number;
 }
 
@@ -233,7 +306,6 @@ export interface Summary extends Aggregate {
 
 export interface PriceQuote extends Price {
   cost_micro_usd?: number;
-  rule_id?: string;
 }
 
 export interface Detail {

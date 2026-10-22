@@ -549,18 +549,14 @@ test('settings/prices/compact: round-trip, refresh and method rejection', async 
     assert.equal(settings.body.raw_retention_hours, 24);
     assert.equal(settings.body.daily_retention_days, 365);
     assert.equal(typeof settings.body.pricing.auto, 'boolean');
+    assert.equal(settings.body.pricing.source, 'models_dev_v2');
     assert.ok(Array.isArray(settings.body.pricing.prices));
-    assert.ok(Array.isArray(settings.body.pricing.rules));
-    // UI 只接受 00:00..23:59 的 HH:mm，种子必须落在合法范围内。
-    assert.match(
-      settings.body.pricing.rules[0].time_range,
-      /^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/
-    );
-    // reasoning 可选：seed 不写该键，UI 才能区分“留空”与显式 0。
-    assert.equal(
-      Object.prototype.hasOwnProperty.call(settings.body.pricing.prices[0].rates, 'reasoning'),
-      false
-    );
+    assert.ok(Array.isArray(settings.body.pricing.mappings));
+    const seed = settings.body.pricing.prices[0];
+    assert.ok(seed.definition);
+    assert.equal(seed.definition.base.reasoning, null);
+    assert.equal(seed.definition.overrides[0].when.context.gt, 200000);
+    assert.equal(seed.definition.multipliers[0].factors.input, '0.5');
 
     settings.body.capture_enabled = true;
     settings.body.capture_mode = 'headers_and_body';
@@ -575,6 +571,43 @@ test('settings/prices/compact: round-trip, refresh and method rejection', async 
       body: Object.assign({}, saved.body, { raw_retention_hours: 169 })
     });
     assert.equal(invalid.res.status, 400);
+
+    const invalidSource = await json(server, '/settings', {
+      method: 'PUT',
+      body: { ...saved.body, pricing: { ...saved.body.pricing, source: 'models_dev_v0' } }
+    });
+    assert.equal(invalidSource.res.status, 400);
+
+    const invalidDefinition = await json(server, '/settings', {
+      method: 'PUT',
+      body: {
+        ...saved.body,
+        pricing: {
+          ...saved.body.pricing,
+          prices: [{
+            model: 'broken',
+            definition: {
+              base: { input: 1, output: 1, cache_read: 0, cache_write: 0, reasoning: null },
+              overrides: [{ id: 'bad', when: { time: { start: '08:00', end: '08:00', timezone: 'UTC' } }, rates: {} }],
+              multipliers: []
+            }
+          }]
+        }
+      }
+    });
+    assert.equal(invalidDefinition.res.status, 400);
+
+    const preview = await json(server, '/prices/preview', {
+      method: 'POST',
+      body: { models: [{ model: 'gpt-5-codex', provider: '' }, { model: 'gpt-5-mini', provider: '' }] }
+    });
+    assert.equal(preview.res.status, 200);
+    assert.equal(preview.body.items[0].source, 'manual');
+    assert.equal(preview.body.items[0].definition.base.input, 1_250_000);
+    assert.equal(preview.body.items[0].pricing_supported, true);
+    assert.equal(preview.body.items[1].source, 'auto');
+    assert.ok(!('has_rules' in preview.body.items[0]));
+    assert.ok(!('missing_rates' in preview.body.items[0]));
 
     // mock 与引擎同步 1 GiB 总存储上限：exact 1 GiB 可保存，+1 字节拒绝。
     const exactStorage = await json(server, '/settings', {
@@ -605,10 +638,16 @@ test('settings/prices/compact: round-trip, refresh and method rejection', async 
     assert.notDeepEqual(dualProvider[0].rates, dualProvider[1].rates);
     assert.ok(
       prices.body.prices.some(
-        (price) => price.model === 'gpt-5-codex' && price.source === 'manual' && !('provider' in price)
+        (price) =>
+          price.model === 'gpt-5-codex' &&
+          price.source === 'manual' &&
+          !('provider' in price) &&
+          price.definition.base.input === 1_250_000
       ),
-      'manual price must stay model-wide without provider'
+      'manual price must use the complete empty-provider identity'
     );
+    assert.equal(prices.body.source, 'models_dev_v2');
+    assert.ok(prices.body.prices.every((price) => price.definition && price.rates && price.pricing_supported === true));
 
     const refreshed = await json(server, '/prices/refresh', { method: 'POST' });
     assert.equal(refreshed.res.status, 200);

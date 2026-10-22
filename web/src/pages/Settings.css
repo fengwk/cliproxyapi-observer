@@ -124,6 +124,187 @@
   width: 100%;
 }
 
+/* Price definition editor */
+.settings-definition {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 4px;
+  min-width: 0;
+}
+
+.settings-definition-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.settings-definition-header span {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.settings-definition-rules-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.settings-definition-rules-header > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-definition-rules {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-definition-subtitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.settings-definition-reasoning {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  gap: 6px;
+  align-items: center;
+}
+
+.settings-definition-summary {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.settings-definition-ttls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-definition-ttl-row {
+  display: grid;
+  grid-template-columns: minmax(100px, 0.8fr) minmax(120px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+/* Structured condition editor */
+.settings-condition-editor {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm, 4px);
+  padding: 10px;
+  background: var(--bg-primary);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.settings-condition-combo {
+  display: grid;
+  grid-template-columns: minmax(92px, 0.6fr) minmax(0, 1fr);
+  gap: 6px;
+  align-items: center;
+}
+
+.settings-condition-advanced {
+  border-top: 1px dashed var(--border-color);
+  padding-top: 8px;
+}
+
+.settings-condition-advanced summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.settings-condition-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.settings-condition-group-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.settings-condition-group-header > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-condition-children {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-condition-child {
+  border-left: 3px solid var(--border-color);
+  padding-left: 8px;
+  min-width: 0;
+}
+
+.settings-condition-child-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.settings-weekday-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-weekday-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.settings-weekday-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.settings-weekday-option input {
+  margin: 0;
+}
+
+.settings-weekday-option input:disabled + span {
+  color: var(--text-secondary);
+}
+
 /* Action toolbars */
 .settings-toolbar {
   display: flex;
@@ -303,15 +484,6 @@
   margin: 6px 0 0;
 }
 
-/* Unpriced warning highlight */
-.settings-unpriced-warning-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--text-warning, #c65746);
-  font-weight: 500;
-}
-
 /* Responsive adjustments */
 @media (max-width: 640px) {
   .settings-section {
@@ -325,6 +497,17 @@
   }
   .settings-rates-grid {
     grid-template-columns: 1fr 1fr;
+  }
+  .settings-definition-ttl-row,
+  .settings-condition-combo,
+  .settings-definition-reasoning {
+    grid-template-columns: 1fr;
+  }
+  .settings-condition-editor {
+    padding: 8px;
+  }
+  .settings-condition-child {
+    padding-left: 6px;
   }
   .settings-table-filter-bar .settings-search-input {
     max-width: 100%;

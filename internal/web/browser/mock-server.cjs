@@ -132,8 +132,18 @@ function tokenKey(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex');
 }
 
-function rate(input, output, cacheRead, cacheWrite) {
-  return { input, output, cache_read: cacheRead, cache_write: cacheWrite };
+function rate(input, output, cacheRead, cacheWrite, reasoning = null, cacheWriteByTtl) {
+  const out = { input, output, cache_read: cacheRead, cache_write: cacheWrite, reasoning };
+  if (cacheWriteByTtl !== undefined) out.cache_write_by_ttl = cacheWriteByTtl;
+  return out;
+}
+
+function pricingDefinition(base, overrides = [], multipliers = []) {
+  return {
+    base: rate(base.input, base.output, base.cache_read, base.cache_write, base.reasoning ?? null, base.cache_write_by_ttl),
+    overrides,
+    multipliers
+  };
 }
 
 function createKey(id, label, overrides) {
@@ -212,7 +222,6 @@ function createRecords(now) {
         },
         cost_micro_usd: 125_000,
         price_source: 'auto',
-        rule_id: '',
         accounting_quality: 'complete'
       },
       fields || {}
@@ -233,7 +242,7 @@ function createRecords(now) {
       tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0, total: 0 },
       raw_usage: {},
       cost_micro_usd: 0,
-      price_source: 'unpriced',
+      price_source: 'zero',
       accounting_quality: 'unknown',
       trace_id: '<script>window.__observerXss=8</script>'
     }),
@@ -260,8 +269,7 @@ function createRecords(now) {
         cache_creation_input_tokens: 200
       },
       cost_micro_usd: 380_000,
-      price_source: 'rule',
-      rule_id: 'rule-night',
+      price_source: 'auto',
       accounting_quality: 'complete'
     }),
     record('req-004', 8, {
@@ -331,7 +339,7 @@ function createRecords(now) {
       tokens: { input: 300, output: 200, cache_read: 0, cache_write: 0, reasoning: 0, total: 500 },
       raw_usage: { input_tokens: 300, output_tokens: 200 },
       cost_micro_usd: 0,
-      price_source: 'unpriced',
+      price_source: 'zero',
       accounting_quality: 'unclassified'
     })
   ];
@@ -348,22 +356,30 @@ function createSettings() {
     daily_retention_days: 365,
     pricing: {
       auto: true,
+      source: 'models_dev_v2',
       prices: [
         {
           model: 'gpt-5-codex',
-          rates: rate(1_250_000, 10_000_000, 125_000, 1_250_000),
-          source: 'manual'
+          definition: pricingDefinition(
+            { input: 1_250_000, output: 10_000_000, cache_read: 125_000, cache_write: 1_250_000 },
+            [
+              {
+                id: 'long-context',
+                when: { context: { gt: 200000 } },
+                rates: { input: 2_500_000, output: 15_000_000 }
+              }
+            ],
+            [
+              {
+                id: 'flex-discount',
+                when: { serviceTier: ['flex'] },
+                factors: { input: '0.5', output: '0.5' }
+              }
+            ]
+          )
         }
       ],
-      rules: [
-        {
-          id: 'rule-night',
-          model: 'claude-opus-4-1',
-          input_tokens_gt: 1000,
-          time_range: '00:00-23:59',
-          rates: rate(3_000_000, 15_000_000, 300_000, 3_000_000)
-        }
-      ]
+      mappings: []
     }
   };
 }
@@ -689,7 +705,7 @@ function computeSummary(records, query) {
   function detail(rows) {
     const out = { detailed_requests: rows.length, complete_requests: 0,
       input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
-      reasoning_tokens: 0, latency_ms: 0, latency_samples: 0, ttft_ms: 0, ttft_samples: 0, unpriced_requests: 0 };
+      reasoning_tokens: 0, latency_ms: 0, latency_samples: 0, ttft_ms: 0, ttft_samples: 0 };
     for (const row of rows) {
       if (row.accounting_quality === 'complete') {
         out.complete_requests++;
@@ -697,7 +713,6 @@ function computeSummary(records, query) {
       }
       if (row.latency_ms > 0) { out.latency_ms += row.latency_ms; out.latency_samples++; }
       if (row.stream && row.ttft_ms > 0 && row.ttft_ms < row.latency_ms) { out.ttft_ms += row.ttft_ms; out.ttft_samples++; }
-      if (row.price_source === 'unpriced') out.unpriced_requests++;
     }
     return out;
   }
@@ -755,27 +770,38 @@ function requestView(state, url) {
 }
 
 function pricingSnapshot(state) {
-  // 目录快照允许同一模型存在多个 provider 的独立费率；手工价仍是 model-wide。
+  // 目录快照允许同一模型存在多个 provider 的独立定义；手工价按完整身份覆盖。
+  const manual = state.settings.pricing.prices.map((price) => ({
+    ...clone(price),
+    rates: clone(price.definition.base),
+    source: 'manual',
+    pricing_supported: true
+  }));
   const catalog = [
     {
       model: 'gpt-5-codex',
       provider: 'openai',
       rates: rate(1_000_000, 8_000_000, 100_000, 1_000_000),
-      source: 'auto'
+      definition: pricingDefinition({ input: 1_000_000, output: 8_000_000, cache_read: 100_000, cache_write: 1_000_000 }),
+      source: 'auto',
+      pricing_supported: true
     },
     {
       model: 'gpt-5-codex',
       provider: 'azure',
       rates: rate(1_500_000, 12_000_000, 150_000, 1_500_000),
-      source: 'auto'
+      definition: pricingDefinition({ input: 1_500_000, output: 12_000_000, cache_read: 150_000, cache_write: 1_500_000 }),
+      source: 'auto',
+      pricing_supported: true
     }
   ];
   return {
-    prices: clone(state.settings.pricing.prices).concat(catalog),
+    prices: manual.concat(catalog),
     last_sync: state.pricesLastSync,
     catalog_entries: state.catalogEntries,
     error: state.pricesError || '',
-    refreshing: false
+    refreshing: false,
+    source: state.settings.pricing.source
   };
 }
 
@@ -843,48 +869,224 @@ function normalizeKeySpec(body) {
   };
 }
 
-function validateRates(rates, name) {
+function ensureDecimalString(value, name) {
+  if (typeof value !== 'string' || value.length > 64 || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) {
+    throw failure(400, 'invalid_json', name + ' must be a non-negative decimal string');
+  }
+}
+
+function validateTtlMap(value, name) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length > 16) {
+    throw failure(400, 'invalid_json', name + ' must contain at most 16 tiers');
+  }
+  for (const [seconds, price] of Object.entries(value)) {
+    if (!/^[1-9]\d*$/.test(seconds) || !Number.isSafeInteger(Number(seconds))) {
+      throw failure(400, 'invalid_json', name + ' keys must be positive integer seconds');
+    }
+    ensureInteger(price, name + '.' + seconds, 0);
+  }
+}
+
+function validateCondition(condition, name, depth = 0, state = { nodes: 0 }) {
+  state.nodes += 1;
+  if (depth > 8 || state.nodes > 64) {
+    throw failure(400, 'invalid_json', name + ' exceeds the condition depth/node limit');
+  }
+  if (condition === null || typeof condition !== 'object' || Array.isArray(condition)) {
+    throw failure(400, 'invalid_json', name + ' must be an object');
+  }
+  rejectUnknown(condition, new Set(['context', 'serviceTier', 'date', 'time', 'all', 'any', 'not']), name);
+  if (condition.context !== undefined) {
+    const context = condition.context;
+    if (context === null || typeof context !== 'object' || Array.isArray(context)) {
+      throw failure(400, 'invalid_json', name + '.context must be an object');
+    }
+    rejectUnknown(context, new Set(['gt', 'gte', 'lt', 'lte']), name + '.context');
+    if (context.gt !== undefined && context.gte !== undefined) {
+      throw failure(400, 'invalid_json', name + '.context cannot set gt and gte together');
+    }
+    if (context.lt !== undefined && context.lte !== undefined) {
+      throw failure(400, 'invalid_json', name + '.context cannot set lt and lte together');
+    }
+    for (const field of ['gt', 'gte', 'lt', 'lte']) {
+      if (context[field] !== undefined) ensureInteger(context[field], name + '.context.' + field, 0);
+    }
+  }
+  if (condition.serviceTier !== undefined) {
+    if (!Array.isArray(condition.serviceTier) ||
+        condition.serviceTier.length === 0 ||
+        condition.serviceTier.length > 16 ||
+        new Set(condition.serviceTier).size !== condition.serviceTier.length ||
+        condition.serviceTier.some((tier) => typeof tier !== 'string' || !tier || tier.length > 128)) {
+      throw failure(400, 'invalid_json', name + '.serviceTier must be a nonempty unique string array');
+    }
+  }
+  if (condition.date !== undefined) {
+    const date = condition.date;
+    if (date === null || typeof date !== 'object' || Array.isArray(date)) {
+      throw failure(400, 'invalid_json', name + '.date must be an object');
+    }
+    rejectUnknown(date, new Set(['gte', 'lt']), name + '.date');
+    for (const field of ['gte', 'lt']) {
+      if (date[field] !== undefined && (typeof date[field] !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date[field]))) {
+        throw failure(400, 'invalid_json', name + '.date.' + field + ' must be YYYY-MM-DD');
+      }
+    }
+    if (date.gte && date.lt && date.gte >= date.lt) {
+      throw failure(400, 'invalid_json', name + '.date.gte must be before lt');
+    }
+  }
+  if (condition.time !== undefined) {
+    const time = condition.time;
+    if (time === null || typeof time !== 'object' || Array.isArray(time)) {
+      throw failure(400, 'invalid_json', name + '.time must be an object');
+    }
+    rejectUnknown(time, new Set(['start', 'end', 'timezone', 'weekdays']), name + '.time');
+    for (const field of ['start', 'end']) {
+      if (typeof time[field] !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time[field])) {
+        throw failure(400, 'invalid_json', name + '.time.' + field + ' must be HH:mm');
+      }
+    }
+    if (time.start === time.end) throw failure(400, 'invalid_json', name + '.time.start must differ from end');
+    if (typeof time.timezone !== 'string' || !time.timezone || time.timezone.length > 128) {
+      throw failure(400, 'invalid_json', name + '.time.timezone must be an IANA name');
+    }
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: time.timezone });
+    } catch {
+      throw failure(400, 'invalid_json', name + '.time.timezone must be an IANA name');
+    }
+    if (time.weekdays !== undefined &&
+        (!Array.isArray(time.weekdays) ||
+         time.weekdays.some((day) => !Number.isInteger(day) || day < 1 || day > 7))) {
+      throw failure(400, 'invalid_json', name + '.time.weekdays must contain integers 1..7');
+    }
+  }
+  for (const field of ['all', 'any']) {
+    if (condition[field] !== undefined) {
+      if (!Array.isArray(condition[field]) || condition[field].length === 0 || condition[field].length > 16) {
+        throw failure(400, 'invalid_json', name + '.' + field + ' must be a nonempty array of at most 16 items');
+      }
+      condition[field].forEach((child, index) =>
+        validateCondition(child, name + '.' + field + '[' + index + ']', depth + 1, state));
+    }
+  }
+  if (condition.not !== undefined) {
+    validateCondition(condition.not, name + '.not', depth + 1, state);
+  }
+}
+
+function validateRateBase(rates, name) {
   if (rates === null || typeof rates !== 'object' || Array.isArray(rates)) {
     throw failure(400, 'invalid_json', name + ' must be an object');
   }
-  rejectUnknown(rates, new Set(['input', 'output', 'cache_read', 'cache_write', 'reasoning']), name);
+  rejectUnknown(rates, new Set(['input', 'output', 'cache_read', 'cache_write', 'cache_write_by_ttl', 'reasoning']), name);
   for (const field of ['input', 'output', 'cache_read', 'cache_write']) {
     if (rates[field] === undefined) throw failure(400, 'invalid_json', name + '.' + field + ' is required');
     ensureInteger(rates[field], name + '.' + field, 0);
   }
+  if (rates.cache_write_by_ttl !== undefined) validateTtlMap(rates.cache_write_by_ttl, name + '.cache_write_by_ttl');
   if (rates.reasoning !== undefined && rates.reasoning !== null) {
     ensureInteger(rates.reasoning, name + '.reasoning', 0);
   }
+}
+
+function validateRatePatch(rates, name) {
+  if (rates === null || typeof rates !== 'object' || Array.isArray(rates)) {
+    throw failure(400, 'invalid_json', name + ' must be an object');
+  }
+  rejectUnknown(rates, new Set(['input', 'output', 'cache_read', 'cache_write', 'cache_write_by_ttl', 'reasoning']), name);
+  for (const field of ['input', 'output', 'cache_read', 'cache_write']) {
+    if (rates[field] !== undefined) ensureInteger(rates[field], name + '.' + field, 0);
+  }
+  if (rates.cache_write_by_ttl !== undefined) validateTtlMap(rates.cache_write_by_ttl, name + '.cache_write_by_ttl');
+  if (rates.reasoning !== undefined && rates.reasoning !== null) {
+    ensureInteger(rates.reasoning, name + '.reasoning', 0);
+  }
+}
+
+function validatePricingDefinition(definition, name) {
+  if (definition === null || typeof definition !== 'object' || Array.isArray(definition)) {
+    throw failure(400, 'invalid_json', name + ' must be an object');
+  }
+  rejectUnknown(definition, new Set(['base', 'overrides', 'multipliers']), name);
+  validateRateBase(definition.base, name + '.base');
+  if (!Array.isArray(definition.overrides) || !Array.isArray(definition.multipliers)) {
+    throw failure(400, 'invalid_json', name + '.overrides and multipliers must be arrays');
+  }
+  if (definition.overrides.length > 4096 || definition.multipliers.length > 4096) {
+    throw failure(400, 'invalid_json', name + ' has too many rules');
+  }
+  const overrideIds = new Set();
+  definition.overrides.forEach((entry, index) => {
+    const itemName = name + '.overrides[' + index + ']';
+    rejectUnknown(entry, new Set(['id', 'when', 'rates']), itemName);
+    if (typeof entry.id !== 'string' || !entry.id || entry.id.length > 1024) {
+      throw failure(400, 'invalid_json', itemName + '.id must be a nonempty string');
+    }
+    if (overrideIds.has(entry.id)) throw failure(400, 'invalid_json', itemName + '.id is duplicated');
+    overrideIds.add(entry.id);
+    validateCondition(entry.when, itemName + '.when');
+    validateRatePatch(entry.rates, itemName + '.rates');
+  });
+  const multiplierIds = new Set();
+  definition.multipliers.forEach((entry, index) => {
+    const itemName = name + '.multipliers[' + index + ']';
+    rejectUnknown(entry, new Set(['id', 'when', 'factors']), itemName);
+    if (typeof entry.id !== 'string' || !entry.id || entry.id.length > 1024) {
+      throw failure(400, 'invalid_json', itemName + '.id must be a nonempty string');
+    }
+    if (multiplierIds.has(entry.id)) throw failure(400, 'invalid_json', itemName + '.id is duplicated');
+    multiplierIds.add(entry.id);
+    validateCondition(entry.when, itemName + '.when');
+    if (entry.factors === null || typeof entry.factors !== 'object' || Array.isArray(entry.factors)) {
+      throw failure(400, 'invalid_json', itemName + '.factors must be an object');
+    }
+    rejectUnknown(entry.factors, new Set(['input', 'output', 'cache_read', 'cache_write', 'reasoning']), itemName + '.factors');
+    for (const field of ['input', 'output', 'cache_read', 'cache_write', 'reasoning']) {
+      if (entry.factors[field] !== undefined) ensureDecimalString(entry.factors[field], itemName + '.factors.' + field);
+    }
+  });
 }
 
 function validatePricing(pricing) {
   if (pricing === null || typeof pricing !== 'object' || Array.isArray(pricing)) {
     throw failure(400, 'invalid_json', 'pricing must be an object');
   }
-  rejectUnknown(pricing, new Set(['auto', 'prices', 'rules', 'mappings']), 'pricing');
+  rejectUnknown(pricing, new Set(['auto', 'source', 'prices', 'mappings']), 'pricing');
   if (typeof pricing.auto !== 'boolean') throw failure(400, 'invalid_json', 'pricing.auto must be a boolean');
-  if (!Array.isArray(pricing.prices) || !Array.isArray(pricing.rules)) {
-    throw failure(400, 'invalid_json', 'pricing.prices and pricing.rules must be arrays');
+  if (!['models_dev_v2', 'models_dev_v1'].includes(pricing.source)) {
+    throw failure(400, 'invalid_json', 'pricing.source must be models_dev_v2 or models_dev_v1');
   }
+  if (!Array.isArray(pricing.prices)) {
+    throw failure(400, 'invalid_json', 'pricing.prices must be an array');
+  }
+  if (pricing.mappings !== undefined && !Array.isArray(pricing.mappings)) {
+    throw failure(400, 'invalid_json', 'pricing.mappings must be an array');
+  }
+  const identities = new Set();
   pricing.prices.forEach((price, index) => {
-    rejectUnknown(price, new Set(['model', 'rates', 'source']), 'Price');
-    if (typeof price.model !== 'string' || price.model === '') {
-      throw failure(400, 'invalid_json', 'prices[' + index + '].model must be nonempty');
+    const name = 'prices[' + index + ']';
+    rejectUnknown(price, new Set(['model', 'provider', 'definition']), name);
+    if (typeof price.model !== 'string' || !price.model || price.model.length > 1024) {
+      throw failure(400, 'invalid_json', name + '.model must be a nonempty string');
     }
-    validateRates(price.rates, 'prices[' + index + '].rates');
+    if (price.provider !== undefined && (typeof price.provider !== 'string' || price.provider.length > 1024)) {
+      throw failure(400, 'invalid_json', name + '.provider must be a string');
+    }
+    const identity = price.model + '\u0000' + (price.provider || '');
+    if (identities.has(identity)) throw failure(400, 'invalid_json', name + ' duplicates a manual identity');
+    identities.add(identity);
+    validatePricingDefinition(price.definition, name + '.definition');
   });
-  pricing.rules.forEach((rule, index) => {
-    rejectUnknown(rule, new Set(['id', 'model', 'input_tokens_gt', 'time_range', 'rates']), 'Rule');
-    if (typeof rule.id !== 'string' || typeof rule.model !== 'string') {
-      throw failure(400, 'invalid_json', 'rules[' + index + '] requires id and model strings');
+  (pricing.mappings || []).forEach((mapping, index) => {
+    const name = 'mappings[' + index + ']';
+    rejectUnknown(mapping, new Set(['model', 'provider', 'catalog_model']), name);
+    for (const field of ['model', 'provider', 'catalog_model']) {
+      if (typeof mapping[field] !== 'string' || !mapping[field]) {
+        throw failure(400, 'invalid_json', name + '.' + field + ' must be a nonempty string');
+      }
     }
-    if (rule.input_tokens_gt !== undefined && rule.input_tokens_gt !== null) {
-      ensureInteger(rule.input_tokens_gt, 'rules[' + index + '].input_tokens_gt', 0);
-    }
-    if (rule.time_range !== undefined && typeof rule.time_range !== 'string') {
-      throw failure(400, 'invalid_json', 'rules[' + index + '].time_range must be a string');
-    }
-    validateRates(rule.rates, 'rules[' + index + '].rates');
   });
 }
 
@@ -1528,13 +1730,22 @@ function createServer(options) {
               (identity.provider !== undefined && (typeof identity.provider !== 'string' || identity.provider.length > 1024))) {
             throw failure(400, 'invalid_request', 'invalid model identity');
           }
-          const manual = state.settings.pricing.prices.find(price => price.model === identity.model);
+          const provider = identity.provider || '';
+          const manual = state.settings.pricing.prices.find(price =>
+            price.model === identity.model && (price.provider || '') === provider);
           const auto = state.settings.pricing.auto && ['gpt-5', 'gpt-5-mini'].includes(identity.model);
+          const autoBase = rate(1_000_000, 8_000_000, 0, 0, null);
+          const zeroDefinition = pricingDefinition({ input: 0, output: 0, cache_read: 0, cache_write: 0 });
+          const definition = manual
+            ? clone(manual.definition)
+            : auto ? pricingDefinition(autoBase) : zeroDefinition;
           return {
-            model: identity.model, provider: identity.provider || '',
-            rates: clone(manual ? manual.rates : auto ? rate(1_000_000, 8_000_000, 0, 0) : rate(0, 0, 0, 0)),
-            source: manual ? 'manual' : auto ? 'auto' : 'unpriced',
-            has_rules: state.settings.pricing.rules.some(rule => rule.model === identity.model),
+            model: identity.model,
+            provider,
+            rates: clone(definition.base),
+            definition,
+            source: manual ? 'manual' : auto ? 'auto' : 'zero',
+            pricing_supported: true
           };
         });
         sendJson(res, 200, { items });

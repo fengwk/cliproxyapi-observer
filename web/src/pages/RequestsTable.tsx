@@ -143,7 +143,7 @@ export function RequestsTable({
                     r.ttft_ms,
                     r.stream
                   );
-                  const priceSource = formatPriceSource(r.price_source, r.rule_id);
+                  const priceSource = formatPriceSource(r.price_source);
                   const isSuccess = !r.failed;
                   const complete = r.accounting_quality === 'complete';
 
@@ -470,11 +470,6 @@ export function RequestsTable({
                           <span className="requests-cost-val">
                             ${formatCostExact(g.cost_micro_usd)}
                           </span>
-                          {g.unpriced_requests ? (
-                            <span className="requests-source-sub is-warning">
-                              {g.unpriced_requests} 未定价
-                            </span>
-                          ) : null}
                         </div>
                       </td>
                     </tr>
