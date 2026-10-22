@@ -257,6 +257,7 @@ export interface RequestRecord {
   model: string;
   provider: string;
   auth_index: string;
+  account_name?: string;
   failed: boolean;
   status_code: number;
   stream: boolean;

@@ -200,6 +200,7 @@ function createRecords(now) {
         model: 'gpt-5-codex',
         provider: 'openai',
         auth_index: 'auth-openai-1',
+        account_name: '生产账户',
         failed: false,
         status_code: 200,
         stream: true,
@@ -235,6 +236,7 @@ function createRecords(now) {
       model: XSS.model,
       provider: XSS.provider,
       auth_index: XSS.authIndex,
+      account_name: '',
       failed: true,
       status_code: 500,
       latency_ms: 91,
@@ -251,6 +253,7 @@ function createRecords(now) {
       model: 'claude-opus-4-1',
       provider: 'anthropic',
       auth_index: 'auth-anthropic-1',
+      account_name: '生产账户',
       stream: false,
       latency_ms: 1502,
       ttft_ms: 0,
@@ -290,6 +293,7 @@ function createRecords(now) {
       model: 'gemini-2.5-pro',
       provider: 'google',
       auth_index: 'auth-google-1',
+      account_name: '研发账户',
       tokens: {
         input: 1800,
         output: 900,
@@ -314,12 +318,13 @@ function createRecords(now) {
       ttft_ms: 98,
       cost_micro_usd: 98_000
     }),
-    // 64 位十六进制 Key ID：UI 只显示 12 位前缀，title/复制值必须是完整 ID。
+    // 未解析 Key/账户：常规 UI 不展示内部标识。
     record('req-007', 3, {
       key_id: LONG_KEY_ID,
       model: 'log-keyid-fixture',
       provider: 'mock',
       auth_index: 'auth-mock-keyid',
+      account_name: '',
       latency_ms: 500,
       ttft_ms: 50,
       tokens: { input: 600, output: 400, cache_read: 0, cache_write: 0, reasoning: 0, total: 1000 },
@@ -334,6 +339,7 @@ function createRecords(now) {
       model: 'log-unclassified-fixture',
       provider: 'mock',
       auth_index: 'auth-mock-quality',
+      account_name: '',
       latency_ms: 320,
       ttft_ms: 40,
       tokens: { input: 300, output: 200, cache_read: 0, cache_write: 0, reasoning: 0, total: 500 },
@@ -890,7 +896,7 @@ function requestView(state, url) {
       const row = items[0];
       const keyed = view === 'key' || view === 'key_model';
       return { ...totals, key: id,
-        label: keyed ? state.keys.find(key => key.id === row.key_id)?.label || row.key_id || 'unknown' : id,
+        label: keyed ? state.keys.find(key => key.id === row.key_id)?.label || row.key_id || 'unknown' : view === 'account' ? row.account_name || id : id,
         model: view === 'model' || view === 'key_model' ? row.model : '',
         provider: view === 'provider' || view === 'model' || view === 'key_model' ? row.provider : '',
         key_id: keyed ? row.key_id : '', auth_index: view === 'account' ? row.auth_index : '' };
@@ -1798,6 +1804,7 @@ function createServer(options) {
         if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw failure(400, 'invalid_query', 'invalid limit');
         const search = (url.searchParams.get('search') || '').toLowerCase(), cursor = Buffer.from(url.searchParams.get('cursor') || '', 'base64url').toString();
         const values = new Map(state.records.filter(row => row[field]).map(row => [row[field], row[field]]));
+        if (field === 'auth_index') state.records.forEach(row => { if (row.auth_index) values.set(row.auth_index, row.account_name || row.auth_index); });
         if (field === 'key_id') state.keys.forEach(key => values.set(key.id, key.label || key.id));
         const all = [...values].filter(([value, label]) => value > cursor && (value.toLowerCase().includes(search) || label.toLowerCase().includes(search))).sort(([a], [b]) => a.localeCompare(b));
         const items = all.slice(0, limit).map(([value, label]) => ({ value, label }));

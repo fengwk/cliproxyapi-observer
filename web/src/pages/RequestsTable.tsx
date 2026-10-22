@@ -1,4 +1,5 @@
 import React from 'react';
+import { accountDisplay } from './RequestsHelpers';
 import type { RequestRecord, RequestViewGroup, Key } from '../lib/types';
 import type { ViewTab } from './RequestsHelpers';
 import {
@@ -172,7 +173,6 @@ export function RequestsTable({
                           <div className="requests-key-row">
                             <span
                               className="requests-key-name"
-                              title={keyInfo.fullId}
                             >
                               {keyInfo.label}
                             </span>
@@ -191,8 +191,8 @@ export function RequestsTable({
                           <span className="requests-primary-text">
                             {r.provider || '—'}
                           </span>
-                          <span className="requests-subtext" title={r.auth_index}>
-                            {r.auth_index || '—'}
+                          <span className="requests-subtext">
+                            {accountDisplay(r.auth_index, r.account_name)}
                           </span>
                         </div>
                       </td>
@@ -280,7 +280,7 @@ export function RequestsTable({
                           variant="secondary"
                           className="cpa-btn-sm"
                           onClick={() => onOpenDetail(r.id)}
-                          aria-label={`查看请求详情 ${r.id}`}
+                          aria-label="查看请求详情"
                         >
                           查看
                         </Button>
@@ -357,7 +357,7 @@ export function RequestsTable({
                     groupLabel = (
                       <div className="requests-cell-stacked">
                         <div className="requests-key-row">
-                          <span className="requests-key-name" title={kInfo.fullId}>
+                          <span className="requests-key-name">
                             {kInfo.label}
                           </span>
                           {kInfo.isDeleted && (
@@ -370,11 +370,11 @@ export function RequestsTable({
                     );
                   } else if (view === 'account') {
                     const accountId = g.auth_index || g.key;
-                    const accountName = g.label || accountId || '未归属';
+                    const accountName = accountDisplay(accountId, g.label);
                     groupLabel = (
                       <span
                         className="requests-primary-text requests-account-name"
-                        title={accountId ? `${accountName}\nAuthIndex: ${accountId}` : accountName}
+                        title={accountName}
                       >
                         {accountName}
                       </span>

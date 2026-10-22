@@ -9,6 +9,7 @@ import type {
   FacetItem,
 } from '../lib/types';
 import { errorMessage } from '../lib/format';
+import { accountDisplay } from './RequestsHelpers';
 import { Button, Notice, Select, type SelectOption } from '../components/ui';
 import {
   type FilterState,
@@ -502,7 +503,7 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
       if (k && k.id && !seen.has(k.id)) {
         seen.add(k.id);
         const isDeleted = Boolean(k.deleted_at);
-        const namePart = k.label || (k.id.length === 64 ? `${k.id.slice(0, 12)}…` : k.id);
+        const namePart = k.label || '未命名 Key';
         const label = isDeleted ? `${namePart} (已删除)` : namePart;
         opts.push({ value: k.id, label });
       }
@@ -511,11 +512,7 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
     for (const f of facetKeys) {
       if (f.value && !seen.has(f.value)) {
         seen.add(f.value);
-        const label = f.label
-          ? f.label
-          : f.value.length === 64
-          ? `${f.value.slice(0, 12)}…`
-          : f.value;
+        const label = f.label && f.label !== f.value ? f.label : 'Key 名称不可用';
         opts.push({ value: f.value, label });
       }
     }
@@ -524,7 +521,7 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
       const kId = draftFilters.key_id;
       opts.push({
         value: kId,
-        label: kId.length === 64 ? `未知 Key (${kId.slice(0, 12)}…)` : `未知 Key (${kId})`,
+        label: 'Key 名称不可用',
       });
     }
 
@@ -558,12 +555,12 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
     for (const a of facetAccounts) {
       if (a.value && !seen.has(a.value)) {
         seen.add(a.value);
-        opts.push({ value: a.value, label: a.label || a.value });
+        opts.push({ value: a.value, label: accountDisplay(a.value, a.label) });
       }
     }
 
     if (draftFilters.auth_index && !seen.has(draftFilters.auth_index)) {
-      opts.push({ value: draftFilters.auth_index, label: draftFilters.auth_index });
+      opts.push({ value: draftFilters.auth_index, label: accountDisplay(draftFilters.auth_index) });
     }
 
     return opts;
