@@ -147,23 +147,28 @@ export function RequestsDetailModal({
               <div className="requests-detail-pane" data-testid="detail-tab-summary">
                 {/* Basic Info Grid */}
                 <div className="requests-detail-grid">
-                  <details>
+                  <details style={{ gridColumn: '1 / -1', overflowWrap: 'anywhere' }}>
                     <summary>技术信息</summary>
                     <div>账户标识：{record.auth_index || '—'}</div>
                     <div>Key 标识：{record.key_id || '—'}</div>
                     <div>记账质量原始码：{record.accounting_quality || '—'}</div>
                     <div>采集原因原始码：{detail.capture_reason || '—'}</div>
-                  <div className="requests-detail-item">
-                    <span className="requests-detail-item-label">请求标识</span>
-                    <span className="requests-detail-item-val font-mono">{record.id}</span>
-                  </div>
-                  <div className="requests-detail-item">
-                    <span className="requests-detail-item-label">追踪标识</span>
-                    <span className="requests-detail-item-val font-mono">
-                      {record.trace_id || '—'}
-                    </span>
-                  </div>
-                    <Button variant="ghost" onClick={() => copyToClipboard(record.key_id, 'Key 标识')}>复制 Key 标识</Button>
+                    <div>定价来源原始码：{record.price_source || '—'}</div>
+                    <div className="requests-detail-item">
+                      <span className="requests-detail-item-label">请求标识</span>
+                      <span className="requests-detail-item-val font-mono">{record.id}</span>
+                    </div>
+                    <div className="requests-detail-item">
+                      <span className="requests-detail-item-label">追踪标识</span>
+                      <span className="requests-detail-item-val font-mono">
+                        {record.trace_id || '—'}
+                      </span>
+                    </div>
+                    {record.key_id && (
+                      <Button variant="ghost" onClick={() => copyToClipboard(record.key_id, 'Key 标识')}>
+                        复制 Key 标识
+                      </Button>
+                    )}
                   </details>
                   <div className="requests-detail-item">
                     <span className="requests-detail-item-label">时间 (本地)</span>

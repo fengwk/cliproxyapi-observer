@@ -51,6 +51,7 @@ type recordView struct {
 	Model               string     `json:"model"`
 	Provider            string     `json:"provider"`
 	AuthIndex           string     `json:"auth_index"`
+	AccountName         string     `json:"account_name,omitempty"`
 	PriceSource         string     `json:"price_source"`
 	ResponseServiceTier string     `json:"response_service_tier,omitempty"`
 	CostMicroUSD        int64      `json:"cost_micro_usd"`

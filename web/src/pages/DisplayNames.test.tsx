@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { accountDisplay, resolveKeyDisplay, captureReasonLabel, accountingQualityLabel, blockedReasonLabel } from './RequestsHelpers';
+import { accountDisplay, resolveKeyDisplay, captureReasonLabel, accountingQualityLabel, blockedReasonLabel, formatPriceSource } from './RequestsHelpers';
 import { RequestsDetailModal } from './RequestsDetailModal';
 import type { Detail, Key } from '../lib/types';
 
@@ -8,6 +8,7 @@ describe('friendly identities', () => {
   // Display names never replace the identity used by queries or row keys.
   it('uses names and readable fallbacks without exposing account indices', () => {
     expect(accountDisplay('private-a', '生产账户')).toBe('生产账户');
+    expect(accountDisplay('private-a', '  生产账户  ')).toBe('生产账户');
     expect(accountDisplay('private-b', '生产账户')).toBe('生产账户');
     expect(accountDisplay('private-a', 'private-a')).toBe('账户名称不可用');
     expect(accountDisplay('private-a')).toBe('账户名称不可用');
@@ -30,7 +31,9 @@ describe('friendly identities', () => {
     expect(captureReasonLabel('trace_collision')).toBe('追踪关联冲突');
     expect(captureReasonLabel('future-code')).toBe('未知采集原因');
     expect(blockedReasonLabel('pending accounting')).toBe('等待记账完成');
+    expect(blockedReasonLabel('accounting interruption: explicit acknowledgement required')).toBe('记账过程被中断，需要明确确认恢复');
     expect(blockedReasonLabel('future-code')).toBe('未知阻断原因');
+    expect(formatPriceSource('future-code').label).toBe('未知定价来源');
   });
 
   // Native details is closed initially; identifiers remain available for diagnostics.

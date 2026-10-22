@@ -1,29 +1,50 @@
 import type { Key } from '../lib/types';
 import { formatUSD, formatUTCOffset, getBrowserTimeZone } from '../lib/format';
+
 export function accountDisplay(index?: string, name?: string): string {
-  return name?.trim() && name.trim() !== index ? name : index ? '账户名称不可用' : '未关联账户';
+  const displayName = name?.trim();
+  return displayName && displayName !== index
+    ? displayName
+    : index ? '账户名称不可用' : '未关联账户';
 }
 
 export function accountingQualityLabel(value: string): string {
-  return ({ complete: '完整', unclassified: '未分类', inconsistent: '数据不一致' } as Record<string, string>)[value] || '未知记账质量';
+  const labels: Record<string, string> = {
+    complete: '完整',
+    unclassified: '未分类',
+    inconsistent: '数据不一致',
+  };
+  return labels[value] || '未知记账质量';
 }
 
 export function captureReasonLabel(value: string): string {
-  return ({
-    capture_off: '采集未开启', headers_only: '仅采集请求头', body_too_large: '请求体过大',
-    headers_too_large: '请求头过大', unsupported_body: '请求体格式不支持', storage_limit: '超过存储限制',
-    capacity: '存储容量淘汰', expired: '已过期', purged: '已清空', missing: '未捕获',
-    redacted: '已脱敏', trace_collision: '追踪关联冲突',
-  } as Record<string, string>)[value] || '未知采集原因';
+  const labels: Record<string, string> = {
+    capture_off: '采集未开启',
+    headers_only: '仅采集请求头',
+    body_too_large: '请求体过大',
+    headers_too_large: '请求头过大',
+    unsupported_body: '请求体格式不支持',
+    storage_limit: '超过存储限制',
+    capacity: '存储容量淘汰',
+    expired: '已过期',
+    purged: '已清空',
+    missing: '未捕获',
+    redacted: '已脱敏',
+    trace_collision: '追踪关联冲突',
+  };
+  return labels[value] || '未知采集原因';
 }
 
 export function blockedReasonLabel(value: string): string {
-  return ({
+  const labels: Record<string, string> = {
     'unknown accounting: explicit acknowledgement required': '记账状态不确定，需要明确确认恢复',
     'pending accounting': '等待记账完成',
     'accounting callback failed; explicit recovery required': '记账回调失败，需要手动恢复',
-  } as Record<string, string>)[value] || '未知阻断原因';
+    'accounting interruption: explicit acknowledgement required': '记账过程被中断，需要明确确认恢复',
+  };
+  return labels[value] || '未知阻断原因';
 }
+
 export interface FilterState {
   from: string;
   to: string;
@@ -221,7 +242,7 @@ export function formatPriceSource(source?: string): { label: string; isWarning: 
   if (source === 'catalog' || source === 'auto') {
     return { label: '自动目录', isWarning: false };
   }
-  return { label: source, isWarning: false };
+  return { label: '未知定价来源', isWarning: false };
 }
 
 /**

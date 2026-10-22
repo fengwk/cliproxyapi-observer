@@ -66,8 +66,8 @@ func (m *kimiAccountUpstream) snapshot() (int, []string) {
 
 // A real CPA host reads one fake kimi auth file, routes kimi-k2 to a local
 // upstream, and exposes the same auth index/name through the native metadata
-// bridge. Account views and auth_index facets must show the file name while
-// retaining the AuthIndex identity and aggregate.
+// bridge. All request read surfaces, account groups and auth_index facets must
+// show the file name while retaining the AuthIndex identity and aggregate.
 func TestAccountNamesNativeMetadata(t *testing.T) {
 	dir := t.TempDir()
 	authDir := filepath.Join(dir, "auths")
@@ -146,8 +146,25 @@ func TestAccountNamesNativeMetadata(t *testing.T) {
 	if record.AuthIndex != authIndex || record.Model != kimiModel {
 		t.Fatalf("usage record identity = auth_index %q model %q, want %q/%q", record.AuthIndex, record.Model, authIndex, kimiModel)
 	}
+	if record.AccountName != kimiAccountFile {
+		t.Fatalf("request account name = %q, want %q", record.AccountName, kimiAccountFile)
+	}
 
 	date := time.Now().UTC().Format("2006-01-02")
+	var records struct {
+		Records []recordView `json:"records"`
+	}
+	h.api(t, http.MethodGet, "/requests/view?from_date="+date+"&to_date="+date+"&view=requests", nil, http.StatusOK, &records)
+	if len(records.Records) != 1 || records.Records[0].AccountName != kimiAccountFile || records.Records[0].AuthIndex != authIndex {
+		t.Fatalf("request view account projection = %+v", records.Records)
+	}
+	var detail struct {
+		Record recordView `json:"record"`
+	}
+	h.api(t, http.MethodGet, "/requests/detail?id="+record.ID, nil, http.StatusOK, &detail)
+	if detail.Record.AccountName != kimiAccountFile || detail.Record.AuthIndex != authIndex || detail.Record.ID != record.ID {
+		t.Fatalf("request detail account projection = %+v", detail.Record)
+	}
 	var view struct {
 		Groups []struct {
 			Key       string `json:"key"`
