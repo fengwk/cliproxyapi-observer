@@ -151,12 +151,12 @@ func TestCrashRecoveryIsKeyScopedAndRequiresAcknowledgment(t *testing.T) {
 	// Pin both the client alias and the upstream identity to the same exact
 	// integer rate so the fixture always costs 6+4+5 = 15 micro-USD.
 	applied := acceptancePutPricing(t, h, acceptancePricing{
-		Auto: false,
+		Auto:   false,
+		Source: "models_dev_v2",
 		Prices: []acceptancePrice{
-			{Model: modelName, Rates: acceptanceRatesAll(1_000_000), Source: "manual"},
-			{Model: upstreamModel, Rates: acceptanceRatesAll(1_000_000), Source: "manual"},
+			acceptanceManual(modelName, acceptanceProvider, 1_000_000),
+			acceptanceManual(upstreamModel, acceptanceProvider, 1_000_000),
 		},
-		Rules: []acceptanceRule{},
 	})
 	if applied.Auto || len(applied.Prices) != 2 {
 		t.Fatalf("saved pricing = %+v, want two manual model prices", applied)

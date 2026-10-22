@@ -61,7 +61,7 @@ const (
 	// priceRefreshTimeout bounds one on-demand catalog refresh.
 	priceRefreshTimeout = 20 * time.Second
 	// managementSchemaVersion is the released storage/management schema.
-	managementSchemaVersion = 2
+	managementSchemaVersion = 3
 
 	// cspPolicy keeps the management shell same-origin frameable while allowing
 	// only its own script, style and fetch sources.

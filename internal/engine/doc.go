@@ -1,4 +1,4 @@
-// Package engine implements the clean-slate Observer schema 2 database.
+// Package engine implements the clean-slate Observer schema 3 database.
 //
 // Usage is priced at receipt. Its immutable quote, execution deduplication,
 // independent Key counters, compressed raw row and daily aggregate commit in

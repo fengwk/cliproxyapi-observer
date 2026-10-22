@@ -85,7 +85,7 @@ test('management auth: bearer required and errors use the standard envelope', as
 
     const ok = await json(server, '/health');
     assert.equal(ok.res.status, 200);
-    assert.equal(ok.body.schema_version, 2);
+    assert.equal(ok.body.schema_version, 3);
     assert.equal(typeof ok.body.version, 'string');
     for (const field of ['database_bytes', 'dropped_captures', 'pending_usage', 'active_requests']) {
       assert.equal(typeof ok.body[field], 'number', field);

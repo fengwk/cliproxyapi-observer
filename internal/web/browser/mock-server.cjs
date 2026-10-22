@@ -813,7 +813,7 @@ function health(state) {
     active_requests: 1,
     last_error: '',
     version: '0.6.0-test',
-    schema_version: 2
+    schema_version: 3
   };
 }
 

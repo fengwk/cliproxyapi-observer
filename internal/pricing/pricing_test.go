@@ -432,3 +432,25 @@ func TestDefaultConfigShape(t *testing.T) {
 		t.Fatal(string(raw))
 	}
 }
+
+// Recursive v2 conditions are bounded while parsing, before validCondition can
+// run; otherwise a deeply nested 32 MiB catalog could exhaust the stack.
+func TestV2ConditionParseBounds(t *testing.T) {
+	valid := `{"context":{"gt":1}}`
+	for i := 0; i < maxConditionDepth; i++ {
+		valid = `{"not":` + valid + `}`
+	}
+	if _, ok := parseV2Condition([]byte(valid)); !ok {
+		t.Fatal("condition at depth limit rejected")
+	}
+	tooDeep := `{"not":` + valid + `}`
+	if _, ok := parseV2Condition([]byte(tooDeep)); ok {
+		t.Fatal("condition beyond depth limit accepted")
+	}
+
+	branch := `{"all":[` + strings.Repeat(`{"context":{"gt":1}},`, 15) + `{"context":{"gt":1}}]}`
+	nodeHeavy := `{"all":[` + strings.Repeat(branch+`,`, 3) + branch + `]}`
+	if _, ok := parseV2Condition([]byte(nodeHeavy)); ok {
+		t.Fatal("condition beyond node limit accepted")
+	}
+}

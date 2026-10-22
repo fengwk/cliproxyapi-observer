@@ -187,12 +187,12 @@ func TestGeminiCountTokensBypassesExhaustedQuotaAndConcurrency(t *testing.T) {
 
 	// A complete OpenAI fixture execution costs exactly 15 micro-USD.
 	acceptancePutPricing(t, h, acceptancePricing{
-		Auto: false,
+		Auto:   false,
+		Source: "models_dev_v2",
 		Prices: []acceptancePrice{
-			{Model: modelName, Rates: acceptanceRatesAll(1_000_000)},
-			{Model: upstreamModel, Rates: acceptanceRatesAll(1_000_000)},
+			acceptanceManual(modelName, acceptanceProvider, 1_000_000),
+			acceptanceManual(upstreamModel, acceptanceProvider, 1_000_000),
 		},
-		Rules: []acceptanceRule{},
 	})
 
 	status, body := h.infer(t, created.Secret, false)

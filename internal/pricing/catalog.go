@@ -880,6 +880,16 @@ func factorString(raw json.RawMessage) (string, bool) {
 }
 
 func parseV2Condition(raw json.RawMessage) (Condition, bool) {
+	return parseV2ConditionDepth(raw, 0, new(int))
+}
+
+// parseV2ConditionDepth bounds recursion before decoding a condition so a
+// hostile 32 MiB catalog cannot exhaust the stack before validCondition runs.
+func parseV2ConditionDepth(raw json.RawMessage, depth int, nodes *int) (Condition, bool) {
+	*nodes++
+	if depth > maxConditionDepth || *nodes > maxConditionNodes {
+		return Condition{}, false
+	}
 	fields, ok := strictKeys(raw, map[string]bool{
 		"context": true, "service_tier": true, "date": true, "utc_days": true,
 		"utc_hours": true, "all": true, "any": true, "not": true,
@@ -989,21 +999,21 @@ func parseV2Condition(raw json.RawMessage) (Condition, bool) {
 		cond.Time = &TimeCondition{Start: start, End: end, Timezone: "UTC", Weekdays: weekdays}
 	}
 	if rawAll, ok := fields["all"]; ok {
-		children, ok := parseConditionList(rawAll)
+		children, ok := parseConditionList(rawAll, depth+1, nodes)
 		if !ok {
 			return Condition{}, false
 		}
 		cond.All = children
 	}
 	if rawAny, ok := fields["any"]; ok {
-		children, ok := parseConditionList(rawAny)
+		children, ok := parseConditionList(rawAny, depth+1, nodes)
 		if !ok {
 			return Condition{}, false
 		}
 		cond.Any = children
 	}
 	if rawNot, ok := fields["not"]; ok {
-		child, ok := parseV2Condition(rawNot)
+		child, ok := parseV2ConditionDepth(rawNot, depth+1, nodes)
 		if !ok {
 			return Condition{}, false
 		}
@@ -1041,14 +1051,14 @@ func stringListCondition(fields map[string]json.RawMessage) ([]string, bool) {
 	return uniqueStrings(out), true
 }
 
-func parseConditionList(raw json.RawMessage) ([]Condition, bool) {
+func parseConditionList(raw json.RawMessage, depth int, nodes *int) ([]Condition, bool) {
 	var elements []json.RawMessage
 	if json.Unmarshal(raw, &elements) != nil || len(elements) > maxConditionList {
 		return nil, false
 	}
 	out := make([]Condition, 0, len(elements))
 	for _, element := range elements {
-		cond, ok := parseV2Condition(element)
+		cond, ok := parseV2ConditionDepth(element, depth, nodes)
 		if !ok {
 			return nil, false
 		}

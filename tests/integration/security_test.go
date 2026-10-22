@@ -176,9 +176,9 @@ func TestQuotaWindowsResetAndModelAuthorization(t *testing.T) {
 		t.Run(window, func(t *testing.T) {
 			h := newHarness(t)
 			acceptancePutPricing(t, h, acceptancePricing{Prices: []acceptancePrice{
-				{Model: modelName, Rates: acceptanceRatesAll(1_000_000)},
-				{Model: upstreamModel, Rates: acceptanceRatesAll(1_000_000)},
-			}, Rules: []acceptanceRule{}})
+				acceptanceManual(modelName, acceptanceProvider, 1_000_000),
+				acceptanceManual(upstreamModel, acceptanceProvider, 1_000_000),
+			}})
 			spec := validSpec()
 			switch window {
 			case "five_hour":

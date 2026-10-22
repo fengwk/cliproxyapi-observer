@@ -11,7 +11,7 @@ import (
 )
 
 // Exercise custom credentials through the actual host/native ABI, including
-// invalid rotation rollback, stable accounting and schema2 process restart.
+// invalid rotation rollback, stable accounting and schema3 process restart.
 func TestCustomKeysAndPreviewThroughNativeHost(t *testing.T) {
 	h := newHarness(t)
 	secret, next := "local-custom-key-exact-123456!", "local-replacement-key-exact-123456!"
@@ -25,9 +25,9 @@ func TestCustomKeysAndPreviewThroughNativeHost(t *testing.T) {
 		t.Fatal("custom credential was normalized")
 	}
 	acceptancePutPricing(t, h, acceptancePricing{Prices: []acceptancePrice{
-		{Model: modelName, Rates: acceptanceRatesAll(1_000_000)},
-		{Model: upstreamModel, Rates: acceptanceRatesAll(1_000_000)},
-	}, Rules: []acceptanceRule{}})
+		acceptanceManual(modelName, acceptanceProvider, 1_000_000),
+		acceptanceManual(upstreamModel, acceptanceProvider, 1_000_000),
+	}})
 	acceptanceInferAndAwait(t, h, secret, map[string]struct{}{})
 	before := browserSnapshot(t, h)
 	query := "?id=" + url.QueryEscape(created.Key.ID)
@@ -40,12 +40,12 @@ func TestCustomKeysAndPreviewThroughNativeHost(t *testing.T) {
 		h.api(t, "POST", "/keys", map[string]any{"enabled": true, "secret": invalid}, 400, nil)
 	}
 	browserAssertManagementUnchanged(t, h, before)
-	preview := map[string]any{"models": []map[string]string{{"model": modelName, "provider": ""}, {"model": "unpriced-local"}}}
+	preview := map[string]any{"models": []map[string]string{{"model": modelName, "provider": acceptanceProvider}, {"model": "unpriced-local"}}}
 	var prices struct {
 		Items []struct{ Model, Source string } `json:"items"`
 	}
 	h.api(t, "POST", "/prices/preview", preview, 200, &prices)
-	if len(prices.Items) != 2 || prices.Items[0].Source != "manual" || prices.Items[1].Source != "unpriced" {
+	if len(prices.Items) != 2 || prices.Items[0].Source != "manual" || prices.Items[1].Source != "zero" {
 		t.Fatal("native preview source is misleading", prices)
 	}
 	browserAssertManagementUnchanged(t, h, before)

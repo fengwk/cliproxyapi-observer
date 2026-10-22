@@ -44,19 +44,19 @@ type tokensView struct {
 	Total      int64 `json:"total"`
 }
 type recordView struct {
-	Time         time.Time  `json:"time"`
-	ID           string     `json:"id"`
-	TraceID      string     `json:"trace_id"`
-	KeyID        string     `json:"key_id"`
-	Model        string     `json:"model"`
-	Provider     string     `json:"provider"`
-	AuthIndex    string     `json:"auth_index"`
-	PriceSource  string     `json:"price_source"`
-	RuleID       string     `json:"rule_id"`
-	CostMicroUSD int64      `json:"cost_micro_usd"`
-	Failed       bool       `json:"failed"`
-	Stream       bool       `json:"stream"`
-	Tokens       tokensView `json:"tokens"`
+	Time                time.Time  `json:"time"`
+	ID                  string     `json:"id"`
+	TraceID             string     `json:"trace_id"`
+	KeyID               string     `json:"key_id"`
+	Model               string     `json:"model"`
+	Provider            string     `json:"provider"`
+	AuthIndex           string     `json:"auth_index"`
+	PriceSource         string     `json:"price_source"`
+	ResponseServiceTier string     `json:"response_service_tier,omitempty"`
+	CostMicroUSD        int64      `json:"cost_micro_usd"`
+	Failed              bool       `json:"failed"`
+	Stream              bool       `json:"stream"`
+	Tokens              tokensView `json:"tokens"`
 }
 type requestPage struct {
 	Items    []recordView `json:"items"`

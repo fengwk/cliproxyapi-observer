@@ -21,9 +21,9 @@ func TestFailoverExecutionsAndTerminalFailures(t *testing.T) {
 			h := newHarnessWith(t, hostOptions{TwoUpstreams: true})
 			created := h.createKey(t, validSpec())
 			acceptancePutPricing(t, h, acceptancePricing{Prices: []acceptancePrice{
-				{Model: modelName, Rates: acceptanceRatesAll(1_000_000)},
-				{Model: upstreamModel, Rates: acceptanceRatesAll(1_000_000)},
-			}, Rules: []acceptanceRule{}})
+				acceptanceManual(modelName, acceptanceProvider, 1_000_000),
+				acceptanceManual(upstreamModel, acceptanceProvider, 1_000_000),
+			}})
 			n := 1
 			if terminal {
 				n = 100

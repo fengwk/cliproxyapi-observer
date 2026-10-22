@@ -3,21 +3,21 @@
 package integration
 
 import (
+	"bytes"
 	"net/http"
-	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
+	"strings"
 	"testing"
-	"time"
 )
 
 const upgradeBaseline = "37a2468f055c698158e50cde9b1758a8417e487e"
 
 // Build the immutable prior release and create an actual nonempty schema2 DB
-// with its own writer. The candidate must preserve credentials, fixed costs,
-// old capture envelopes and detailed backfill across two real-host restarts.
-func TestUpgradeFromActualV070PreservesLedgerAndCredentials(t *testing.T) {
+// with its own writer. The new schema must refuse it without migration and
+// without changing a byte of the existing database.
+func TestUpgradeRejectsActualV070DatabaseWithoutMutation(t *testing.T) {
 	root, err := repoRoot()
 	if err != nil {
 		t.Fatal(err)
@@ -35,8 +35,8 @@ func TestUpgradeFromActualV070PreservesLedgerAndCredentials(t *testing.T) {
 	if err := buildPlugin(source, build); err != nil {
 		t.Fatal(err)
 	}
-	// These tests are deliberately serial. Restore the shared candidate path
-	// immediately after copying the old library into this isolated host.
+	// Restore the shared candidate path immediately after copying the old
+	// library into this isolated host.
 	h := func() *harness {
 		candidate := pluginBuildRoot
 		pluginBuildRoot = build
@@ -45,83 +45,49 @@ func TestUpgradeFromActualV070PreservesLedgerAndCredentials(t *testing.T) {
 	}()
 	created := h.createKey(t, validSpec())
 	settings := acceptanceGetSettings(t, h)
-	if _, present := settings["capture_mode"]; present {
-		t.Fatal("baseline is not the old writer")
+	// The baseline only understands the old schema-2 pricing contract.
+	settings["pricing"] = map[string]any{
+		"auto": false,
+		"prices": []any{map[string]any{"model": upstreamModel, "rates": map[string]any{
+			"input": 1_000_000, "output": 1_000_000, "cache_read": 1_000_000, "cache_write": 1_000_000,
+		}}},
+		"rules": []any{},
 	}
-	settings["capture_enabled"] = true
-	settings["pricing"] = acceptancePricing{Auto: false, Prices: []acceptancePrice{
-		{Model: upstreamModel, Rates: acceptanceRatesAll(1_000_000), Source: "manual"},
-	}, Rules: []acceptanceRule{}}
-	h.api(t, http.MethodPut, "/settings", settings, 200, nil)
+	h.api(t, http.MethodPut, "/settings", settings, http.StatusOK, nil)
 	known := map[string]struct{}{}
 	before := acceptanceInferAndAwait(t, h, created.Secret, known)
 	acceptanceAssertCost(t, before, 15, "manual")
 	h.awaitGracefulRestartReady(t, 1)
-	path := "/requests/detail?id=" + url.QueryEscape(before.ID)
-	var oldDetail struct {
-		CaptureStatus string `json:"capture_status"`
-		Body          any    `json:"body"`
-	}
-	h.await(t, "old writer has durable content", func() bool {
-		h.api(t, http.MethodGet, path, nil, 200, &oldDetail)
-		return oldDetail.Body != nil
-	})
-	beforeKey := h.keys(t)[0]
 	h.Stop()
 	if err := h.waitError(); err != nil {
 		t.Fatal("old host did not stop gracefully", err)
 	}
-	if err := installPlugin(filepath.Join(h.dir, "plugins")); err != nil {
-		t.Fatal(err)
-	}
-	h, err = h.restartPreservingConfig(t)
+	path := h.dbPath
+	oldDB, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	afterKey := h.keys(t)[0]
-	if afterKey.ID != beforeKey.ID || afterKey.Used != beforeKey.Used || afterKey.BlockedReason != "" {
-		t.Fatal("upgrade changed key identity/accounting", beforeKey, afterKey)
+	if len(oldDB) == 0 {
+		t.Fatal("baseline did not write a nonempty database")
 	}
-	if got := acceptanceRecordByID(t, h, before.ID); got != before {
-		t.Fatal("upgrade changed the saved record", before, got)
+
+	if err = installPlugin(filepath.Join(h.dir, "plugins")); err != nil {
+		t.Fatal(err)
 	}
-	var upgraded struct {
-		Body          any    `json:"body"`
-		HeadersStatus string `json:"headers_status"`
-		BodyStatus    string `json:"body_status"`
+	_, startErr := h.restartPreservingConfig(t)
+	if startErr == nil {
+		t.Fatal("candidate accepted a schema2 database")
 	}
-	h.api(t, http.MethodGet, path, nil, 200, &upgraded)
-	if !reflect.DeepEqual(oldDetail.Body, upgraded.Body) || upgraded.HeadersStatus == "" || upgraded.BodyStatus == "" {
-		t.Fatal("legacy content envelope not preserved", oldDetail, upgraded)
+	if !strings.Contains(startErr.Error(), "unsupported_schema") &&
+		!strings.Contains(startErr.Error(), "unsupported observer") &&
+		!strings.Contains(startErr.Error(), "storage unavailable") {
+		t.Fatalf("candidate failed for an unexpected reason: %v", startErr)
 	}
-	var view struct {
-		Summary struct {
-			Requests int64 `json:"requests"`
-			Cost     int64 `json:"cost_micro_usd"`
-			Detailed int64 `json:"detailed_requests"`
-		} `json:"summary"`
-	}
-	date := time.Now().UTC().Format("2006-01-02")
-	route := "/requests/view?from_date=" + date + "&to_date=" + date
-	h.api(t, http.MethodGet, route, nil, 200, &view)
-	if view.Summary.Requests != 1 || view.Summary.Cost != 15 || view.Summary.Detailed != 1 {
-		t.Fatal("upgrade backfill duplicated totals or missed surviving detail", view)
-	}
-	acceptancePutPricing(t, h, acceptancePricing{Auto: false, Prices: []acceptancePrice{
-		{Model: before.Model, Rates: acceptanceRatesAll(2_000_000), Source: "manual"},
-	}, Rules: []acceptanceRule{}})
-	if got := acceptanceRecordByID(t, h, before.ID); got != before {
-		t.Fatal("price edit repriced history")
-	}
-	next := acceptanceInferAndAwait(t, h, created.Secret, known)
-	acceptanceAssertCost(t, next, 30, "manual") // the exact old secret still authenticates
-	h.awaitGracefulRestartReady(t, 2)
-	h, err = h.restartPreservingConfig(t)
+	afterDB, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.api(t, http.MethodGet, route, nil, 200, &view)
-	if view.Summary.Requests != 2 || view.Summary.Cost != 45 || view.Summary.Detailed != 2 {
-		t.Fatal("restart repeated the additive backfill", view)
+	if !bytes.Equal(oldDB, afterDB) {
+		t.Fatal("candidate mutated the rejected schema2 database")
 	}
 }
