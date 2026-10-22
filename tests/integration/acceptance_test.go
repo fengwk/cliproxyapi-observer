@@ -373,10 +373,14 @@ func TestPricingOverridesLaterWinsMultipliersAndRequestedAt(t *testing.T) {
 	acceptanceAssertTokens(t, overridden)
 	acceptanceAssertCost(t, overridden, 46, "manual")
 
-	// Wait for enough room to start a request near the beginning of a one-minute
-	// UTC window, then hold the upstream response until after that window ends.
-	for time.Until(time.Now().UTC().Truncate(time.Minute).Add(time.Minute)) < 10*time.Second {
-		time.Sleep(500 * time.Millisecond)
+	// Leave enough setup room, but hold for at most 42 seconds so the harness's
+	// 60-second HTTP deadline cannot race the one-minute pricing boundary.
+	for {
+		remaining := time.Until(time.Now().UTC().Truncate(time.Minute).Add(time.Minute))
+		if remaining >= 10*time.Second && remaining <= 40*time.Second {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
 	windowStart := time.Now().UTC().Truncate(time.Minute)
 	windowEnd := windowStart.Add(time.Minute)
