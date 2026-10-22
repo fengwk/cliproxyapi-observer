@@ -276,7 +276,7 @@ function ConditionEditor({
             disabled={disabled}
             placeholder="例如 default, flex"
             aria-label={`${label} 服务档位`}
-            onChange={(event) => patch({ serviceTier: event.target.value })}
+            onChange={(event) => patch({ serviceTier: event.target.value, serviceTierPresent: true })}
           />
         </Field>
         <Field label="日期下限（UTC）">
@@ -307,12 +307,12 @@ function ConditionEditor({
             onChange={(event) => patch({ timeStart: event.target.value })}
           />
         </Field>
-        <Field label="每日结束" hint="左闭右开，支持跨午夜">
+        <Field label="每日结束" hint="左闭右开，支持跨午夜；可填 24:00 表示全天结束">
           <Input
             value={draft.timeEnd}
             disabled={disabled}
             inputMode="numeric"
-            placeholder="HH:mm"
+            placeholder="HH:mm 或 24:00"
             aria-label={`${label} 时间结束`}
             onChange={(event) => patch({ timeEnd: event.target.value })}
           />
@@ -368,7 +368,7 @@ function ConditionEditor({
               items={draft.all}
               disabled={disabled}
               depth={depth}
-              onChange={(all) => patch({ all })}
+              onChange={(all) => patch({ all, allPresent: true })}
             />
             <ConditionGroup
               label={label}
@@ -377,7 +377,7 @@ function ConditionEditor({
               items={draft.any}
               disabled={disabled}
               depth={depth}
-              onChange={(any) => patch({ any })}
+              onChange={(any) => patch({ any, anyPresent: true })}
             />
             <div className="settings-condition-group">
               <div className="settings-condition-group-header">
@@ -491,16 +491,32 @@ function PatchRates({
           </div>
         </Field>
       </div>
-      <details className="settings-details">
-        <summary>缓存写入 TTL 覆盖（{draft.ttls.length}）</summary>
-        <p className="settings-note">仅覆盖所列 TTL 档位；未列档位继承基础或通用缓存写价。</p>
-        <TtlRows
-          label={`${label} TTL 覆盖`}
-          rows={draft.ttls}
+      <Field label="缓存写入 TTL 覆盖" hint="继承不修改；显式覆盖为空表示清除该规则的所有 TTL 档位。">
+        <Select
+          aria-label={`${label} TTL 模式`}
+          value={draft.ttlMode}
           disabled={disabled}
-          onChange={(ttls) => patch({ ttls })}
+          options={[
+            { value: 'inherit', label: '继承（不修改）' },
+            { value: 'override', label: '显式覆盖' },
+          ]}
+          onChange={(value) => patch({ ttlMode: value as RatePatchDraft['ttlMode'] })}
         />
-      </details>
+      </Field>
+      {draft.ttlMode === 'override' && (
+        <details className="settings-details" open>
+          <summary>缓存写入 TTL 覆盖（{draft.ttls.length}）</summary>
+          <p className="settings-note">
+            {draft.ttls.length ? '仅覆盖所列 TTL 档位；未列档位继承基础或通用缓存写价。' : '显式空覆盖：清除该规则的全部 TTL 档位。'}
+          </p>
+          <TtlRows
+            label={`${label} TTL 覆盖`}
+            rows={draft.ttls}
+            disabled={disabled}
+            onChange={(ttls) => patch({ ttls })}
+          />
+        </details>
+      )}
     </>
   );
 }

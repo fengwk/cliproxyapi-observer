@@ -19,6 +19,7 @@ export const MAX_BODY_BYTES = 8_388_608; // 8 MiB
 export const DEFAULT_MAX_BODY_STORAGE_BYTES = 268_435_456; // 256 MiB
 export const MAX_BODY_STORAGE_BYTES = 1_073_741_824; // 1 GiB
 export const MAX_CONFIG_ENTRIES = 4096;
+export const MAX_RULES_PER_MODEL = 64;
 const MAX_IDENTITY_LENGTH = 1024;
 const MAX_MULTIPLIER_LENGTH = 64;
 const MAX_CONDITION_DEPTH = 8;
@@ -70,6 +71,8 @@ export interface RatePatchDraft {
   cache_write: string;
   reasoningMode: PatchReasoningMode;
   reasoning: string;
+  /** inherit omits the property; override emits the map, including an explicit empty map. */
+  ttlMode: 'inherit' | 'override';
   ttls: TtlDraft[];
 }
 
@@ -82,6 +85,8 @@ export interface ContextDraft {
 
 export interface ConditionDraft {
   context: ContextDraft;
+  /** Presence flags preserve explicitly empty semantic collections. */
+  serviceTierPresent: boolean;
   serviceTier: string;
   dateGte: string;
   dateLt: string;
@@ -90,8 +95,10 @@ export interface ConditionDraft {
   timezone: string;
   weekdays: number[];
   /** Condition[] groups composed with AND. */
+  allPresent: boolean;
   all: ConditionDraft[];
   /** Condition[] groups composed with OR. */
+  anyPresent: boolean;
   any: ConditionDraft[];
   /** Negated nested condition. */
   not: ConditionDraft | null;
@@ -278,11 +285,10 @@ export function sourceLabel(source: string): string {
  */
 export function validTimeRange(value: string): boolean {
   const trimmed = value.trim();
-  const match = /^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$/.exec(trimmed);
+  // The backend accepts end 24:00 (only for an end clock) and rejects equal ends.
+  const match = /^([01]\d|2[0-3]):[0-5]\d-((?:[01]\d|2[0-3]):[0-5]\d|24:00)$/.exec(trimmed);
   if (!match) return false;
-  const start = trimmed.slice(0, 5);
-  const end = trimmed.slice(6, 11);
-  return start !== end;
+  return trimmed.slice(0, 5) !== trimmed.slice(6, 11);
 }
 
 /**
@@ -438,6 +444,7 @@ export function rateSetToDraft(base: RateSet): RateSetDraft {
 }
 
 export function ratePatchToDraft(rates: RatePatch): RatePatchDraft {
+  const ttlMode = rates.cache_write_by_ttl === undefined ? 'inherit' : 'override';
   return {
     input: rates.input === undefined ? '' : formatUSD(rates.input),
     output: rates.output === undefined ? '' : formatUSD(rates.output),
@@ -446,6 +453,7 @@ export function ratePatchToDraft(rates: RatePatch): RatePatchDraft {
     reasoningMode:
       rates.reasoning === undefined ? 'inherit' : rates.reasoning === null ? 'same_output' : 'custom',
     reasoning: rates.reasoning === undefined || rates.reasoning === null ? '' : formatUSD(rates.reasoning),
+    ttlMode,
     ttls: ttlDraftsFrom(rates.cache_write_by_ttl),
   };
 }
@@ -470,6 +478,7 @@ export function emptyRatePatchDraft(): RatePatchDraft {
     cache_write: '',
     reasoningMode: 'inherit',
     reasoning: '',
+    ttlMode: 'inherit',
     ttls: [],
   };
 }
@@ -477,6 +486,7 @@ export function emptyRatePatchDraft(): RatePatchDraft {
 export function emptyConditionDraft(): ConditionDraft {
   return {
     context: { lowerOp: '', lowerValue: '', upperOp: '', upperValue: '' },
+    serviceTierPresent: false,
     serviceTier: '',
     dateGte: '',
     dateLt: '',
@@ -484,7 +494,9 @@ export function emptyConditionDraft(): ConditionDraft {
     timeEnd: '',
     timezone: 'UTC',
     weekdays: [],
+    allPresent: false,
     all: [],
+    anyPresent: false,
     any: [],
     not: null,
   };
@@ -507,7 +519,10 @@ export function conditionToDraft(condition: Condition | undefined | null): Condi
       upperValue: upperValue === undefined ? '' : String(upperValue),
     };
   }
-  if (serviceTier?.length) draft.serviceTier = serviceTier.join(', ');
+  if (serviceTier !== undefined) {
+    draft.serviceTierPresent = true;
+    draft.serviceTier = serviceTier.join(', ');
+  }
   if (date?.gte) draft.dateGte = date.gte;
   if (date?.lt) draft.dateLt = date.lt;
   if (time) {
@@ -516,14 +531,16 @@ export function conditionToDraft(condition: Condition | undefined | null): Condi
     draft.timezone = time.timezone || 'UTC';
     draft.weekdays = [...(time.weekdays ?? [])];
   }
+  draft.allPresent = Array.isArray(all);
   draft.all = (all ?? []).map(conditionToDraft);
+  draft.anyPresent = Array.isArray(any);
   draft.any = (any ?? []).map(conditionToDraft);
   draft.not = not ? conditionToDraft(not) : null;
   return draft;
 }
 
 export function hasAdvancedCondition(draft: ConditionDraft): boolean {
-  return draft.all.length > 0 || draft.any.length > 0 || draft.not !== null;
+  return draft.allPresent || draft.all.length > 0 || draft.anyPresent || draft.any.length > 0 || draft.not !== null;
 }
 
 export function conditionSummary(draft: ConditionDraft): string {
@@ -545,7 +562,9 @@ export function conditionSummary(draft: ConditionDraft): string {
     parts.push(`星期 ${draft.weekdays.map((day) => WEEKDAYS.find((item) => item.value === day)?.label).join('')}`);
   }
   if (draft.all.length) parts.push(`全部满足 ${draft.all.length} 组`);
+  else if (draft.allPresent) parts.push('全部条件为空（恒真）');
   if (draft.any.length) parts.push(`任一满足 ${draft.any.length} 组`);
+  else if (draft.anyPresent) parts.push('任一条件为空（恒假）');
   if (draft.not) parts.push('含非条件');
   return parts.join('；') || '任何请求';
 }
@@ -605,7 +624,7 @@ function parseCondition(
   if (tiers.some((tier) => tier.length > 128)) {
     throw new Error(`${label}服务档位不能超过 128 个字符`);
   }
-  if (tiers.length) {
+  if (draft.serviceTierPresent || tiers.length) {
     out.serviceTier = tiers;
   }
 
@@ -650,13 +669,13 @@ function parseCondition(
     };
   }
 
-  if (draft.all.length) {
+  if (draft.allPresent || draft.all.length) {
     if (draft.all.length > MAX_CONDITION_LIST) {
       throw new Error(`${label}全部条件不能超过 ${MAX_CONDITION_LIST} 项`);
     }
     out.all = draft.all.map((child, index) => parseCondition(child, `${label}全部条件 ${index + 1} `, depth + 1, state));
   }
-  if (draft.any.length) {
+  if (draft.anyPresent || draft.any.length) {
     if (draft.any.length > MAX_CONDITION_LIST) {
       throw new Error(`${label}任一条件不能超过 ${MAX_CONDITION_LIST} 项`);
     }
@@ -687,8 +706,9 @@ function parseRatePatch(draft: RatePatchDraft, label: string): RatePatch {
     const value = parseRateValue(draft.reasoning, `${label}思考价格`, false);
     if (value !== undefined) patch.reasoning = value;
   }
-  const ttls = parseTtlDrafts(draft.ttls, `${label}缓存写入 `);
-  if (ttls) patch.cache_write_by_ttl = ttls;
+  if (draft.ttlMode === 'override') {
+    patch.cache_write_by_ttl = parseTtlDrafts(draft.ttls, `${label}缓存写入 `) ?? {};
+  }
   return patch;
 }
 
@@ -753,11 +773,10 @@ export function parseDefinition(draft: DefinitionDraft, label: string): PricingD
         ? null
         : parseRateValue(draft.base.reasoning, `${label}思考价格`, false)!,
   };
-  const baseTtls = parseTtlDrafts(draft.base.ttls, `${label}缓存写入 `);
-  if (baseTtls) base.cache_write_by_ttl = baseTtls;
+  base.cache_write_by_ttl = parseTtlDrafts(draft.base.ttls, `${label}缓存写入 `) ?? {};
 
-  if (draft.overrides.length > MAX_CONFIG_ENTRIES) {
-    throw new Error(`${label}价格覆盖不能超过 ${MAX_CONFIG_ENTRIES} 条`);
+  if (draft.overrides.length > MAX_RULES_PER_MODEL) {
+    throw new Error(`${label}价格覆盖不能超过 ${MAX_RULES_PER_MODEL} 条`);
   }
   const overrideIds = Object.create(null);
   const overrides: Override[] = draft.overrides.map((entry, index) => {
@@ -774,8 +793,8 @@ export function parseDefinition(draft: DefinitionDraft, label: string): PricingD
     };
   });
 
-  if (draft.multipliers.length > MAX_CONFIG_ENTRIES) {
-    throw new Error(`${label}价格倍率不能超过 ${MAX_CONFIG_ENTRIES} 条`);
+  if (draft.multipliers.length > MAX_RULES_PER_MODEL) {
+    throw new Error(`${label}价格倍率不能超过 ${MAX_RULES_PER_MODEL} 条`);
   }
   const multiplierIds = Object.create(null);
   const multipliers: Multiplier[] = draft.multipliers.map((entry, index) => {
@@ -846,7 +865,7 @@ function normalizedRates(rates: RateSet): Record<string, unknown> {
     output: rates.output,
     cache_read: rates.cache_read,
     cache_write: rates.cache_write,
-    ...(ttls ? { cache_write_by_ttl: ttls } : {}),
+    cache_write_by_ttl: ttls ?? {},
     reasoning: rates.reasoning ?? null,
   };
 }
@@ -874,7 +893,7 @@ function normalizedCondition(condition: Condition): Record<string, unknown> {
     }
     if (Object.keys(context).length) out.context = context;
   }
-  if (condition.serviceTier?.length) {
+  if (condition.serviceTier !== undefined) {
     out.serviceTier = [...condition.serviceTier].sort();
   }
   if (condition.date?.gte || condition.date?.lt) {
@@ -893,8 +912,8 @@ function normalizedCondition(condition: Condition): Record<string, unknown> {
         : {}),
     };
   }
-  if (condition.all?.length) out.all = condition.all.map(normalizedCondition);
-  if (condition.any?.length) out.any = condition.any.map(normalizedCondition);
+  if (Array.isArray(condition.all)) out.all = condition.all.map(normalizedCondition);
+  if (Array.isArray(condition.any)) out.any = condition.any.map(normalizedCondition);
   if (condition.not) out.not = normalizedCondition(condition.not);
   return out;
 }
@@ -913,6 +932,14 @@ function normalizedDefinition(definition: PricingDefinition): Record<string, unk
       factors: entry.factors,
     })),
   };
+}
+
+export function roundTripDefinition(definition: PricingDefinition): PricingDefinition {
+  return parseDefinition(definitionToDraft(definition), '');
+}
+
+export function definitionsSemanticallyEqual(a: PricingDefinition, b: PricingDefinition): boolean {
+  return JSON.stringify(normalizedDefinition(a)) === JSON.stringify(normalizedDefinition(b));
 }
 
 function normalizedPrice(price: ManualPrice): string {
