@@ -17,7 +17,7 @@ func (m *Manager) serveRequestView(values url.Values, callbackID string) plugina
 			return invalidQueryResponse()
 		}
 		switch key {
-		case "from_date", "to_date", "view":
+		case "from_date", "to_date", "timezone", "view":
 		case "from", "to":
 			return invalidQueryResponse()
 		default:
@@ -30,7 +30,7 @@ func (m *Manager) serveRequestView(values url.Values, callbackID string) plugina
 	}
 	return m.withStore(func(store *engine.Store) pluginapi.ManagementResponse {
 		viewName := values.Get("view")
-		view, err := store.RequestView(engine.ViewQuery{Query: query, FromDate: values.Get("from_date"), ToDate: values.Get("to_date"), View: viewName})
+		view, err := store.RequestView(engine.ViewQuery{Query: query, FromDate: values.Get("from_date"), ToDate: values.Get("to_date"), Timezone: values.Get("timezone"), View: viewName})
 		if err != nil {
 			return storeFailureResponse(err)
 		}

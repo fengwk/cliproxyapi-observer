@@ -15,7 +15,7 @@ import (
 
 const schemaVersion = "3"
 
-var buckets = []string{"meta", "keys", "hashes", "records", "dedup", "daily", "hourly", "captures", "capture_state", "capture_fifo", "capture_expiry", "timeline", "correlations"}
+var buckets = []string{"meta", "keys", "hashes", "records", "dedup", "daily", "hourly", "minutes", "captures", "capture_state", "capture_fifo", "capture_expiry", "timeline", "correlations"}
 
 type storedKey struct {
 	Key
