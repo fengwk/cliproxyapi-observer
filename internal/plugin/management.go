@@ -731,8 +731,8 @@ var settingsRequestKeys = map[string]bool{
 
 var pricingRequestKeys = map[string]bool{
 	"auto":     true,
+	"source":   true,
 	"prices":   true,
-	"rules":    true,
 	"mappings": true,
 }
 
@@ -760,10 +760,10 @@ type settingsPatch struct {
 type pricingPatch struct {
 	hasAuto     bool
 	auto        bool
+	hasSource   bool
+	source      string
 	hasPrices   bool
-	prices      []pricing.Price
-	hasRules    bool
-	rules       []pricing.Rule
+	prices      []pricing.ManualPrice
 	hasMappings bool
 	mappings    []pricing.Mapping
 }
@@ -861,16 +861,16 @@ func parsePricingPatch(raw []byte) (pricingPatch, error) {
 				return patch, err
 			}
 			patch.hasAuto = true
+		case "source":
+			if err := decodeStrictJSON(value, &patch.source); err != nil {
+				return patch, err
+			}
+			patch.hasSource = true
 		case "prices":
 			if err := decodeStrictJSON(value, &patch.prices); err != nil {
 				return patch, err
 			}
 			patch.hasPrices = true
-		case "rules":
-			if err := decodeStrictJSON(value, &patch.rules); err != nil {
-				return patch, err
-			}
-			patch.hasRules = true
 		case "mappings":
 			if err := decodeStrictJSON(value, &patch.mappings); err != nil {
 				return patch, err
@@ -923,11 +923,11 @@ func mergeSettings(saved engine.Settings, patch settingsPatch) (engine.Settings,
 		if patch.pricing.hasAuto {
 			out.Pricing.Auto = patch.pricing.auto
 		}
+		if patch.pricing.hasSource {
+			out.Pricing.Source = patch.pricing.source
+		}
 		if patch.pricing.hasPrices {
 			out.Pricing.Prices = patch.pricing.prices
-		}
-		if patch.pricing.hasRules {
-			out.Pricing.Rules = patch.pricing.rules
 		}
 		if patch.pricing.hasMappings {
 			out.Pricing.Mappings = patch.pricing.mappings
@@ -990,7 +990,7 @@ func (m *Manager) servePricePreview(body []byte) pluginapi.ManagementResponse {
 		return bodyFailureResponse(errJSONInvalid)
 	}
 	return jsonResponse(http.StatusOK, struct {
-		Items []pricing.PreviewPrice `json:"items"`
+		Items []pricing.Price `json:"items"`
 	}{Items: items})
 }
 

@@ -7,168 +7,418 @@ import (
 	"time"
 )
 
-func requiredMissing(t Tokens, rates Rates, missing map[string]bool) []string {
-	out := []string{}
-	output := t.Output
-	if rates.Reasoning != nil {
-		output -= t.Reasoning
-	}
-	if t.Input > 0 && missing[rateInput] {
-		out = append(out, rateInput)
-	}
-	if output > 0 && missing[rateOutput] {
-		out = append(out, rateOutput)
-	}
-	if t.CacheRead > 0 && missing[rateCacheRead] {
-		out = append(out, rateCacheRead)
-	}
-	if t.CacheWrite > 0 && missing[rateCacheWrite] {
-		out = append(out, rateCacheWrite)
-	}
-	return out
+type evalFacts struct {
+	context *big.Int
+	at      time.Time
+	tier    string
 }
 
-func (s *Service) Quote(model, provider string, t Tokens, at time.Time) (Quote, error) {
+func contextTokens(t Tokens) *big.Int {
+	n := new(big.Int).SetInt64(t.Input)
+	n.Add(n, big.NewInt(t.CacheRead))
+	n.Add(n, big.NewInt(t.CacheWrite))
+	return n
+}
+
+// evalCondition reports match and whether every required fact was available.
+// A known false/true branch short-circuits an unknown sibling in AND/ANY, so
+// missing facts only poison a result that actually depends on them.
+func evalCondition(c Condition, f evalFacts) (bool, bool) {
+	result, known := true, true
+	apply := func(match, childKnown bool) {
+		if childKnown {
+			if !match {
+				result, known = false, true
+			}
+			return
+		}
+		if result {
+			known = false
+		}
+	}
+	if c.Context != nil {
+		ctx := c.Context
+		match := !(ctx.GT != nil && f.context.Cmp(big.NewInt(*ctx.GT)) <= 0 ||
+			ctx.GTE != nil && f.context.Cmp(big.NewInt(*ctx.GTE)) < 0 ||
+			ctx.LT != nil && f.context.Cmp(big.NewInt(*ctx.LT)) >= 0 ||
+			ctx.LTE != nil && f.context.Cmp(big.NewInt(*ctx.LTE)) > 0)
+		apply(match, true)
+	}
+	if c.ServiceTier != nil {
+		if f.tier == "" {
+			apply(false, false)
+		} else {
+			found := false
+			for _, tier := range c.ServiceTier {
+				if tier == f.tier {
+					found = true
+					break
+				}
+			}
+			apply(found, true)
+		}
+	}
+	if c.Date != nil {
+		if f.at.IsZero() {
+			apply(false, false)
+		} else {
+			date := f.at.UTC().Format("2006-01-02")
+			match := (c.Date.GTE == "" || date >= c.Date.GTE) && (c.Date.LT == "" || date < c.Date.LT)
+			apply(match, true)
+		}
+	}
+	if c.Time != nil {
+		if f.at.IsZero() {
+			apply(false, false)
+		} else {
+			apply(evalTime(*c.Time, f.at))
+		}
+	}
+	if c.All != nil {
+		for _, child := range c.All {
+			apply(evalCondition(child, f))
+		}
+	}
+	if c.Any != nil {
+		if len(c.Any) == 0 {
+			apply(false, true)
+		} else {
+			anyMatch, anyUnknown := false, false
+			for _, child := range c.Any {
+				match, childKnown := evalCondition(child, f)
+				if !childKnown {
+					anyUnknown = true
+					continue
+				}
+				if match {
+					anyMatch, anyUnknown = true, false
+					break
+				}
+			}
+			if anyMatch {
+				apply(true, true)
+			} else if anyUnknown {
+				apply(false, false)
+			} else {
+				apply(false, true)
+			}
+		}
+	}
+	if c.Not != nil {
+		match, childKnown := evalCondition(*c.Not, f)
+		if childKnown {
+			apply(!match, true)
+		} else {
+			apply(false, false)
+		}
+	}
+	return result, known
+}
+
+func evalTime(t TimeCondition, at time.Time) (bool, bool) {
+	loc, err := time.LoadLocation(t.Timezone)
+	if err != nil {
+		return false, false
+	}
+	local := at.In(loc)
+	minute := local.Hour()*60 + local.Minute()
+	start, _ := parseClock(t.Start, false)
+	end, _ := parseClock(t.End, true)
+	cross := start > end
+	matched := minute >= start && minute < end
+	if cross {
+		matched = minute >= start || minute < end
+	}
+	if len(t.Weekdays) > 0 {
+		day := isoWeekday(local.Weekday())
+		// A range after midnight still belongs to its start day.
+		if cross && minute < end {
+			day--
+			if day == 0 {
+				day = 7
+			}
+		}
+		inDay := false
+		for _, allowed := range t.Weekdays {
+			if allowed == day {
+				inDay = true
+				break
+			}
+		}
+		matched = matched && inDay
+	}
+	return matched, true
+}
+
+func isoWeekday(d time.Weekday) int {
+	if d == time.Sunday {
+		return 7
+	}
+	return int(d)
+}
+
+func applyPatch(set *RateSet, patch RatePatch) {
+	if patch.Input != nil {
+		set.Input = *patch.Input
+	}
+	if patch.Output != nil {
+		set.Output = *patch.Output
+	}
+	if patch.CacheRead != nil {
+		set.CacheRead = *patch.CacheRead
+	}
+	if patch.CacheWrite != nil {
+		set.CacheWrite = *patch.CacheWrite
+	}
+	if patch.HasCacheWriteByTTL {
+		set.CacheWriteByTTL = make(map[int64]int64, len(patch.CacheWriteByTTL))
+		for k, v := range patch.CacheWriteByTTL {
+			set.CacheWriteByTTL[k] = v
+		}
+	}
+	if patch.ReasoningSet {
+		if patch.Reasoning == nil {
+			set.Reasoning = nil
+		} else {
+			v := *patch.Reasoning
+			set.Reasoning = &v
+		}
+	}
+}
+
+type appliedMultiplier struct {
+	id      string
+	factors FactorSet
+}
+
+func resolveDefinition(def PricingDefinition, facts evalFacts) (RateSet, []appliedMultiplier, bool, error) {
+	set := cloneRateSet(def.Base)
+	for _, override := range def.Overrides {
+		match, known := evalCondition(override.When, facts)
+		if !known {
+			return set, nil, true, nil
+		}
+		if match {
+			applyPatch(&set, override.Rates)
+		}
+	}
+	var multipliers []appliedMultiplier
+	for _, multiplier := range def.Multipliers {
+		match, known := evalCondition(multiplier.When, facts)
+		if !known {
+			return set, nil, true, nil
+		}
+		if match {
+			multipliers = append(multipliers, appliedMultiplier{id: multiplier.ID, factors: multiplier.Factors})
+		}
+	}
+	return set, multipliers, false, nil
+}
+
+func factorRat(s *string) (*big.Rat, error) {
+	if s == nil {
+		return big.NewRat(1, 1), nil
+	}
+	if !validFactorValue(*s) {
+		return nil, errInvalid
+	}
+	r, ok := new(big.Rat).SetString(*s)
+	if !ok || r.Sign() < 0 {
+		return nil, errInvalid
+	}
+	return r, nil
+}
+
+func addTokenCost(sum *big.Rat, rate, tokens int64, factors []appliedMultiplier, field func(FactorSet) *string) error {
+	if tokens == 0 || rate == 0 {
+		return nil
+	}
+	term := new(big.Rat).SetInt64(rate)
+	term.Mul(term, new(big.Rat).SetInt64(tokens))
+	for _, multiplier := range factors {
+		factor, err := factorRat(field(multiplier.factors))
+		if err != nil {
+			return err
+		}
+		term.Mul(term, factor)
+	}
+	term.Quo(term, new(big.Rat).SetInt64(1_000_000))
+	sum.Add(sum, term)
+	return nil
+}
+
+func calculateCost(set RateSet, factors []appliedMultiplier, t Tokens) (int64, error) {
+	sum := new(big.Rat)
+	if err := addTokenCost(sum, set.Input, t.Input, factors, func(f FactorSet) *string { return f.Input }); err != nil {
+		return 0, err
+	}
+	output := t.Output
+	if set.Reasoning != nil {
+		output -= t.Reasoning
+	}
+	if err := addTokenCost(sum, set.Output, output, factors, func(f FactorSet) *string { return f.Output }); err != nil {
+		return 0, err
+	}
+	if err := addTokenCost(sum, set.CacheRead, t.CacheRead, factors, func(f FactorSet) *string { return f.CacheRead }); err != nil {
+		return 0, err
+	}
+	if len(t.CacheWriteByTTL) > 0 {
+		var total int64
+		for ttl, tokens := range t.CacheWriteByTTL {
+			if tokens < 0 || total > maxSafe-tokens {
+				return 0, errInvalid
+			}
+			total += tokens
+			rate := set.CacheWrite
+			if v, ok := set.CacheWriteByTTL[ttl]; ok {
+				rate = v
+			}
+			if err := addTokenCost(sum, rate, tokens, factors, func(f FactorSet) *string { return f.CacheWrite }); err != nil {
+				return 0, err
+			}
+		}
+		if total != t.CacheWrite {
+			return 0, errInvalid
+		}
+	} else if err := addTokenCost(sum, set.CacheWrite, t.CacheWrite, factors, func(f FactorSet) *string { return f.CacheWrite }); err != nil {
+		return 0, err
+	}
+	if set.Reasoning != nil {
+		if err := addTokenCost(sum, *set.Reasoning, t.Reasoning, factors, func(f FactorSet) *string { return f.Reasoning }); err != nil {
+			return 0, err
+		}
+	}
+	num, den := sum.Num(), sum.Denom()
+	q, rem := new(big.Int), new(big.Int)
+	q.QuoRem(num, den, rem)
+	if rem.Sign() > 0 {
+		q.Add(q, big.NewInt(1))
+	}
+	if !q.IsInt64() || q.Int64() > maxSafe {
+		return 0, errors.New("pricing cost overflow")
+	}
+	return q.Int64(), nil
+}
+
+func validateTokens(t Tokens) error {
 	for _, v := range []int64{t.Input, t.Output, t.CacheRead, t.CacheWrite, t.Reasoning, t.Total} {
-		if v < 0 {
-			return Quote{}, errInvalid
+		if v < 0 || v > maxSafe {
+			return errInvalid
 		}
 	}
 	if t.Reasoning > t.Output {
+		return errInvalid
+	}
+	if len(t.CacheWriteByTTL) > maxTiers {
+		return errInvalid
+	}
+	var split int64
+	for ttl, tokens := range t.CacheWriteByTTL {
+		if ttl <= 0 || tokens < 0 || split > maxSafe-tokens {
+			return errInvalid
+		}
+		split += tokens
+	}
+	if len(t.CacheWriteByTTL) > 0 && split != t.CacheWrite {
+		return errInvalid
+	}
+	return nil
+}
+
+func (s *Service) Quote(model, provider string, t Tokens, at time.Time, serviceTier string) (Quote, error) {
+	if !validIdentity(model) || (provider != "" && !validIdentity(provider)) {
 		return Quote{}, errInvalid
 	}
-	// Context thresholds include the whole prompt, not just billable uncached
-	// input. big.Int also handles legitimate sums exceeding signed int64.
-	prompt := new(big.Int).SetInt64(t.Input)
-	prompt.Add(prompt, big.NewInt(t.CacheRead))
-	prompt.Add(prompt, big.NewInt(t.CacheWrite))
+	if err := validateTokens(t); err != nil {
+		return Quote{}, err
+	}
+	facts := evalFacts{context: contextTokens(t), at: at, tier: serviceTier}
 	s.mu.Lock()
 	res := s.resolveLocked(model, provider)
-	ruleID := ""
-	for _, r := range s.config.Rules {
-		if r.Model != model || (r.InputTokensGT != nil && prompt.Cmp(big.NewInt(*r.InputTokensGT)) <= 0) {
-			continue
-		}
-		if r.TimeRange != "" {
-			a, b, _ := parseRange(r.TimeRange)
-			u := at.UTC()
-			n := u.Hour()*60 + u.Minute()
-			if a < b && !(n >= a && n < b) || a > b && !(n >= a || n < b) {
-				continue
-			}
-		}
-		res = resolution{source: "rule", match: matchRule, reason: reasonRule, rates: cloneRates(r.Rates)}
-		ruleID = r.ID
-		break
-	}
-	if res.source == "auto" {
-		applyTier(&res, prompt)
-	}
-	required := []string(nil)
-	if res.source == "auto" || res.source == "manual" || res.source == "rule" {
-		required = requiredMissing(t, res.rates, missingSet(res.missing))
-	}
-	if len(required) > 0 {
-		res.source, res.reason, res.rates, res.missing = "unpriced", reasonMissingRates, Rates{}, required
-	}
 	s.mu.Unlock()
 
 	q := Quote{
-		Source: res.source, RuleID: ruleID, Rates: cloneRates(res.rates), Reason: res.reason, Match: res.match,
+		Source: res.source, Definition: CloneDefinition(res.definition), Reason: res.reason, Match: res.match,
 		CatalogProvider: res.catalogProvider, CatalogModel: res.catalogModel, CatalogTime: cloneTime(res.catalogTime),
-		MissingRates: cloneStrings(res.missing), Candidates: cloneCandidates(res.candidates),
+		PricingSupported: res.supported, SupportIssues: cloneStrings(res.supportIssues),
+		Candidates: cloneCandidates(res.candidates),
 	}
-	if res.source == "unpriced" || len(required) > 0 {
+	if res.source == "zero" {
+		q.Rates = Rates{}
 		return q, nil
 	}
-	output := t.Output
-	sum := new(big.Int)
-	add := func(rate, tokens int64) { sum.Add(sum, new(big.Int).Mul(big.NewInt(rate), big.NewInt(tokens))) }
-	if q.Rates.Reasoning != nil {
-		output -= t.Reasoning
-		add(*q.Rates.Reasoning, t.Reasoning)
+	set, multipliers, missingFacts, err := resolveDefinition(res.definition, facts)
+	if err != nil {
+		return Quote{}, err
 	}
-	add(q.Rates.Input, t.Input)
-	add(q.Rates.Output, output)
-	add(q.Rates.CacheRead, t.CacheRead)
-	add(q.Rates.CacheWrite, t.CacheWrite)
-	sum.Add(sum, big.NewInt(999999))
-	sum.Quo(sum, big.NewInt(1000000))
-	if !sum.IsInt64() {
-		return Quote{}, errors.New("pricing cost overflow")
+	q.Rates = ratesFromSet(set)
+	if missingFacts {
+		q.Reason, q.CostMicroUSD = reasonMissingFacts, 0
+		return q, nil
 	}
-	q.CostMicroUSD = sum.Int64()
+	cost, err := calculateCost(set, multipliers, t)
+	if err != nil {
+		return Quote{}, err
+	}
+	q.CostMicroUSD = cost
 	return q, nil
 }
 
 func (s *Service) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := Snapshot{Prices: []Price{}, LastSync: s.lastSync, Error: s.lastError, Refreshing: s.flight != nil}
-	for _, list := range s.catalog.exact {
-		out.CatalogEntries += len(list)
-	}
-	seen := map[string]bool{}
+	state := s.sourceStateLocked(s.config.Source)
+	out := Snapshot{Source: s.config.Source, Prices: []Price{}, LastSync: state.lastSync, Error: state.lastError, Refreshing: s.refreshingLocked()}
+	out.CatalogEntries = state.catalog.count()
+	seen := map[identity]bool{}
 	for k := range s.observed {
-		q := s.resolveLocked(k.Model, k.Provider)
-		out.Prices = append(out.Prices, q.price(k.Model, k.Provider))
-		seen[k.Model] = true
+		res := s.resolveLocked(k.Model, k.Provider)
+		out.Prices = append(out.Prices, res.price(k.Model, k.Provider))
+		seen[k] = true
 	}
 	for _, p := range s.config.Prices {
-		if !seen[p.Model] {
-			q := manualResolution(p)
-			out.Prices = append(out.Prices, q.price(p.Model, ""))
+		k := identity{Model: p.Model, Provider: p.Provider}
+		if !seen[k] {
+			out.Prices = append(out.Prices, manualResolution(p).price(p.Model, p.Provider))
 		}
 	}
-	sort.Slice(out.Prices, func(i, j int) bool {
-		if out.Prices[i].Model != out.Prices[j].Model {
-			return out.Prices[i].Model < out.Prices[j].Model
-		}
-		if out.Prices[i].Provider != out.Prices[j].Provider {
-			return out.Prices[i].Provider < out.Prices[j].Provider
-		}
-		if out.Prices[i].Source != out.Prices[j].Source {
-			return out.Prices[i].Source < out.Prices[j].Source
-		}
-		a, b := out.Prices[i].Rates, out.Prices[j].Rates
-		av, bv := []int64{a.Input, a.Output, a.CacheRead, a.CacheWrite}, []int64{b.Input, b.Output, b.CacheRead, b.CacheWrite}
-		for n := range av {
-			if av[n] != bv[n] {
-				return av[n] < bv[n]
-			}
-		}
-		if a.Reasoning == nil {
-			return b.Reasoning != nil
-		}
-		if b.Reasoning == nil {
-			return false
-		}
-		return *a.Reasoning < *b.Reasoning
-	})
+	sortPrices(out.Prices)
 	return out
 }
 
-// Preview does not Observe or fetch. Conditional rules are flagged instead of
-// evaluated against a fictional zero-token request, preserving accounting.
-func (s *Service) Preview(models []ModelIdentity) ([]PreviewPrice, error) {
-	if len(models) > 4096 {
+func sortPrices(prices []Price) {
+	sort.Slice(prices, func(i, j int) bool {
+		a, b := prices[i], prices[j]
+		if a.Model != b.Model {
+			return a.Model < b.Model
+		}
+		if a.Provider != b.Provider {
+			return a.Provider < b.Provider
+		}
+		if a.Source != b.Source {
+			return a.Source < b.Source
+		}
+		return a.Definition.Base.Input < b.Definition.Base.Input ||
+			a.Definition.Base.Input == b.Definition.Base.Input && a.Definition.Base.Output < b.Definition.Base.Output
+	})
+}
+
+// Preview returns base prices and the complete definition without evaluating
+// conditions against fictional usage.
+func (s *Service) Preview(models []ModelIdentity) ([]Price, error) {
+	if len(models) > maxDefinitions {
 		return nil, errInvalid
 	}
 	for _, model := range models {
-		if !validIdentity(model.Model) || len(model.Provider) > 1024 || (model.Provider != "" && !validIdentity(model.Provider)) {
+		if !validIdentity(model.Model) || (model.Provider != "" && !validIdentity(model.Provider)) {
 			return nil, errInvalid
 		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rules := make(map[string]bool, len(s.config.Rules))
-	for _, rule := range s.config.Rules {
-		rules[rule.Model] = true
-	}
-	out := make([]PreviewPrice, 0, len(models))
+	out := make([]Price, 0, len(models))
 	for _, model := range models {
-		q := s.resolveLocked(model.Model, model.Provider)
-		out = append(out, PreviewPrice{Price: q.price(model.Model, model.Provider), HasRules: rules[model.Model]})
+		out = append(out, s.resolveLocked(model.Model, model.Provider).price(model.Model, model.Provider))
 	}
 	return out, nil
 }

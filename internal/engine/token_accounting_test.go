@@ -3,6 +3,7 @@ package engine
 import (
 	"math"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -61,7 +62,7 @@ func TestCustomProviderCanonicalTokens(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			native := normalize(usageRecord(tc.native, tc.raw))
-			if native.AccountingQuality != string(usage.TokenAccountingQualityComplete) || native.Tokens != tc.want {
+			if native.AccountingQuality != string(usage.TokenAccountingQualityComplete) || !reflect.DeepEqual(native.Tokens, tc.want) {
 				t.Fatalf("native baseline = %+v", native)
 			}
 			for _, provider := range []string{"commandcode", "opencode-go", "custom-unlisted"} {
@@ -69,7 +70,7 @@ func TestCustomProviderCanonicalTokens(t *testing.T) {
 				if r.AccountingQuality != string(usage.TokenAccountingQualityComplete) {
 					t.Fatalf("%s quality = %q, want complete", provider, r.AccountingQuality)
 				}
-				if r.Tokens != tc.want {
+				if !reflect.DeepEqual(r.Tokens, tc.want) {
 					t.Fatalf("%s tokens = %+v, want %+v", provider, r.Tokens, tc.want)
 				}
 				if r.Provider != provider || r.Model != "gpt-exact" || r.RawUsage != tc.raw {
@@ -129,9 +130,11 @@ func TestCustomProviderUsageChargesCanonicalRollup(t *testing.T) {
 	}
 	settings, e := s.Settings()
 	must(t, e)
-	settings.Pricing = pricing.Config{Prices: []pricing.Price{{
-		Model: "gpt-exact",
-		Rates: pricing.Rates{Input: 2_000_000, Output: 6_000_000, CacheRead: 500_000, CacheWrite: 1_000_000},
+	settings.Pricing = pricing.Config{Prices: []pricing.ManualPrice{{
+		Model: "gpt-exact", Provider: "commandcode",
+		Definition: pricing.PricingDefinition{Base: pricing.RateSet{
+			Input: 2_000_000, Output: 6_000_000, CacheRead: 500_000, CacheWrite: 1_000_000,
+		}},
 	}}}
 	_, e = s.UpdateSettings(settings)
 	must(t, e)
@@ -153,7 +156,7 @@ func TestCustomProviderUsageChargesCanonicalRollup(t *testing.T) {
 	want := pricing.Tokens{Input: 4, Output: 3, CacheRead: 4, CacheWrite: 2, Total: 13}
 	d, e := s.Detail(u.RequestID)
 	must(t, e)
-	if d.Record.Tokens != want || d.Record.CostMicroUSD != 30 || d.Record.PriceSource != "manual" ||
+	if !reflect.DeepEqual(d.Record.Tokens, want) || d.Record.CostMicroUSD != 30 || d.Record.PriceSource != "manual" ||
 		d.Record.AccountingQuality != string(usage.TokenAccountingQualityComplete) || d.Record.RawUsage != u.Detail {
 		t.Fatalf("record = %+v", d.Record)
 	}

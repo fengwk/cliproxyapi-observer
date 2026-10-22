@@ -19,23 +19,50 @@ import (
 )
 
 type fakePrice struct {
-	cost   int64
-	source string
-	calls  int
+	cost      int64
+	source    string
+	calls     int
+	quoteAt   time.Time
+	quoteTier string
 }
 
-func (p *fakePrice) Quote(string, string, pricing.Tokens, time.Time) (pricing.Quote, error) {
+func (p *fakePrice) Quote(_, _ string, _ pricing.Tokens, at time.Time, tier string) (pricing.Quote, error) {
 	p.calls++
+	p.quoteAt, p.quoteTier = at, tier
 	source := p.source
 	if source == "" {
 		source = "manual"
 	}
 	return pricing.Quote{CostMicroUSD: p.cost, Source: source}, nil
 }
-func (*fakePrice) Observe(string, string)         {}
+func (*fakePrice) Observe(string, string) {}
+
+// Pricing facts come from the original request, not ingestion time, and use the
+// final upstream-reported service tier rather than a requested preference.
+func TestAccountingUsesRequestedAtAndFinalServiceTier(t *testing.T) {
+	s, now, p := fixture(t)
+	k, _ := key(t, s, KeySpec{Enabled: true})
+	requested := now.Add(-2 * time.Hour)
+	u := event(k, "facts", requested)
+	u.ResponseServiceTier = "priority"
+	u.ServiceTier = "flex"
+	must(t, s.RecordUsage(u))
+	if p.calls != 1 || !p.quoteAt.Equal(requested) || p.quoteTier != "priority" {
+		t.Fatalf("quote facts = %v %q", p.quoteAt, p.quoteTier)
+	}
+	d, e := s.Detail("facts")
+	must(t, e)
+	if !d.Record.Time.Equal(requested) || d.Record.ResponseServiceTier != "priority" {
+		t.Fatalf("stored facts = %+v", d.Record)
+	}
+}
+
 func (*fakePrice) Configure(pricing.Config) error { return nil }
 func (*fakePrice) Snapshot() pricing.Snapshot     { return pricing.Snapshot{} }
-func (*fakePrice) Refresh(context.Context) error  { return nil }
+func (*fakePrice) Preview([]pricing.ModelIdentity) ([]pricing.Price, error) {
+	return []pricing.Price{}, nil
+}
+func (*fakePrice) Refresh(context.Context) error { return nil }
 func fixture(t *testing.T) (*Store, *time.Time, *fakePrice) {
 	t.Helper()
 	now := time.Date(2024, 1, 31, 12, 0, 0, 0, time.UTC)
@@ -349,7 +376,7 @@ func TestForeignDatabasePreserved(t *testing.T) {
 	before, e := os.ReadFile(path)
 	must(t, e)
 	_, e = Open(Options{DataPath: path, Pricer: &fakePrice{}})
-	if !errors.Is(e, ErrInvalid) {
+	if !errors.Is(e, ErrUnsupported) {
 		t.Fatal(e)
 	}
 	after, e := os.ReadFile(path)

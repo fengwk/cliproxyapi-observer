@@ -116,9 +116,9 @@ func TestPricePreviewAndThemeManagementBoundary(t *testing.T) {
 	}
 	res := dispatchForTest(t, m, "POST", managementBasePath+"/prices/preview", nil, `{"models":[{"model":"unknown","provider":""}]}`)
 	var out struct {
-		Items []pricing.PreviewPrice `json:"items"`
+		Items []pricing.Price `json:"items"`
 	}
-	if res.StatusCode != 200 || json.Unmarshal(res.Body, &out) != nil || len(out.Items) != 1 || out.Items[0].Source != "unpriced" {
+	if res.StatusCode != 200 || json.Unmarshal(res.Body, &out) != nil || len(out.Items) != 1 || out.Items[0].Source != "zero" {
 		t.Fatal("preview failed", res.StatusCode, string(res.Body))
 	}
 	if !reflect.DeepEqual(before, m.prices.Snapshot()) {

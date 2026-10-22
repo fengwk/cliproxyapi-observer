@@ -34,7 +34,7 @@ func TestInterruptionAcrossManagers(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			settings.Pricing = pricing.Config{Prices: []pricing.Price{{Model: "model", Rates: pricing.Rates{Input: 5_000_000}}}, Rules: []pricing.Rule{}}
+			settings.Pricing = pricing.Config{Prices: []pricing.ManualPrice{{Model: "model", Provider: "openai", Definition: pricing.PricingDefinition{Base: pricing.RateSet{Input: 5_000_000}}}}}
 			if _, err = old.store.UpdateSettings(settings); err != nil {
 				t.Fatal(err)
 			}

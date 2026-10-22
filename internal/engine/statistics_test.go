@@ -33,7 +33,7 @@ func TestDetailedAggregatesAndRequestViews(t *testing.T) {
 	second.Failed = true
 	second.TTFT = time.Second
 	second.Latency = 4 * time.Second
-	p.cost, p.source = 0, "unpriced"
+	p.cost, p.source = 0, "zero"
 	must(t, s.RecordUsage(second))
 	p.cost, p.source = 7, ""
 	third := detailedEvent(b, "exec-c", day(*now).Add(11*time.Hour))
@@ -53,8 +53,8 @@ func TestDetailedAggregatesAndRequestViews(t *testing.T) {
 	if view.Summary.InputTokens != 24 || view.Summary.OutputTokens != 6 || view.Summary.DetailedRequests != 3 || view.Summary.CompleteRequests != 3 {
 		t.Fatal("token detail missing", view.Summary)
 	}
-	if view.Summary.LatencyMS != 7500 || view.Summary.LatencySamples != 3 || view.Summary.TTFTMS != 1500 || view.Summary.TTFTSamples != 2 || view.Summary.UnpricedRequests != 1 {
-		t.Fatal("latency/unpriced detail missing", view.Summary)
+	if view.Summary.LatencyMS != 7500 || view.Summary.LatencySamples != 3 || view.Summary.TTFTMS != 1500 || view.Summary.TTFTSamples != 2 {
+		t.Fatal("latency detail missing", view.Summary)
 	}
 	if view.Range.Timezone != "UTC" || !view.Range.AsOf.Equal(*now) || !view.Range.To.Equal(*now) || view.Series.Granularity != "hour" {
 		t.Fatal("range/series contract", view.Range, view.Series.Granularity)
@@ -490,10 +490,11 @@ func TestDetailPriceQuoteImmutable(t *testing.T) {
 	reasoning := int64(3)
 	catalogTime := *now
 	quote := pricing.Quote{
-		CostMicroUSD: 7, Source: "manual", RuleID: "rule",
+		CostMicroUSD: 7, Source: "manual",
 		Rates:       pricing.Rates{Input: 1, Reasoning: &reasoning},
-		CatalogTime: &catalogTime, MissingRates: []string{"output"},
-		Candidates: []pricing.Candidate{{Provider: "p", Model: "m", Rates: pricing.Rates{Reasoning: &reasoning}, MissingRates: []string{"input"}}},
+		Definition:  pricing.PricingDefinition{Base: pricing.RateSet{Input: 1, CacheWriteByTTL: map[int64]int64{300: 1}}},
+		CatalogTime: &catalogTime, SupportIssues: []string{"output"},
+		Candidates: []pricing.Candidate{{Provider: "p", Model: "m", Rates: pricing.Rates{Reasoning: &reasoning}, SupportIssues: []string{"input"}}},
 	}
 	must(t, s.db.Update(func(tx *bolt.Tx) error {
 		var stored recordData
@@ -509,14 +510,16 @@ func TestDetailPriceQuoteImmutable(t *testing.T) {
 		t.Fatal("price quote missing", d.PriceQuote)
 	}
 	*d.PriceQuote.Rates.Reasoning = 99
-	d.PriceQuote.MissingRates[0] = "changed"
-	d.PriceQuote.Candidates[0].MissingRates[0] = "changed"
+	d.PriceQuote.Definition.Base.CacheWriteByTTL[300] = 9
+	d.PriceQuote.SupportIssues[0] = "changed"
+	d.PriceQuote.Candidates[0].SupportIssues[0] = "changed"
 	*d.PriceQuote.CatalogTime = d.PriceQuote.CatalogTime.Add(time.Hour)
 	again, e := s.Detail("quote")
 	must(t, e)
 	if again.PriceQuote.Rates.Reasoning == nil || *again.PriceQuote.Rates.Reasoning != 3 ||
-		again.PriceQuote.MissingRates[0] != "output" ||
-		again.PriceQuote.Candidates[0].MissingRates[0] != "input" ||
+		again.PriceQuote.Definition.Base.CacheWriteByTTL[300] != 1 ||
+		again.PriceQuote.SupportIssues[0] != "output" ||
+		again.PriceQuote.Candidates[0].SupportIssues[0] != "input" ||
 		!again.PriceQuote.CatalogTime.Equal(catalogTime) {
 		t.Fatal("saved quote mutated", again.PriceQuote)
 	}
