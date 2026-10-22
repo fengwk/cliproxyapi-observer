@@ -6,6 +6,10 @@ import {
   preserveOriginalExpiry,
   toLocalDatetimeInput,
   formatDateTime,
+  formatUTCOffset,
+  getBrowserTimeZone,
+  parseLocalDatetimeInput,
+  isUnchangedLocalDatetime,
   formatBytes,
 } from './format';
 
@@ -40,6 +44,36 @@ describe('format utilities', () => {
     });
   });
 
+  describe('local datetime input', () => {
+    it('round-trips a stored instant through the browser-local input value', () => {
+      const original = '2026-10-19T14:30:00.123456789Z';
+      const input = toLocalDatetimeInput(original);
+      expect(input).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
+      expect(preserveOriginalExpiry(original, input)).toBe(original);
+    });
+
+    it('rejects malformed local input', () => {
+      expect(parseLocalDatetimeInput('not-a-date').date).toBeNull();
+      expect(parseLocalDatetimeInput('2026-13-01T00:00').date).toBeNull();
+    });
+
+    it('only treats the exact minute-precision control value as unchanged', () => {
+      const original = '2026-10-19T14:30:00.123456789Z';
+      const input = toLocalDatetimeInput(original);
+      expect(isUnchangedLocalDatetime(original, input)).toBe(true);
+      expect(isUnchangedLocalDatetime(original, ` ${input} `)).toBe(true);
+      expect(isUnchangedLocalDatetime(original, `${input}junk`)).toBe(false);
+      expect(isUnchangedLocalDatetime(original, `${input}:30`)).toBe(false);
+    });
+
+    it('exposes the browser IANA timezone and explicit numeric offsets', () => {
+      expect(getBrowserTimeZone()).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+      expect(formatUTCOffset(480)).toBe('UTC+08:00');
+      expect(formatUTCOffset(-300)).toBe('UTC-05:00');
+      expect(formatUTCOffset(0)).toBe('UTC');
+    });
+  });
+
   describe('preserveOriginalExpiry', () => {
     it('preserves exact original RFC3339 nanoseconds when unchanged', () => {
       const original = '2026-10-19T14:30:00.123456789Z';
@@ -54,6 +88,15 @@ describe('format utilities', () => {
       const result = preserveOriginalExpiry(original, input);
       expect(result).not.toBe(original);
       expect(result).toContain('2026-10-20');
+    });
+
+    it('parses pseudo-input with trailing junk or explicit seconds instead of preserving', () => {
+      const original = '2026-10-19T14:30:00.123456789Z';
+      const input = toLocalDatetimeInput(original);
+      expect(preserveOriginalExpiry(original, `${input}junk`)).toBeNull();
+      const secondsChanged = preserveOriginalExpiry(original, `${input}:30`);
+      expect(secondsChanged).not.toBe(original);
+      expect(new Date(secondsChanged as string).getSeconds()).toBe(30);
     });
 
     it('returns null on empty input', () => {

@@ -667,13 +667,116 @@ function filterRecords(records, query) {
     .sort((a, b) => Date.parse(b.time) - Date.parse(a.time));
 }
 
-function computeSummary(records, query) {
-  const bucketMs = query.to - query.from <= 48 * 3600 * 1000 ? 3600 * 1000 : 24 * 3600 * 1000;
-  const granularity = bucketMs === 3600 * 1000 ? 'hour' : 'day';
+const requestViewTimeZoneFormatters = new Map();
+
+function requestViewFormatter(timeZone) {
+  if (!requestViewTimeZoneFormatters.has(timeZone)) {
+    requestViewTimeZoneFormatters.set(timeZone, new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23'
+    }));
+  }
+  return requestViewTimeZoneFormatters.get(timeZone);
+}
+
+function zonedParts(ms, timeZone) {
+  if (timeZone === 'UTC') {
+    const d = new Date(ms);
+    return {
+      year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate(),
+      hour: d.getUTCHours(), minute: d.getUTCMinutes(), second: d.getUTCSeconds()
+    };
+  }
+  const out = {};
+  for (const part of requestViewFormatter(timeZone).formatToParts(new Date(ms))) {
+    if (part.type !== 'literal') out[part.type] = Number(part.value);
+  }
+  return out;
+}
+
+function localDateString(ms, timeZone) {
+  const p = zonedParts(ms, timeZone);
+  return String(p.year).padStart(4, '0') + '-' +
+    String(p.month).padStart(2, '0') + '-' + String(p.day).padStart(2, '0');
+}
+
+// Resolve a wall-clock local date-time to the earliest matching UTC instant.
+// Offset candidates handle ordinary days and repeated hours; when the local
+// midnight does not exist (for example America/Santiago 2025-09-07), the first
+// representable instant after the gap is used instead of oscillating to the
+// previous day.
+function zonedDateTimeToMs(year, month, day, timeZone) {
+  const target = Date.UTC(year, month - 1, day, 0, 0, 0);
+  if (timeZone === 'UTC') return target;
+  const wallAt = (ms) => {
+    const p = zonedParts(ms, timeZone);
+    return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  };
+  const offsets = new Set();
+  for (const probe of [target - 36 * 3600000, target, target + 36 * 3600000]) {
+    offsets.add(wallAt(probe) - probe);
+  }
+  const matches = [];
+  for (const offset of offsets) {
+    const candidate = target - offset;
+    if (wallAt(candidate) === target && !matches.includes(candidate)) matches.push(candidate);
+  }
+  if (matches.length > 0) return Math.min(...matches);
+
+  // Nonexistent wall time (spring-forward gap). Return the first instant whose
+  // local wall clock has reached the requested value.
+  for (let t = target - 12 * 3600000; t <= target + 12 * 3600000; t += 60000) {
+    if (wallAt(t) >= target) return t;
+  }
+  return target;
+}
+
+function parseViewDate(value, timeZone, name) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw failure(400, 'invalid_query', name + ' must be YYYY-MM-DD');
+  }
+  const [year, month, day] = value.split('-').map(Number);
+  const roundTrip = new Date(Date.UTC(year, month - 1, day));
+  if (roundTrip.toISOString().slice(0, 10) !== value) {
+    throw failure(400, 'invalid_query', name + ' must be a valid local calendar date');
+  }
+  return { year, month, day, value };
+}
+
+function nextCalendarDate(date) {
+  const next = new Date(Date.UTC(date.year, date.month - 1, date.day + 1));
+  return { year: next.getUTCFullYear(), month: next.getUTCMonth() + 1, day: next.getUTCDate() };
+}
+
+function computeSummary(records, query, timeZone = 'UTC') {
+  const elapsed = query.to - query.from;
+  const granularity = elapsed <= 48 * 3600 * 1000 ? 'hour' : 'day';
   const buckets = new Map();
-  const start = Math.floor(query.from / bucketMs) * bucketMs;
-  for (let t = start; t < query.to && buckets.size < 400; t += bucketMs) {
-    buckets.set(t, { time: iso(t), requests: 0, failures: 0, cost_micro_usd: 0, tokens: 0 });
+  const addBucket = (key, time) => buckets.set(key, {
+    time: iso(time), requests: 0, failures: 0, cost_micro_usd: 0, tokens: 0
+  });
+  if (granularity === 'hour') {
+    // Elapsed hours from local midnight: during a fall-back transition this
+    // keeps 25 distinct buckets instead of merging the repeated local hour.
+    for (let t = query.from; t < query.to && buckets.size < 400; t += 3600 * 1000) {
+      addBucket(t, t);
+    }
+  } else {
+    // Day buckets start at each local midnight, so DST days are 23/25 hours
+    // and the bucket timestamp is the UTC instant of that local midnight.
+    let cursor = parseViewDate(localDateString(query.from, timeZone), timeZone, 'from_date');
+    for (let guard = 0; guard < 400; guard++) {
+      const start = zonedDateTimeToMs(cursor.year, cursor.month, cursor.day, timeZone);
+      if (start >= query.to) break;
+      addBucket(cursor.value, start);
+      cursor = nextCalendarDate(cursor);
+    }
   }
   const summary = {
     requests: 0,
@@ -688,10 +791,15 @@ function computeSummary(records, query) {
     if (record.failed) summary.failures += 1;
     summary.cost_micro_usd += record.cost_micro_usd || 0;
     summary.tokens += record.tokens ? record.tokens.total || 0 : 0;
-    const key = Math.floor(Date.parse(record.time) / bucketMs) * bucketMs;
+    const at = Date.parse(record.time);
+    const key = granularity === 'hour'
+      ? query.from + Math.floor((at - query.from) / 3600000) * 3600000
+      : localDateString(at, timeZone);
     let bucket = buckets.get(key);
     if (!bucket) {
-      bucket = { time: iso(key), requests: 0, failures: 0, cost_micro_usd: 0, tokens: 0 };
+      const time = granularity === 'hour' ? key : zonedDateTimeToMs(
+        ...Object.values(parseViewDate(String(key), timeZone, 'series')).slice(0, 3), timeZone);
+      bucket = { time: iso(time), requests: 0, failures: 0, cost_micro_usd: 0, tokens: 0 };
       buckets.set(key, bucket);
     }
     bucket.requests += 1;
@@ -717,28 +825,45 @@ function computeSummary(records, query) {
     return out;
   }
   Object.assign(summary, detail(records));
-  for (const bucket of summary.buckets) Object.assign(bucket, detail(records.filter(row => Math.floor(Date.parse(row.time) / bucketMs) * bucketMs === Date.parse(bucket.time))));
+  for (const bucket of summary.buckets) {
+    const rows = records.filter(row => {
+      const at = Date.parse(row.time);
+      return granularity === 'hour'
+        ? query.from + Math.floor((at - query.from) / 3600000) * 3600000 === Date.parse(bucket.time)
+        : localDateString(at, timeZone) === localDateString(Date.parse(bucket.time), timeZone);
+    });
+    Object.assign(bucket, detail(rows));
+  }
   return summary;
 }
 
 function requestView(state, url) {
   const copy = new URL(url);
-  const now = Date.now(), today = iso(now).slice(0, 10);
-  const date = value => {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(Date.parse(value)) || iso(Date.parse(value)).slice(0, 10) !== value) throw failure(400, 'invalid_query', 'invalid UTC date');
-    return Date.parse(value + 'T00:00:00Z');
-  };
+  const now = Date.now();
+  const timeZoneRaw = copy.searchParams.get('timezone') || 'UTC';
+  let timeZone = timeZoneRaw;
+  if (!timeZone || timeZone === 'Local') throw failure(400, 'invalid_query', 'timezone must be an IANA name');
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone });
+  } catch {
+    throw failure(400, 'invalid_query', 'timezone must be an IANA name');
+  }
+  const today = localDateString(now, timeZone);
   if (copy.searchParams.has('from') || copy.searchParams.has('to')) throw failure(400, 'invalid_query', 'mixed ranges');
   for (const key of copy.searchParams.keys()) if (copy.searchParams.getAll(key).length !== 1) throw failure(400, 'invalid_query', 'repeated parameter');
-  const from = date(copy.searchParams.get('from_date') || today);
-  const end = date(copy.searchParams.get('to_date') || today);
-  if (end < from) throw failure(400, 'invalid_query', 'reversed dates');
-  const to = Math.min(now, end + 86400000);
+  const fromDate = parseViewDate(copy.searchParams.get('from_date') || today, timeZone, 'from_date');
+  const endDate = parseViewDate(copy.searchParams.get('to_date') || today, timeZone, 'to_date');
+  const from = zonedDateTimeToMs(fromDate.year, fromDate.month, fromDate.day, timeZone);
+  const nextDay = nextCalendarDate(endDate);
+  const end = zonedDateTimeToMs(nextDay.year, nextDay.month, nextDay.day, timeZone);
+  if (end <= from) throw failure(400, 'invalid_query', 'reversed dates');
+  const to = Math.min(now, end);
+  if (!(from < to)) throw failure(400, 'invalid_query', 'from must be before to');
   const view = copy.searchParams.get('view') || 'requests';
   if (!['requests', 'model', 'key', 'key_model', 'account', 'provider'].includes(view)) throw failure(400, 'invalid_query', 'invalid view');
-  ['from_date', 'to_date', 'view'].forEach(key => copy.searchParams.delete(key));
+  ['from_date', 'to_date', 'view', 'timezone'].forEach(key => copy.searchParams.delete(key));
   copy.searchParams.set('from', iso(from)); copy.searchParams.set('to', iso(to));
-  const query = parseRequestQuery(copy), rows = filterRecords(state.records, query), summary = computeSummary(rows, query);
+  const query = parseRequestQuery(copy), rows = filterRecords(state.records, query), summary = computeSummary(rows, query, timeZone);
   const { buckets, granularity, ...aggregate } = summary;
   let selected = rows, groups = [];
   if (view !== 'requests') {
@@ -751,7 +876,7 @@ function requestView(state, url) {
       map.get(id).push(row);
     }
     groups = [...map].map(([id, items]) => {
-      const { buckets, granularity, ...totals } = computeSummary(items, query);
+      const { buckets, granularity, ...totals } = computeSummary(items, query, timeZone);
       const row = items[0];
       const keyed = view === 'key' || view === 'key_model';
       return { ...totals, key: id,
@@ -763,7 +888,7 @@ function requestView(state, url) {
     selected = groups;
   }
   const start = (query.page - 1) * query.page_size, page = selected.slice(start, start + query.page_size);
-  return { range: { from: iso(from), to: iso(to), as_of: iso(now), timezone: 'UTC' }, summary: aggregate,
+  return { range: { from: iso(from), to: iso(to), as_of: iso(now), timezone: timeZone }, summary: aggregate,
     series: { granularity, buckets }, records: view === 'requests' ? page : [], groups: view === 'requests' ? [] : page,
     pagination: { page: query.page, page_size: query.page_size, has_more: start + page.length < selected.length },
     coverage: { raw_from: iso(now - state.settings.raw_retention_hours * 3600000), daily_from: iso(now - state.settings.daily_retention_days * 86400000), detailed_requests: rows.length, requests: rows.length, backfill_pending: false } };

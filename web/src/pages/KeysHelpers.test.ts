@@ -117,6 +117,27 @@ describe('KeysHelpers Unit Tests', () => {
       expect(res.valid).toBe(true);
       expect(res.iso).toBe(origISO);
     });
+
+    // 意图：同一分钟后的垃圾串不能冒充未修改输入
+    it('rejects pseudo-input that only shares the original minute', () => {
+      const origISO = '2026-10-19T14:30:00.123456789Z';
+      const d = new Date(origISO);
+      const localInput = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}T${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      const res = validateExpiry(true, `${localInput}junk`, origISO);
+      expect(res.valid).toBe(false);
+      expect(res.iso).toBeNull();
+    });
+
+    // 意图：明确修改秒数时走正常解析，而不是保留原始纳秒
+    it('converts an explicit seconds edit instead of preserving the original', () => {
+      const origISO = '2026-10-19T14:30:00.123456789Z';
+      const d = new Date(origISO);
+      const localInput = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}T${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      const res = validateExpiry(true, `${localInput}:30`, origISO);
+      expect(res.valid).toBe(true);
+      expect(res.iso).not.toBe(origISO);
+      expect(new Date(res.iso as string).getSeconds()).toBe(30);
+    });
   });
 
   describe('copyToClipboard', () => {

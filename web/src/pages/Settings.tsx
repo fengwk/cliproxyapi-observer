@@ -24,7 +24,7 @@ import type {
   ModelMapping,
   CleanupResult,
 } from '../lib/types';
-import { errorMessage } from '../lib/format';
+import { errorMessage, formatDateTime } from '../lib/format';
 import {
   formatBytes,
   formatInt,
@@ -1057,7 +1057,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
             <span style={{ margin: '0 8px' }}>·</span>
             <span>已记录模型与手工价格：{formatInt(snapshot.prices?.length ?? 0)} 条</span>
             <span style={{ margin: '0 8px' }}>·</span>
-            <span>上次同步：{isLastSyncValid ? new Date(snapshot.last_sync).toLocaleString('zh-CN') : '尚未同步'}</span>
+            <span>上次同步：{isLastSyncValid ? formatDateTime(snapshot.last_sync) : '尚未同步'}</span>
             {pricingSource !== snapshot.source && (
               <span style={{ marginLeft: 8 }}>（保存并刷新后切换目录）</span>
             )}
@@ -1362,7 +1362,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
         <div className="settings-diagnostic-grid">
           <div>采集压缩数据 / 预算：{formatBytes(health.capture_bytes ?? 0)} / {formatBytes(health.capture_limit_bytes ?? confirmedSettings.max_body_storage_bytes)}</div>
           <div>可回收物理空闲空间：{formatBytes(health.reclaimable_bytes ?? 0)}</div>
-          <div>上次内容清理：{health.last_cleanup_at ? new Date(health.last_cleanup_at).toLocaleString() : '暂无'} · {health.last_cleanup_records ?? 0} 条</div>
+          <div>上次内容清理：{health.last_cleanup_at ? formatDateTime(health.last_cleanup_at) : '暂无'} · {health.last_cleanup_records ?? 0} 条</div>
           <div>上次整理前 / 后：{formatBytes(health.last_compact_before_bytes ?? 0)} / {formatBytes(health.last_compact_after_bytes ?? 0)}</div>
         </div>
         <div className="settings-actions">
@@ -1370,7 +1370,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
           <Button variant="danger" disabled={isMutationBusy} onClick={() => setContentOperation('purge')}>立即清空全部内容</Button>
         </div>
         {health.dropped_captures > 0 && <Notice tone="warning">
-          本次运行自 {health.counters_since ? new Date(health.counters_since).toLocaleString() : '启动'} 累计丢弃 {health.dropped_captures} 条诊断采集，不代表计费丢失或仍有故障。
+          本次运行自 {health.counters_since ? formatDateTime(health.counters_since) : '启动'} 累计丢弃 {health.dropped_captures} 条诊断采集，不代表计费丢失或仍有故障。
           {Object.entries(health.capture_drops ?? {}).map(([reason, count]) => <span key={reason}> {reason}: {count}；</span>)}
         </Notice>}
         {contentOperation && <Modal title={contentOperation === 'purge' ? '清空全部内容' : '清理过期内容'} onClose={() => { if (!compacting) setContentOperation(null); }}

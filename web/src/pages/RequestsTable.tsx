@@ -10,7 +10,7 @@ import {
   formatNumber,
   formatPriceSource,
   formatSecondsFromMs,
-  formatUTCDateTime,
+  formatLocalDateTime,
   resolveKeyDisplay,
 } from './RequestsHelpers';
 import { Badge, Button, EmptyState } from '../components/ui';
@@ -161,7 +161,7 @@ export function RequestsTable({
                             {r.model}
                           </button>
                           <span className="requests-subtext">
-                            {formatUTCDateTime(r.time)}
+                            {formatLocalDateTime(r.time)}
                           </span>
                         </div>
                       </td>

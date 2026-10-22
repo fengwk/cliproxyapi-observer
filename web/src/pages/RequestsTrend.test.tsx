@@ -36,6 +36,19 @@ function makeBuckets(count: number): SummaryBucket[] {
   }));
 }
 
+function localTick(iso: string): string {
+  const d = new Date(iso);
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hours = String(d.getHours()).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+  const offset = -d.getTimezoneOffset();
+  const zone = offset === 0
+    ? 'UTC'
+    : `UTC${offset > 0 ? '+' : '-'}${String(Math.floor(Math.abs(offset) / 60)).padStart(2, '0')}:${String(Math.abs(offset) % 60).padStart(2, '0')}`;
+  return `${month}-${day} ${hours}:${minutes} ${zone}`;
+}
+
 function tickCount() {
   return screen.queryAllByTestId('requests-trend-axis-tick').length;
 }
@@ -54,7 +67,7 @@ describe('RequestsTrend time axis', () => {
   // all time text lives in plain HTML rather than the horizontally stretched SVG.
   it('renders adaptive HTML ticks outside the stretched SVG on wide charts', () => {
     render(<RequestsTrend series={{ granularity: 'day', buckets: makeBuckets(12) }} />);
-    setWidth(900);
+    setWidth(1200);
 
     expect(tickCount()).toBe(6);
     const svg = screen.getByRole('img', { name: '请求与失败趋势图' });
@@ -62,8 +75,8 @@ describe('RequestsTrend time axis', () => {
 
     const axis = screen.getByTestId('requests-trend-axis');
     expect(axis.closest('svg')).toBeNull();
-    expect(axis).toHaveTextContent('10-01 00:00 UTC');
-    expect(axis).toHaveTextContent('10-12 00:00 UTC');
+    expect(axis).toHaveTextContent(localTick('2026-10-01T00:00:00Z'));
+    expect(axis).toHaveTextContent(localTick('2026-10-12T00:00:00Z'));
   });
 
   it('reduces ticks on narrow charts and centers a single bucket label', () => {
@@ -81,7 +94,7 @@ describe('RequestsTrend time axis', () => {
     expect(tickCount()).toBe(1);
     const single = screen.getByTestId('requests-trend-axis-tick');
     expect(single).toHaveStyle({ left: '50%', transform: 'translateX(-50%)' });
-    expect(single).toHaveTextContent('10-01 00:00 UTC');
+    expect(single).toHaveTextContent(localTick('2026-10-01T00:00:00Z'));
   });
 
   it('shows an honest empty state without axis ticks when there is no data', () => {

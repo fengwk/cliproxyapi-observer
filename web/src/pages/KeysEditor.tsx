@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import type { FormEvent } from 'react';
 import type { ApiClient } from '../lib/api';
 import type { Key, KeySpec, Limits } from '../lib/types';
-import { formatUSD, toLocalDatetimeInput, errorMessage } from '../lib/format';
+import { formatUSD, toLocalDatetimeInput, errorMessage, getBrowserTimeZone } from '../lib/format';
 import { Button, Input, Field, Modal, Switch, Notice } from '../components/ui';
 import { ModelPicker } from './ModelPicker';
 import {
@@ -367,7 +367,10 @@ export function KeyEditor({ keyData, api, onClose, onSuccess }: KeyEditorProps) 
           </h3>
           <div className="cpa-form-grid cpa-form-grid-2">
             <div>
-              <Field label="有效期">
+              <Field
+                label="有效期"
+                hint={`按浏览器本地时区 ${getBrowserTimeZone()} 解释；时区切换时不存在或重复的本地时间会被拒绝。`}
+              >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
                   <Switch
                     checked={hasExpiry}

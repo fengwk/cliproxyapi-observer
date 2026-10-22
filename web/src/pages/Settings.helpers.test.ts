@@ -37,6 +37,7 @@ import type {
   PricingDefinition,
   RateSet,
 } from '../lib/types';
+import { getBrowserTimeZone } from '../lib/format';
 
 function baseDefinition(overrides: Partial<RateSet> = {}): PricingDefinition {
   return {
@@ -233,6 +234,7 @@ describe('Settings.helpers', () => {
     });
 
     it('round-trips nested all/any/not conditions and describes them in the editor', () => {
+      expect(emptyConditionDraft().timezone).toBe(getBrowserTimeZone());
       const condition: Condition = {
         any: [
           { serviceTier: ['priority'] },

@@ -8,7 +8,7 @@ import {
   formatNumber,
   formatPriceSource,
   formatSecondsFromMs,
-  formatUTCDateTime,
+  formatLocalDateTime,
   redactBody,
   redactHeaders,
   resolveKeyDisplay,
@@ -157,8 +157,8 @@ export function RequestsDetailModal({
                     </span>
                   </div>
                   <div className="requests-detail-item">
-                    <span className="requests-detail-item-label">时间 (UTC)</span>
-                    <span className="requests-detail-item-val">{formatUTCDateTime(record.time)}</span>
+                    <span className="requests-detail-item-label">时间 (本地)</span>
+                    <span className="requests-detail-item-val">{formatLocalDateTime(record.time)}</span>
                   </div>
                   <div className="requests-detail-item">
                     <span className="requests-detail-item-label">状态</span>
@@ -313,13 +313,13 @@ export function RequestsDetailModal({
                   {detail.captured_at && (
                     <div className="requests-capture-status-item">
                       <span className="requests-subtext">采集于:</span>
-                      <span>{formatUTCDateTime(detail.captured_at)}</span>
+                      <span>{formatLocalDateTime(detail.captured_at)}</span>
                     </div>
                   )}
                   {detail.expires_at && (
                     <div className="requests-capture-status-item">
                       <span className="requests-subtext">到期于:</span>
-                      <span>{formatUTCDateTime(detail.expires_at)}</span>
+                      <span>{formatLocalDateTime(detail.expires_at)}</span>
                     </div>
                   )}
                   {detail.original_bytes !== undefined && (
@@ -410,13 +410,13 @@ export function RequestsDetailModal({
                   {detail.captured_at && (
                     <div className="requests-capture-status-item">
                       <span className="requests-subtext">采集于:</span>
-                      <span>{formatUTCDateTime(detail.captured_at)}</span>
+                      <span>{formatLocalDateTime(detail.captured_at)}</span>
                     </div>
                   )}
                   {detail.expires_at && (
                     <div className="requests-capture-status-item">
                       <span className="requests-subtext">到期于:</span>
-                      <span>{formatUTCDateTime(detail.expires_at)}</span>
+                      <span>{formatLocalDateTime(detail.expires_at)}</span>
                     </div>
                   )}
                   {detail.original_bytes !== undefined && (

@@ -1,5 +1,6 @@
 import React from 'react';
 import type { FilterState, PresetRange } from './RequestsHelpers';
+import { getBrowserTimeZone } from '../lib/format';
 import type { SelectOption } from '../components/ui';
 import { Button, Input, Select } from '../components/ui';
 
@@ -89,7 +90,12 @@ export function RequestsFilters({
               自定义
             </button>
           </div>
-          <div className="requests-tz-indicator">时间：UTC</div>
+          <div
+            className="requests-tz-indicator"
+            title="日期筛选按浏览器本地日历解释，查询会携带该 IANA 时区。"
+          >
+            本地时区：{getBrowserTimeZone()}
+          </div>
           {isDirty && (
             <div className="requests-dirty-badge" role="status">
               筛选未应用（点击查询或按 Enter 应用）

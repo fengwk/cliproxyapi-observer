@@ -179,6 +179,102 @@ test('request view: key_model groups by Key/provider/model with the Key label', 
   });
 });
 
+test('request view: IANA timezone interprets inclusive local calendar dates', async () => {
+  await withServer(async (server) => {
+    const base = server.state.records[0];
+    const recordAt = (id, time) => ({ ...base, id, time });
+
+    server.state.records = [
+      recordAt('sh-before', '2026-10-19T15:30:00.000Z'), // Oct 19 23:30 in Shanghai
+      recordAt('sh-first', '2026-10-19T16:30:00.000Z'),  // Oct 20 00:30
+      recordAt('sh-last', '2026-10-20T15:30:00.000Z'),   // Oct 20 23:30
+      recordAt('sh-after', '2026-10-20T16:30:00.000Z'),  // Oct 21 00:30
+    ];
+    const shanghai = await json(server,
+      '/requests/view?from_date=2026-10-20&to_date=2026-10-20&timezone=Asia%2FShanghai&page_size=100');
+    assert.equal(shanghai.res.status, 200);
+    assert.equal(shanghai.body.range.timezone, 'Asia/Shanghai');
+    assert.equal(shanghai.body.range.from, '2026-10-19T16:00:00.000Z');
+    assert.equal(shanghai.body.range.to, '2026-10-20T16:00:00.000Z');
+    assert.deepEqual(shanghai.body.records.map((item) => item.id).sort(), ['sh-first', 'sh-last']);
+
+    server.state.records = [
+      recordAt('ny-before', '2026-10-20T03:30:00.000Z'), // Oct 19 23:30 in New York
+      recordAt('ny-first', '2026-10-20T04:30:00.000Z'),  // Oct 20 00:30 EDT
+      recordAt('ny-last', '2026-10-21T03:30:00.000Z'),   // Oct 20 23:30
+      recordAt('ny-after', '2026-10-21T04:30:00.000Z'),  // Oct 21 00:30
+    ];
+    const newYork = await json(server,
+      '/requests/view?from_date=2026-10-20&to_date=2026-10-20&timezone=America%2FNew_York&page_size=100');
+    assert.equal(newYork.body.range.timezone, 'America/New_York');
+    assert.equal(newYork.body.range.from, '2026-10-20T04:00:00.000Z');
+    assert.equal(newYork.body.range.to, '2026-10-21T04:00:00.000Z');
+    assert.deepEqual(newYork.body.records.map((item) => item.id).sort(), ['ny-first', 'ny-last']);
+
+    for (const zone of ['Local', 'Not/A_Zone']) {
+      const bad = await json(server,
+        '/requests/view?from_date=2026-10-20&to_date=2026-10-20&timezone=' + encodeURIComponent(zone));
+      assert.equal(bad.res.status, 400, zone);
+      assert.ok(errorShape(bad.body), zone);
+    }
+  });
+});
+
+test('request view: DST local days and elapsed hours remain exact', async () => {
+  await withServer(async (server) => {
+    const base = server.state.records[0];
+    const recordAt = (id, time) => ({ ...base, id, time });
+    server.state.records = [
+      recordAt('fall-early', '2025-11-02T05:30:00.000Z'), // 01:30 EDT
+      recordAt('fall-late', '2025-11-02T06:30:00.000Z'),  // 01:30 EST
+      recordAt('spring', '2026-03-08T07:30:00.000Z'),     // 03:30 EDT
+    ];
+
+    const fall = await json(server,
+      '/requests/view?from_date=2025-11-02&to_date=2025-11-02&timezone=America%2FNew_York&page_size=100');
+    assert.equal(fall.body.range.from, '2025-11-02T04:00:00.000Z');
+    assert.equal(fall.body.range.to, '2025-11-03T05:00:00.000Z');
+    assert.equal(fall.body.series.granularity, 'hour');
+    assert.equal(fall.body.series.buckets.length, 25);
+    assert.equal(fall.body.series.buckets[0].time, '2025-11-02T04:00:00.000Z');
+    assert.equal(fall.body.series.buckets[24].time, '2025-11-03T04:00:00.000Z');
+    assert.deepEqual(fall.body.records.map((item) => item.id).sort(), ['fall-early', 'fall-late']);
+
+    const spring = await json(server,
+      '/requests/view?from_date=2026-03-08&to_date=2026-03-08&timezone=America%2FNew_York&page_size=100');
+    assert.equal(spring.body.range.from, '2026-03-08T05:00:00.000Z');
+    assert.equal(spring.body.range.to, '2026-03-09T04:00:00.000Z');
+    assert.equal(spring.body.series.buckets.length, 23);
+    assert.deepEqual(spring.body.records.map((item) => item.id), ['spring']);
+
+    const days = await json(server,
+      '/requests/view?from_date=2025-11-01&to_date=2025-11-03&timezone=America%2FNew_York&page_size=100');
+    assert.equal(days.body.series.granularity, 'day');
+    assert.deepEqual(days.body.series.buckets.map((bucket) => bucket.time), [
+      '2025-11-01T04:00:00.000Z',
+      '2025-11-02T04:00:00.000Z',
+      '2025-11-03T05:00:00.000Z',
+    ]);
+  });
+});
+
+test('request view: midnight DST gap starts at the first representable instant', async () => {
+  await withServer(async (server) => {
+    // America/Santiago 2025-09-07: local 00:00 jumps to 01:00, so the local day
+    // is 23 elapsed hours and must start at 04:00Z rather than drift to the
+    // previous day or carry the next day's boundary to 01:00.
+    const day = await json(server,
+      '/requests/view?from_date=2025-09-07&to_date=2025-09-07&timezone=America%2FSantiago&page_size=100');
+    assert.equal(day.res.status, 200);
+    assert.equal(day.body.range.from, '2025-09-07T04:00:00.000Z');
+    assert.equal(day.body.range.to, '2025-09-08T03:00:00.000Z');
+    assert.equal(day.body.series.granularity, 'hour');
+    assert.equal(day.body.series.buckets.length, 23);
+    assert.equal(day.body.series.buckets[0].time, '2025-09-07T04:00:00.000Z');
+    assert.equal(day.body.series.buckets[22].time, '2025-09-08T02:00:00.000Z');
+  });
+});
+
 test('details: query-ID route only, fake redacted headers/body, XSS payload stays data', async () => {
   await withServer(async (server) => {
     const missing = await json(server, '/requests/detail?id=does-not-exist');

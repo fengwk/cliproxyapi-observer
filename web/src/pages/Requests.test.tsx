@@ -25,7 +25,8 @@ Object.assign(navigator, { clipboard: mockClipboard });
 // Mock scrollIntoView for Radix Select in jsdom
 window.HTMLElement.prototype.scrollIntoView = vi.fn();
 
-const FIXED_NOW = new Date('2026-10-20T12:00:00Z');
+// Local noon makes the expected local calendar date stable across test TZ values.
+const FIXED_NOW = new Date(2026, 9, 20, 12, 0, 0);
 
 function createSampleRequestView(): RequestView {
   return {
@@ -284,10 +285,10 @@ describe('RequestsPage and RequestsHelpers', () => {
 
   /**
    * Why covered:
-   * Proves that date bounds properly use inclusive UTC dates (YYYY-MM-DD),
-   * and buildRequestViewParams constructs valid GET /requests/view queries.
+   * Proves that date bounds are inclusive browser-local dates (YYYY-MM-DD),
+   * and buildRequestViewParams carries the browser IANA timezone.
    */
-  it('UTC bounds: correctly formats inclusive UTC dates for GET /requests/view', () => {
+  it('local bounds: formats inclusive local dates and browser timezone for GET /requests/view', () => {
     const query = buildRequestViewParams(
       {
         from: '2026-10-20',
@@ -315,6 +316,9 @@ describe('RequestsPage and RequestsHelpers', () => {
     expect(params.get('status')).toBe('success');
     expect(params.get('page')).toBe('1');
     expect(params.get('page_size')).toBe('25');
+    expect(params.get('timezone')).toBe(
+      Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    );
   });
 
   /**
@@ -357,12 +361,10 @@ describe('RequestsPage and RequestsHelpers', () => {
 
   /**
    * Why covered:
-   * Proves that preset ranges are inclusive and properly bounded:
-   * - today = [today, today]
-   * - last 7 days = [6 days ago, today] (7 full inclusive days)
-   * - last 30 days = [29 days ago, today] (30 full inclusive days)
+   * Proves that preset ranges are inclusive and properly bounded in the
+   * browser-local calendar.
    */
-  it('preset ranges: inclusive UTC ranges for today, last 7 days, and last 30 days', () => {
+  it('preset ranges: inclusive local ranges for today, last 7 days, and last 30 days', () => {
     const today = getPresetRange('today', FIXED_NOW);
     expect(today.from).toBe('2026-10-20');
     expect(today.to).toBe('2026-10-20');
@@ -1213,11 +1215,11 @@ describe('RequestsPage and RequestsHelpers', () => {
     }
   });
 
-  // Rolling presets follow the UTC calendar, including leap day, while a
-  // user-applied historical date remains fixed across later midnight changes.
-  it('rolling today advances across UTC leap day without moving a custom historical range', async () => {
+  // Rolling presets follow the browser-local calendar, including leap day,
+  // while a user-applied historical date remains fixed across midnight.
+  it('rolling today advances across local leap day without moving a custom historical range', async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date('2024-02-28T23:59:58Z'));
+    vi.setSystemTime(new Date(2024, 1, 28, 23, 59, 58));
     const api = createMockApiClient();
     const mounted = render(<RequestsPage api={api} onDirtyChange={vi.fn()} />);
     const viewCalls = () => vi.mocked(api.request).mock.calls.filter(([path]) => path.startsWith('/requests/view'));
@@ -1233,7 +1235,7 @@ describe('RequestsPage and RequestsHelpers', () => {
       fireEvent.change(screen.getByLabelText('结束日期'), { target: { value: '2024-02-27' } });
       await act(async () => { fireEvent.click(screen.getByRole('button', { name: '查询' })); });
       const count = viewCalls().length;
-      vi.setSystemTime(new Date('2024-03-01T00:00:00Z'));
+      vi.setSystemTime(new Date(2024, 2, 1, 0, 0, 0));
       await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
       expect(viewCalls()).toHaveLength(count);
       expect(screen.getByLabelText('结束日期')).toHaveValue('2024-02-27');
@@ -1323,7 +1325,7 @@ describe('RequestsPage and RequestsHelpers', () => {
     const errorNotice = await screen.findByText(/invalid query/);
     expect(errorNotice).toBeInTheDocument();
 
-    const correctiveBtn = screen.getByRole('button', { name: '修正为整日 UTC 范围' });
+    const correctiveBtn = screen.getByRole('button', { name: '修正为本地整日范围' });
     expect(correctiveBtn).toBeInTheDocument();
 
     // Click corrective button

@@ -11,7 +11,7 @@ import type {
   RatePatch,
   RateSet,
 } from '../lib/types';
-import { parseUSD, formatUSD } from '../lib/format';
+import { parseUSD, formatUSD, getBrowserTimeZone } from '../lib/format';
 
 export const MAX_SAFE_MICRO = 9_000_000_000_000_000;
 export const DEFAULT_MAX_BODY_BYTES = 1_048_576; // 1 MiB
@@ -492,7 +492,7 @@ export function emptyConditionDraft(): ConditionDraft {
     dateLt: '',
     timeStart: '',
     timeEnd: '',
-    timezone: 'UTC',
+    timezone: getBrowserTimeZone(),
     weekdays: [],
     allPresent: false,
     all: [],
@@ -554,7 +554,7 @@ export function conditionSummary(draft: ConditionDraft): string {
     parts.push(`上下文 ${opLabel} ${draft.context.upperValue.trim()}`);
   }
   if (draft.serviceTier.trim()) parts.push(`服务档 ${draft.serviceTier.trim()}`);
-  if (draft.dateGte || draft.dateLt) parts.push(`日期 ${draft.dateGte || '…'} → ${draft.dateLt || '…'}`);
+  if (draft.dateGte || draft.dateLt) parts.push(`UTC 日期 ${draft.dateGte || '…'} → ${draft.dateLt || '…'}`);
   if (draft.timeStart || draft.timeEnd) {
     parts.push(`${draft.timezone || 'UTC'} ${draft.timeStart || '…'}-${draft.timeEnd || '…'}`);
   }

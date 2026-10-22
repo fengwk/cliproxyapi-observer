@@ -332,7 +332,8 @@ export interface RequestViewRange {
   from: string;
   to: string;
   as_of: string;
-  timezone: 'UTC';
+  /** IANA timezone used to interpret the inclusive from_date/to_date query. */
+  timezone: string;
 }
 
 export interface RequestViewGroup extends Aggregate {
