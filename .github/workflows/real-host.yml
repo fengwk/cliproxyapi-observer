@@ -67,6 +67,10 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Build CLIProxyAPI host from source
+        env:
+          # The host may require a newer Go patch than the plugin's SDK baseline.
+          # Let Go select the toolchain declared by that host's go.mod, only here.
+          GOTOOLCHAIN: auto
         run: bash scripts/build-cpa-host.sh "${{ steps.tag.outputs.tag }}" "$RUNNER_TEMP/cpa/cli-proxy-api"
 
       - name: Run real-host integration suite

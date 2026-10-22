@@ -79,3 +79,22 @@ func TestDeliveryBuildVersion(t *testing.T) {
 		}
 	}
 }
+
+// go mod download reports failures as JSON on stdout; command substitution
+// must not swallow the reason before set -e terminates the host build.
+func TestDeliveryHostBuildFailureDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	fakeGo := "#!/bin/sh\nprintf '%s\\n' '{\"Error\":\"requires go >= 1.26.10\"}'\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(dir, "go"), []byte(fakeGo), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := exec.Command("bash", "scripts/build-cpa-host.sh", "v8.0.39", filepath.Join(dir, "host")).CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "failed to download github.com/router-for-me/CLIProxyAPI/v8@v8.0.39") ||
+		!strings.Contains(string(out), "requires go >= 1.26.10") {
+		t.Fatalf("expected explicit module download failure, output %q, error %v", out, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "host")); !os.IsNotExist(err) {
+		t.Fatalf("failed host download must not produce a host executable: %v", err)
+	}
+}

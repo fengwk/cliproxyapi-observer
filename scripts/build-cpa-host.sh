@@ -30,7 +30,11 @@ if [[ "$major" != "$expected_major" ]]; then
 fi
 
 module="github.com/router-for-me/CLIProxyAPI/v${major}"
-info="$(go mod download -json "${module}@${tag}")"
+if ! info="$(go mod download -json "${module}@${tag}")"; then
+	echo "build-cpa-host: failed to download ${module}@${tag}" >&2
+	printf '%s\n' "$info" >&2
+	exit 1
+fi
 dir="$(printf '%s' "$info" | jq -r '.Dir // empty')"
 
 if [[ -z "$dir" || ! -f "${dir}/go.mod" ]]; then
