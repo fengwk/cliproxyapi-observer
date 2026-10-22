@@ -22,6 +22,10 @@ CHROME_BIN=/usr/bin/google-chrome-stable \
   BROWSER_REPORT_DIR=/tmp/observer-browser-report make browser
 CHROME_BIN=/usr/bin/google-chrome-stable \
   node internal/web/browser/timezone-check.cjs --report-dir /tmp/observer-tz-report
+
+# 仅验收此次价格控件与账户名称布局：320/390/640/1440px，仍使用官方 CPA 外壳。
+CHROME_BIN=/usr/bin/google-chrome-stable \
+  node internal/web/browser/run.cjs --ui-layout --report-dir /tmp/observer-ui-layout
 ```
 
 `make build` 使用已提交的 `internal/web/dist`。更改前端源码后必须重新构建，

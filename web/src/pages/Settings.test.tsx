@@ -327,6 +327,26 @@ describe('SettingsPage', () => {
     expect(screen.getByText('同输出')).toBeDefined();
   });
 
+  // The compact row must retain labelled controls and save the chosen source;
+  // verbose catalog caveats stay available without taking a permanent row.
+  it('keeps public pricing controls labelled and saves the selected catalog source', async () => {
+    render(<SettingsPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
+    const source = await screen.findByRole('combobox', { name: '价格目录来源' });
+    expect(screen.getByLabelText('目录来源')).toBe(source);
+    expect(screen.getByLabelText('自动使用公共价格')).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByLabelText('公共价格目录说明').closest('details')).not.toHaveAttribute('open');
+    expect(screen.getByText('公共价格仅供参考，手工价格优先；缺失价格按 $0 计费。')).toBeInTheDocument();
+
+    fireEvent.keyDown(source, { key: 'ArrowDown' });
+    fireEvent.click(screen.getByRole('option', { name: 'models.dev v1' }));
+    expect(source).toHaveTextContent('models.dev v1');
+    fireEvent.click(screen.getByTestId('settings-pricing-save'));
+    await screen.findByText('价格设置已保存');
+    const saved = vi.mocked(mockApi.request).mock.calls.find(call => call[1]?.method === 'PUT')?.[1]?.body as Settings;
+    expect(saved.pricing.source).toBe('models_dev_v1');
+    expect(saved.pricing.auto).toBe(true);
+  });
+
   // Test catalog refresh failure displays honest error and retains cache
   it('honestly displays catalog refresh failure without false success', async () => {
     const mockRequest = vi.fn(async (path: string) => {

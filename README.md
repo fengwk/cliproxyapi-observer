@@ -1,4 +1,4 @@
-# Observer v1.0.0
+# Observer v1.0.1
 
 认证采用最小侵入的非独占共存：CPA 凭据保留原生行为，Observer 仅管理自己支持的
 调用，不是全路由安全网关。范围见 [认证与模型权限](docs/model-policy.md)。
@@ -8,14 +8,16 @@ CLIProxyAPI（CPA）独立原生插件，稳定 ID `cliproxyapi-observer`。提�
 模型路由、重试或会话。最低 CPA **v8.0.30 / 插件 schema 6**，SDK 锁定 v8.0.30；
 更高 v8 稳定版由 CI 验证，不承诺未验证版本或 v9 兼容。
 
-**本版使用新 schema3 和 `observer_features=3`，保存客户端密钥明文。**
+**当前使用 schema3 和 `observer_features=3`，保存客户端密钥明文。**
+v1.0.1 沿用 v1.0.0 的数据库结构，**从 v1.0.0 升级无需重建数据库**。
 默认库仍为 `data/cliproxyapi-observer-v2.db`；小时汇总与内容索引继续保留。
-新结构不提供旧价格、旧汇总或旧配置的迁移/双读路径；打开旧 schema 库会明确报
-不兼容且不会就地改写。请停流备份后使用新库重建 Key 与价格配置。
+不提供 schema2 及更早版本的旧价格、旧汇总或旧配置的迁移/双读路径；打开这些旧库
+会明确报不兼容且不会就地改写。仅从这些旧版本升级时，需停流备份后使用新库重建 Key 与价格配置。
 旧库只存哈希的密钥无法还原明文，重新生成后才可在列表查看；不会拿内部 ID 冒充。
 升级前请备份，安排停流维护；发布不会自动修改生产配置或删除旧数据库。
 当前能力、API、SDK 限制和安全升级/回退步骤见 [重构说明](docs/reconstruction.md)。
-本版定价、账本与 schema 不兼容变更见 [v1.0.0 发布说明](docs/release-notes-v1.0.0.md)；
+紧凑价格布局、真实账户名称与显示修复见 [v1.0.1 发布说明](docs/release-notes-v1.0.1.md)；
+v1.0.0 定价、账本与 schema 不兼容变更见 [v1.0.0 发布说明](docs/release-notes-v1.0.0.md)；
 此前搜索焦点修复见 [v0.9.3 发布说明](docs/release-notes-v0.9.3.md)；
 请求调试、显示与自定义 provider 用量修复见 [v0.9.2 发布说明](docs/release-notes-v0.9.2.md)；
 Key 名称样式修正见 [v0.9.1 发布说明](docs/release-notes-v0.9.1.md)；
@@ -275,7 +277,7 @@ python3 scripts/test_publish_release.py
 浏览器入口见 [现有说明](internal/web/browser/README.md)，使用本地假数据和实际 Chrome，
 CI 上传报告及截图。`make build` 验证本机 c-shared；发布矩阵仍构建三个平台。
 版本通过 `internal/plugin.Version` ldflags 注入，正式版本来自 tag，开发构建为
-`1.0.0-dev+<commit>`，不取 SDK 版本。
+`1.0.1-dev+<commit>`，不取 SDK 版本。
 
 现有依赖维护策略保留：仅白名单 Go/官方 Actions 纯版本升级可经完整 CI 后自动合并，
 普通功能合并不会触发自动发版；不可变发布器校验源码、三个平台归档与校验和，

@@ -48,6 +48,7 @@ export function RequestsDetailModal({
   };
 
   const record = detail?.record;
+  const accountName = accountDisplay(record?.auth_index, record?.account_name);
   const complete = record?.accounting_quality === 'complete';
   const keyInfo = record ? resolveKeyDisplay(record.key_id, keysMap) : null;
   const isSuccess = record ? !record.failed : false;
@@ -199,8 +200,11 @@ export function RequestsDetailModal({
                   </div>
                   <div className="requests-detail-item">
                     <span className="requests-detail-item-label">账户</span>
-                    <span className="requests-detail-item-val font-mono">
-                      {accountDisplay(record.auth_index, record.account_name)}
+                    <span
+                      className="requests-detail-item-val requests-account-name"
+                      title={accountName}
+                    >
+                      {accountName}
                     </span>
                   </div>
                   <div className="requests-detail-item">

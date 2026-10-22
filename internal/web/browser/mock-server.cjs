@@ -58,6 +58,7 @@ const SECRET_PREFIX = 'sk-';
 const NANO_EXPIRY = '2027-03-04T05:06:07.123456789Z';
 const NANO_KEY_ID = 'key-nano';
 const LONG_KEY_ID = '0123456789abcdef'.repeat(4);
+const LONG_ACCOUNT_NAME = 'codex-60c4e13c-long-account-name@example.test';
 
 // Server-provided payloads that must never become DOM nodes or execute script.
 const XSS = {
@@ -347,6 +348,12 @@ function createRecords(now) {
       cost_micro_usd: 0,
       price_source: 'zero',
       accounting_quality: 'unclassified'
+    }),
+    // 真实形状的长 Codex 账户名：明细与分组必须共用省略样式和完整 title。
+    record('req-009', 5, {
+      provider: 'codex',
+      auth_index: 'auth-codex-long',
+      account_name: LONG_ACCOUNT_NAME
     })
   ];
 }
@@ -1996,6 +2003,7 @@ module.exports = {
   MAX_BODY_BYTES,
   MAX_BODY_STORAGE_BYTES,
   LONG_KEY_ID,
+  LONG_ACCOUNT_NAME,
   NANO_EXPIRY,
   NANO_KEY_ID,
   PLUGIN_ID,

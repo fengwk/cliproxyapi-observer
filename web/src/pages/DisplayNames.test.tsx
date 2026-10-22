@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { accountDisplay, resolveKeyDisplay, captureReasonLabel, accountingQualityLabel, blockedReasonLabel, formatPriceSource } from './RequestsHelpers';
 import { RequestsDetailModal } from './RequestsDetailModal';
-import type { Detail, Key } from '../lib/types';
+import { RequestsTable } from './RequestsTable';
+import type { Detail, Key, RequestRecord } from '../lib/types';
 
 describe('friendly identities', () => {
   // Display names never replace the identity used by queries or row keys.
@@ -34,6 +35,28 @@ describe('friendly identities', () => {
     expect(blockedReasonLabel('accounting interruption: explicit acknowledgement required')).toBe('记账过程被中断，需要明确确认恢复');
     expect(blockedReasonLabel('future-code')).toBe('未知阻断原因');
     expect(formatPriceSource('future-code').label).toBe('未知定价来源');
+  });
+
+  // A real long account name uses the same label, ellipsis class and full-name
+  // tooltip in request rows and account groups; the index stays an identity only.
+  it('presents the same account name in request rows and account groups', () => {
+    const name = 'codex-60c4e13c-long-account-name@example.test';
+    const record = { id: 'private-request', auth_index: 'private-account', account_name: `  ${name}  `,
+      time: '2026-10-22T00:00:00Z', tokens: {}, provider: 'codex' } as RequestRecord;
+    const props = { onViewChange: () => {}, page: 1, hasMore: false, onPageChange: () => {},
+      keysMap: new Map<string, Key>(), onOpenDetail: () => {} };
+    const { rerender } = render(<RequestsTable {...props} view="requests" records={[record]} />);
+    const requestName = screen.getByTitle(name);
+    expect(requestName).toHaveTextContent(name);
+    expect(requestName).toHaveClass('requests-account-name', 'requests-subtext');
+    expect(screen.queryByText('private-account')).not.toBeInTheDocument();
+    rerender(<RequestsTable {...props} view="account" groups={[{
+      key: 'private-account', auth_index: 'private-account', label: `  ${name}  `,
+      requests: 1, failures: 0, tokens: 0, cost_micro_usd: 0,
+    }]} />);
+    expect(screen.getByTitle(name)).toHaveTextContent(name);
+    expect(screen.getByTitle(name)).toHaveClass('requests-account-name');
+    expect(screen.queryByText('private-account')).not.toBeInTheDocument();
   });
 
   // Native details is closed initially; identifiers remain available for diagnostics.

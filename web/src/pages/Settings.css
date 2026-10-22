@@ -90,6 +90,81 @@
   line-height: 1.4;
 }
 
+/* Keep short pricing controls next to their labels, not on full-width rows. */
+.settings-pricing-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+}
+
+.settings-pricing-auto {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.settings-pricing-source {
+  display: grid;
+  grid-template-columns: auto minmax(0, 240px) auto;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.settings-pricing-source > label {
+  white-space: nowrap;
+}
+
+.settings-pricing-source .cpa-select-trigger {
+  min-width: 0;
+  width: 100%;
+}
+
+.settings-pricing-source .cpa-select-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-pricing-source .cpa-select-icon {
+  flex-shrink: 0;
+}
+
+.settings-pricing-help {
+  position: relative;
+  color: var(--text-secondary);
+}
+
+.settings-pricing-help > summary {
+  display: block;
+  padding: 4px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.settings-pricing-help > summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-pricing-help > p {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 1;
+  width: min(300px, calc(100vw - 64px));
+  margin: 4px 0 0;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-primary);
+  box-shadow: var(--shadow);
+  line-height: 1.5;
+}
+
 /* Collapsible sections */
 .settings-details {
   border: 1px solid var(--border-color);

@@ -145,6 +145,7 @@ export function RequestsTable({
                     r.stream
                   );
                   const priceSource = formatPriceSource(r.price_source);
+                  const accountName = accountDisplay(r.auth_index, r.account_name);
                   const isSuccess = !r.failed;
                   const complete = r.accounting_quality === 'complete';
 
@@ -191,8 +192,11 @@ export function RequestsTable({
                           <span className="requests-primary-text">
                             {r.provider || '—'}
                           </span>
-                          <span className="requests-subtext">
-                            {accountDisplay(r.auth_index, r.account_name)}
+                          <span
+                            className="requests-subtext requests-account-name"
+                            title={accountName}
+                          >
+                            {accountName}
                           </span>
                         </div>
                       </td>

@@ -1004,28 +1004,23 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
 
         {pricingStatus && <Notice tone={pricingStatus.tone}>{pricingStatus.message}</Notice>}
 
-        <div className="settings-toggle-row">
-          <div className="settings-toggle-info">
-            <span className="settings-toggle-title">自动使用 models.dev 公共价格目录</span>
-            <span className="settings-toggle-hint">
-              开启后按所选目录自动同步参考价格，可能与实际账单不同。手工价格以完整定义替换目录价格。
-            </span>
+        <div className="settings-pricing-controls">
+          <div className="settings-pricing-auto">
+            <label className="settings-toggle-title" htmlFor="settings-pricing-auto">
+              自动使用公共价格
+            </label>
+            <Switch
+              id="settings-pricing-auto"
+              aria-label="自动使用 models.dev 公共价格目录"
+              checked={pricingAuto}
+              disabled={isMutationBusy}
+              onChange={(checked) => setPricingAuto(checked)}
+            />
           </div>
-          <Switch
-            id="settings-pricing-auto"
-            aria-label="自动使用 models.dev 公共价格目录"
-            checked={pricingAuto}
-            disabled={isMutationBusy}
-            onChange={(checked) => setPricingAuto(checked)}
-          />
-        </div>
-
-        <div className="settings-grid">
-          <Field
-            label="价格目录来源"
-            hint="固定 models.dev 端点；保存后刷新目录并使用所选版本，缺失价格按 $0 计费。"
-          >
+          <div className="settings-pricing-source">
+            <label htmlFor="settings-pricing-source">目录来源</label>
             <Select
+              id="settings-pricing-source"
               aria-label="价格目录来源"
               value={pricingSource}
               disabled={isMutationBusy}
@@ -1035,8 +1030,18 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
               ]}
               onChange={(value) => setPricingSource(value as PricingSource)}
             />
-          </Field>
+            <details className="settings-pricing-help">
+              <summary aria-label="公共价格目录说明" title="公共价格目录说明">ⓘ</summary>
+              <p>
+                固定 models.dev v1/v2 端点。保存价格设置后，刷新目录以使用所选版本。
+                公共价格仅供参考，可能与实际账单不同；手工价格以完整定义替换目录价格。
+              </p>
+            </details>
+          </div>
         </div>
+        <p className="settings-note">
+          公共价格仅供参考，手工价格优先；缺失价格按 $0 计费。
+        </p>
 
         {/* Public Catalog Sync Status */}
         <div

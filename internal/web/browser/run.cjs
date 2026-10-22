@@ -20,6 +20,7 @@ for (let i = 2; i < process.argv.length; i++) {
   else if (name === '--base-url') args.baseUrl = process.argv[++i];
   else if (name === '--chrome') args.chrome = process.argv[++i];
   else if (name === '--account-display') args.accountDisplay = true;
+  else if (name === '--ui-layout') args.uiLayout = true;
   else throw new Error('Unknown argument: ' + name);
 }
 const real = Boolean(args.baseUrl);
@@ -392,6 +393,7 @@ async function readonlyPages(env, name) {
   }
   await frame.getByTestId('requests-table-section').scrollIntoViewIfNeeded();
   await shot(page, name + '-request-table');
+  if (server) await verifyAccountLayout(env, name);
   await frame.locator('#content').evaluate(el => { el.scrollTop = 0; });
   // Details must be fetched on demand, safely rendered as text and never turn
   // malicious model/header/JSON strings into DOM or script.
@@ -476,14 +478,7 @@ async function readonlyPages(env, name) {
   await settingsTab(frame).click();
   await frame.getByTestId('observer-settings').waitFor();
   await frame.locator('.settings-table tbody tr').first().waitFor();
-  // Status and search stay on one row, including narrow and zoomed viewports.
-  const previewStatus = await frame.getByRole('combobox', { name: '价格匹配状态', exact: true }).boundingBox();
-  const previewSearch = await frame.getByRole('textbox', { name: '搜索可用模型', exact: true }).boundingBox();
-  check(name + ': pricing status and search share one row',
-    previewStatus && previewSearch &&
-    Math.abs(previewStatus.y - previewSearch.y) <= 2 &&
-    previewStatus.x + previewStatus.width <= previewSearch.x &&
-    previewSearch.width > 0, JSON.stringify({ previewStatus, previewSearch }));
+  await verifyPricingControls(env, name);
   await frame.locator('#content').evaluate(el => { el.scrollTop = 0; });
   await verifySafeRects(env, name + '-settings');
   await verifyContentPane(env, name + ': settings top');
@@ -533,6 +528,75 @@ async function readonlyPages(env, name) {
   await shot(page, name + '-settings-bottom');
   check(name + ': XSS strings stayed text', await frame.evaluate(() => !window.__observerXss &&
     !document.querySelector('#content script,#content img[onerror],#content iframe')));
+}
+
+// Assert real clipping and full-name hover text, not just a CSS class.
+async function verifyAccountEllipsis(frame, name) {
+  const metrics = await frame.getByTitle(mock.LONG_ACCOUNT_NAME, { exact: true }).evaluate(element => {
+    const style = getComputedStyle(element), rect = element.getBoundingClientRect();
+    const cell = element.closest('td') || element.closest('.requests-detail-item');
+    const bounds = cell.getBoundingClientRect();
+    return {
+      text: element.textContent, title: element.title, width: rect.width,
+      clipped: element.scrollWidth > element.clientWidth,
+      ellipsis: style.textOverflow === 'ellipsis' && style.overflow === 'hidden' && style.whiteSpace === 'nowrap',
+      inside: rect.left >= bounds.left && rect.right <= bounds.right,
+    };
+  });
+  check(name + ': long account name is ellipsized with its complete tooltip',
+    metrics.text === mock.LONG_ACCOUNT_NAME && metrics.title === mock.LONG_ACCOUNT_NAME &&
+    metrics.width > 0 && metrics.width <= 220 && metrics.clipped && metrics.ellipsis && metrics.inside,
+    JSON.stringify(metrics));
+}
+
+async function verifyAccountLayout(env, name) {
+  const { frame } = env;
+  await verifyAccountEllipsis(frame, name + ' requests');
+  await frame.getByRole('tab', { name: '账户分组', exact: true }).click();
+  await frame.getByRole('columnheader', { name: '账户', exact: true }).waitFor();
+  await verifyAccountEllipsis(frame, name + ' account groups');
+  await frame.getByRole('tab', { name: '请求明细', exact: true }).click();
+  await frame.getByRole('columnheader', { name: '提供商 / 账户', exact: true }).waitFor();
+}
+
+async function verifyPricingControls(env, name) {
+  const { frame } = env;
+  // Status and search stay on one row, including narrow and zoomed viewports.
+  const previewStatus = await frame.getByRole('combobox', { name: '价格匹配状态', exact: true }).boundingBox();
+  const previewSearch = await frame.getByRole('textbox', { name: '搜索可用模型', exact: true }).boundingBox();
+  check(name + ': pricing status and search share one row',
+    previewStatus && previewSearch &&
+    Math.abs(previewStatus.y - previewSearch.y) <= 2 &&
+    previewStatus.x + previewStatus.width <= previewSearch.x &&
+    previewSearch.width > 0, JSON.stringify({ previewStatus, previewSearch }));
+  const controls = await frame.evaluate(() => {
+    const box = selector => {
+      const rect = document.querySelector(selector).getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    };
+    return {
+      row: box('.settings-pricing-controls'),
+      autoLabel: box('label[for="settings-pricing-auto"]'),
+      toggle: box('#settings-pricing-auto'),
+      sourceLabel: box('label[for="settings-pricing-source"]'),
+      source: box('#settings-pricing-source'),
+    };
+  });
+  const center = box => box.y + box.height / 2;
+  const gap = (left, right) => right.x - left.x - left.width;
+  check(name + ': public-price toggle stays beside its label',
+    Math.abs(center(controls.autoLabel) - center(controls.toggle)) <= 2 &&
+    gap(controls.autoLabel, controls.toggle) >= 0 && gap(controls.autoLabel, controls.toggle) <= 16,
+    JSON.stringify(controls));
+  check(name + ': catalog source is bounded and shares its label row',
+    controls.source.width > 0 && controls.source.width <= 240 &&
+    Math.abs(center(controls.sourceLabel) - center(controls.source)) <= 2 &&
+    gap(controls.sourceLabel, controls.source) >= 0 && gap(controls.sourceLabel, controls.source) <= 12,
+    JSON.stringify(controls));
+  if (controls.row.width >= 600) {
+    check(name + ': desktop pricing controls share one compact row',
+      Math.abs(center(controls.toggle) - center(controls.source)) <= 2, JSON.stringify(controls));
+  }
 }
 
 async function verifyPricingLayout(env, name) {
@@ -899,6 +963,42 @@ async function main() {
     const origin = real ? new URL(args.baseUrl).origin : server.origin;
     if (!real) report.ui_url = server.resourceURL;
     browser = await chromium.launch({ executablePath: args.chrome, headless: true, args: ['--no-sandbox'] });
+    if (args.uiLayout) {
+      assert(!real, '--ui-layout uses fake data only');
+      for (const width of [320, 390, 640, 1440]) {
+        server.resetState();
+        const env = await openShell(browser, origin, shell, { width, height: 900 }, 'light', server);
+        activeEnvironment = env;
+        try {
+          await loginObserver(env.frame);
+          await verifyAccountLayout(env, `${width}`);
+          const account = env.frame.getByTitle(mock.LONG_ACCOUNT_NAME, { exact: true });
+          await account.scrollIntoViewIfNeeded();
+          await shot(env.page, `${width}-request-account`);
+          await account.locator('xpath=ancestor::tr').getByRole('button', { name: '查看请求详情' }).click();
+          await env.frame.getByRole('dialog').getByTitle(mock.LONG_ACCOUNT_NAME, { exact: true }).waitFor();
+          await verifyAccountEllipsis(env.frame.getByRole('dialog'), `${width} detail`);
+          await closeModal(env.frame);
+          await settingsTab(env.frame).click();
+          await env.frame.locator('.settings-table tbody tr').first().waitFor();
+          await env.frame.locator('#content').evaluate(content => {
+            const section = document.querySelector('[aria-labelledby="settings-pricing-heading"]');
+            content.scrollTop += section.getBoundingClientRect().top - content.getBoundingClientRect().top;
+          });
+          await verifyPricingControls(env, `${width}`);
+          await verifyPricingLayout(env, `${width}`);
+          await shot(env.page, `${width}-pricing-controls`);
+          const help = env.frame.locator('.settings-pricing-help');
+          assert.equal(await help.getAttribute('open'), null);
+          await help.locator('summary').click();
+          await help.locator('p').waitFor({ state: 'visible' });
+          await shot(env.page, `${width}-pricing-help`);
+          check(`${width}: no console/page/CSP errors`, env.diagnostics.length === 0, env.diagnostics.join('\n'));
+        } finally { await env.context.close(); }
+      }
+      report.outcome = report.results.every(result => result.ok) ? 'completed' : 'failed';
+      return;
+    }
     const cases = real
       ? [{ width: 1280, height: 900, theme: 'dark' }, { width: 390, height: 844, theme: 'white' }]
       : [1280, 390].flatMap(width => ['light', 'white', 'dark', 'auto'].map(theme => ({ width, height: width === 390 ? 844 : 900, theme })))
