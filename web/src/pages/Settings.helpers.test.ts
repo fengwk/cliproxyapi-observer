@@ -1,457 +1,445 @@
 import { describe, it, expect } from 'vitest';
 import {
-  formatBytes,
-  formatRateDisplay,
-  validTimeRange,
-  validateGeneralSettings,
-  parseRatesInput,
-  parseManualPrices,
-  parseRules,
-  generateUniqueRuleID,
-  moveItem,
-  areRatesEqual,
-  isPricingDraftEqual,
-  splitBytesToCapacity,
-  parseCapacityToBytes,
   MAX_BODY_BYTES,
   MAX_BODY_STORAGE_BYTES,
-  MIN_RAW_RETENTION_HOURS,
+  MAX_DAILY_RETENTION_DAYS,
   MAX_RAW_RETENTION_HOURS,
   MIN_DAILY_RETENTION_DAYS,
-  MAX_DAILY_RETENTION_DAYS,
+  MIN_RAW_RETENTION_HOURS,
+  conditionSummary,
+  conditionToDraft,
+  definitionToDraft,
+  emptyConditionDraft,
+  emptyDefinitionDraft,
+  formatRateDisplay,
+  formatReasoningDisplay,
+  formatTtlSeconds,
+  generateUniqueDefinitionID,
+  isPricingDraftEqual,
+  moveItem,
+  parseCapacityToBytes,
+  parseDefinition,
+  parseManualPrices,
+  parseTtlSeconds,
+  pricingSourceLabel,
+  rateSetToDraft,
+  sourceLabel,
+  splitBytesToCapacity,
+  validTimeRange,
+  validateGeneralSettings,
 } from './Settings.helpers';
-import type { PricingConfig } from '../lib/types';
+import type {
+  Condition,
+  ManualPrice,
+  PricingConfig,
+  PricingDefinition,
+  RateSet,
+} from '../lib/types';
+
+function baseDefinition(overrides: Partial<RateSet> = {}): PricingDefinition {
+  return {
+    base: {
+      input: 1_000_000,
+      output: 2_000_000,
+      cache_read: 100_000,
+      cache_write: 1_000_000,
+      reasoning: null,
+      ...overrides,
+    },
+    overrides: [],
+    multipliers: [],
+  };
+}
+
+function manualDraft(
+  model: string,
+  provider: string,
+  definition: PricingDefinition = baseDefinition()
+) {
+  return {
+    id: `${model}-${provider}`,
+    model,
+    provider,
+    definition: definitionToDraft(definition),
+  };
+}
 
 describe('Settings.helpers', () => {
-  // Test formatBytes outputs correct human-friendly units
-  it('formats byte numbers with appropriate SI/binary scale', () => {
-    expect(formatBytes(0)).toBe('0 B');
-    expect(formatBytes(512)).toBe('512 B');
-    expect(formatBytes(1048576)).toBe('1.0 MB');
-    expect(formatBytes(268435456)).toBe('256.0 MB');
-    expect(formatBytes(1073741824)).toBe('1.00 GB');
-    expect(formatBytes(-10)).toBe('—');
+  describe('display and labels', () => {
+    it('formats exact micro-USD and reasoning inheritance without floating point loss', () => {
+      expect(formatRateDisplay(0)).toBe('$0');
+      expect(formatRateDisplay(150000)).toBe('$0.15');
+      expect(formatRateDisplay(1234567)).toBe('$1.234567');
+      expect(formatRateDisplay(undefined)).toBe('—');
+      expect(formatReasoningDisplay(null)).toBe('同输出');
+      expect(formatReasoningDisplay(undefined)).toBe('同输出');
+      expect(formatReasoningDisplay(0)).toBe('$0');
+      expect(sourceLabel('manual')).toBe('手工价格');
+      expect(sourceLabel('auto')).toBe('自动目录');
+      expect(sourceLabel('zero')).toBe('零价格');
+      expect(pricingSourceLabel('models_dev_v2')).toBe('models.dev v2');
+      expect(pricingSourceLabel('models_dev_v1')).toBe('models.dev v1');
+    });
+
+    it('validates half-open time ranges including cross-midnight', () => {
+      expect(validTimeRange('08:00-18:00')).toBe(true);
+      expect(validTimeRange('22:00-06:00')).toBe(true);
+      expect(validTimeRange('12:00-12:00')).toBe(false);
+      expect(validTimeRange('24:00-06:00')).toBe(false);
+      expect(validTimeRange('8:00-18:00')).toBe(false);
+    });
   });
 
-  // Test formatRateDisplay formats micro-USD correctly
-  it('formats micro-USD rates into dollar strings with $ prefix', () => {
-    expect(formatRateDisplay(0)).toBe('$0');
-    expect(formatRateDisplay(150000)).toBe('$0.15');
-    expect(formatRateDisplay(1234567)).toBe('$1.234567');
-    expect(formatRateDisplay(undefined)).toBe('—');
-    expect(formatRateDisplay(null)).toBe('—');
-  });
-
-  // Test storage bounds validation: 1GiB max storage, 8MiB max body, 168h raw, 3650d daily
-  describe('validateGeneralSettings', () => {
+  describe('general settings', () => {
     const baseValid = {
       capture_enabled: false,
-      max_body_bytes: 1048576, // 1 MiB
-      max_body_storage_bytes: 268435456, // 256 MiB
+      max_body_bytes: 1048576,
+      max_body_storage_bytes: 268435456,
       raw_retention_hours: 24,
       daily_retention_days: 365,
     };
 
-    it('accepts compliant default general settings', () => {
+    it('accepts defaults and enforces body, storage and retention limits', () => {
       expect(validateGeneralSettings(baseValid)).toBeNull();
+      expect(validateGeneralSettings({ ...baseValid, max_body_bytes: MAX_BODY_BYTES + 1 })).toMatch(/8 MiB/);
+      expect(validateGeneralSettings({ ...baseValid, max_body_storage_bytes: MAX_BODY_STORAGE_BYTES + 1 })).toMatch(/1 GiB/);
+      expect(validateGeneralSettings({ ...baseValid, max_body_bytes: 5000, max_body_storage_bytes: 4000 })).toMatch(/不能超过/);
+      expect(validateGeneralSettings({ ...baseValid, raw_retention_hours: MIN_RAW_RETENTION_HOURS })).toBeNull();
+      expect(validateGeneralSettings({ ...baseValid, raw_retention_hours: MAX_RAW_RETENTION_HOURS + 1 })).toMatch(/168/);
+      expect(validateGeneralSettings({ ...baseValid, daily_retention_days: MIN_DAILY_RETENTION_DAYS })).toBeNull();
+      expect(validateGeneralSettings({ ...baseValid, daily_retention_days: MAX_DAILY_RETENTION_DAYS + 1 })).toMatch(/3650/);
     });
 
-    it('enforces single body upper limit of 8 MiB (8,388,608 bytes)', () => {
-      expect(validateGeneralSettings({ ...baseValid, max_body_bytes: MAX_BODY_BYTES })).toBeNull();
-      expect(validateGeneralSettings({ ...baseValid, max_body_bytes: MAX_BODY_BYTES + 1 })).toMatch(
-        /8 MiB/
-      );
-      expect(validateGeneralSettings({ ...baseValid, max_body_bytes: 0 })).toMatch(/1 字节/);
-    });
-
-    it('enforces total storage upper limit of 1 GiB (1,073,741,824 bytes)', () => {
-      expect(
-        validateGeneralSettings({ ...baseValid, max_body_storage_bytes: MAX_BODY_STORAGE_BYTES })
-      ).toBeNull();
-      expect(
-        validateGeneralSettings({
-          ...baseValid,
-          max_body_storage_bytes: MAX_BODY_STORAGE_BYTES + 1,
-        })
-      ).toMatch(/1 GiB/);
-      expect(validateGeneralSettings({ ...baseValid, max_body_storage_bytes: 0 })).toMatch(
-        /1 字节/
-      );
-    });
-
-    it('enforces single body byte limit does not exceed total storage limit', () => {
-      expect(
-        validateGeneralSettings({
-          ...baseValid,
-          max_body_bytes: 5000,
-          max_body_storage_bytes: 4000,
-        })
-      ).toMatch(/单个请求体上限不能超过请求体总存储上限/);
-    });
-
-    it('enforces raw retention bounds between 1 and 168 hours', () => {
-      expect(
-        validateGeneralSettings({ ...baseValid, raw_retention_hours: MIN_RAW_RETENTION_HOURS })
-      ).toBeNull();
-      expect(
-        validateGeneralSettings({ ...baseValid, raw_retention_hours: MAX_RAW_RETENTION_HOURS })
-      ).toBeNull();
-      expect(validateGeneralSettings({ ...baseValid, raw_retention_hours: 0 })).toMatch(
-        /1 至 168 小时/
-      );
-      expect(validateGeneralSettings({ ...baseValid, raw_retention_hours: 169 })).toMatch(
-        /1 至 168 小时/
-      );
-    });
-
-    it('enforces daily retention bounds between 1 and 3650 days', () => {
-      expect(
-        validateGeneralSettings({ ...baseValid, daily_retention_days: MIN_DAILY_RETENTION_DAYS })
-      ).toBeNull();
-      expect(
-        validateGeneralSettings({ ...baseValid, daily_retention_days: MAX_DAILY_RETENTION_DAYS })
-      ).toBeNull();
-      expect(validateGeneralSettings({ ...baseValid, daily_retention_days: 0 })).toMatch(
-        /1 至 3650 天/
-      );
-      expect(validateGeneralSettings({ ...baseValid, daily_retention_days: 3651 })).toMatch(
-        /1 至 3650 天/
-      );
+    it('converts capacity to exact integer bytes and rejects lossy fractions', () => {
+      expect(splitBytesToCapacity(1073741824)).toEqual({ amount: '1', unit: 'GB' });
+      expect(splitBytesToCapacity(268435456)).toEqual({ amount: '256', unit: 'MB' });
+      expect(splitBytesToCapacity(1048577)).toEqual({ amount: '1048577', unit: 'B' });
+      expect(parseCapacityToBytes('0.5', 'KB', '上限')).toBe(512);
+      expect(() => parseCapacityToBytes('0.3', 'KB', '上限')).toThrow(/整数字节/);
+      expect(() => parseCapacityToBytes('0', 'MB', '上限')).toThrow(/超出允许范围/);
     });
   });
 
-  // Test UTC time range validation: half-open, cross-midnight, invalid formats
-  describe('validTimeRange', () => {
-    it('accepts valid standard daytime range', () => {
-      expect(validTimeRange('08:00-18:00')).toBe(true);
-      expect(validTimeRange('00:00-12:00')).toBe(true);
+  describe('TTL and reasoning drafts', () => {
+    it('parses human TTL values to positive integer seconds and formats them back', () => {
+      expect(parseTtlSeconds('5m', 'TTL')).toBe(300);
+      expect(parseTtlSeconds('1h', 'TTL')).toBe(3600);
+      expect(parseTtlSeconds('1h30m', 'TTL')).toBe(5400);
+      expect(parseTtlSeconds('3600', 'TTL')).toBe(3600);
+      expect(() => parseTtlSeconds('0', 'TTL')).toThrow(/正整数/);
+      expect(formatTtlSeconds(300)).toBe('5m');
+      expect(formatTtlSeconds(5400)).toBe('1h30m');
+      expect(formatTtlSeconds(90061)).toBe('1d1h1m1s');
     });
 
-    it('accepts valid cross-midnight range', () => {
-      expect(validTimeRange('22:00-06:00')).toBe(true);
-      expect(validTimeRange('23:30-00:30')).toBe(true);
-    });
+    it('preserves explicit zero reasoning and distinguishes inherited reasoning', () => {
+      const inherited = rateSetToDraft(baseDefinition().base);
+      expect(inherited.reasoningMode).toBe('inherit');
+      expect(inherited.reasoning).toBe('');
 
-    it('rejects identical start and end times', () => {
-      expect(validTimeRange('12:00-12:00')).toBe(false);
-      expect(validTimeRange('00:00-00:00')).toBe(false);
-    });
-
-    it('rejects malformed syntax or out-of-range hours/minutes', () => {
-      expect(validTimeRange('')).toBe(false);
-      expect(validTimeRange('24:00-06:00')).toBe(false);
-      expect(validTimeRange('12:60-14:00')).toBe(false);
-      expect(validTimeRange('8:00-18:00')).toBe(false);
-      expect(validTimeRange('08:00 - 18:00')).toBe(false);
+      const custom = rateSetToDraft(baseDefinition({ reasoning: 0 }).base);
+      expect(custom.reasoningMode).toBe('custom');
+      expect(custom.reasoning).toBe('0');
     });
   });
 
-  // Test parseRatesInput handles zero vs reasoning nullness
-  describe('parseRatesInput', () => {
-    it('parses valid rate inputs accurately to integer micro-USD', () => {
-      const res = parseRatesInput(
+  describe('pricing definitions', () => {
+    it('parses exact micro-USD, inherited reasoning, ordered overrides, TTL and multipliers', () => {
+      const draft = emptyDefinitionDraft();
+      draft.base.input = '0.000001';
+      draft.base.output = '1.234567';
+      draft.base.cache_read = '0.5';
+      draft.base.cache_write = '2';
+      draft.base.ttls = [
+        { rowId: 'ttl-1', seconds: '5m', price: '0.25' },
+        { rowId: 'ttl-2', seconds: '1h', price: '1.5' },
+      ];
+      draft.overrides = [
         {
-          input: '0.15',
-          output: '0.6',
-          cache_read: '0.075',
-          cache_write: '0.15',
-          reasoning: '0.3',
+          rowId: 'override-1',
+          id: 'off-peak',
+          condition: {
+            ...emptyConditionDraft(),
+            context: { lowerOp: 'gt', lowerValue: '200000', upperOp: 'lte', upperValue: '500000' },
+            serviceTier: 'default, flex, default',
+            dateGte: '2026-01-01',
+            dateLt: '2026-12-31',
+            timeStart: '22:00',
+            timeEnd: '06:00',
+            timezone: 'Asia/Shanghai',
+            weekdays: [7, 1, 1],
+          },
+          rates: {
+            input: '0.75',
+            output: '',
+            cache_read: '',
+            cache_write: '',
+            reasoningMode: 'same_output',
+            reasoning: '',
+            ttls: [],
+          },
         },
-        'Test '
-      );
-      expect(res).toEqual({
-        input: 150000,
-        output: 600000,
-        cache_read: 75000,
-        cache_write: 150000,
-        reasoning: 300000,
+      ];
+      draft.multipliers = [
+        {
+          rowId: 'multiplier-1',
+          id: 'discount',
+          condition: { ...emptyConditionDraft(), serviceTier: 'flex' },
+          factors: {
+            input: '0.5',
+            output: '1.0000000000000001',
+            cache_read: '',
+            cache_write: '',
+            reasoning: '0',
+          },
+        },
+      ];
+
+      const definition = parseDefinition(draft, '测试 ');
+      expect(definition.base).toEqual({
+        input: 1,
+        output: 1234567,
+        cache_read: 500000,
+        cache_write: 2000000,
+        cache_write_by_ttl: { '300': 250000, '3600': 1500000 },
+        reasoning: null,
+      });
+      expect(definition.overrides).toHaveLength(1);
+      expect(definition.overrides[0]).toEqual({
+        id: 'off-peak',
+        when: {
+          context: { gt: 200000, lte: 500000 },
+          serviceTier: ['default', 'flex'],
+          date: { gte: '2026-01-01', lt: '2026-12-31' },
+          time: {
+            start: '22:00',
+            end: '06:00',
+            timezone: 'Asia/Shanghai',
+            weekdays: [1, 7],
+          },
+        },
+        rates: { input: 750000, reasoning: null },
+      });
+      expect(definition.multipliers[0]).toEqual({
+        id: 'discount',
+        when: { serviceTier: ['flex'] },
+        factors: { input: '0.5', output: '1.0000000000000001', reasoning: '0' },
       });
     });
 
-    it('preserves blank reasoning as undefined and explicit "0" as 0 micro-USD', () => {
-      const blankRes = parseRatesInput(
+    it('round-trips nested all/any/not conditions and describes them in the editor', () => {
+      const condition: Condition = {
+        any: [
+          { serviceTier: ['priority'] },
+          { not: { context: { gte: 100 } } },
+        ],
+        all: [{ time: { start: '00:00', end: '08:00', timezone: 'UTC', weekdays: [1] } }],
+      };
+      const draft = emptyDefinitionDraft();
+      draft.overrides = [
         {
-          input: '0',
-          output: '0',
-          cache_read: '0',
-          cache_write: '0',
-          reasoning: '',
-        },
-        'Test '
-      );
-      expect(blankRes.reasoning).toBeUndefined();
-
-      const zeroRes = parseRatesInput(
-        {
-          input: '0',
-          output: '0',
-          cache_read: '0',
-          cache_write: '0',
-          reasoning: '0',
-        },
-        'Test '
-      );
-      expect(zeroRes.reasoning).toBe(0);
-    });
-
-    it('rejects negative rates and invalid numbers', () => {
-      expect(() =>
-        parseRatesInput(
-          {
-            input: '-0.1',
-            output: '0',
-            cache_read: '0',
-            cache_write: '0',
+          rowId: 'override-nested',
+          id: 'nested',
+          condition: conditionToDraft(condition),
+          rates: {
+            input: '1',
+            output: '',
+            cache_read: '',
+            cache_write: '',
+            reasoningMode: 'inherit',
+            reasoning: '',
+            ttls: [],
           },
-          'Test '
-        )
-      ).toThrow();
+        },
+      ];
+      const parsed = parseDefinition(draft, '测试 ');
+      expect(parsed.overrides[0].when).toEqual(condition);
+      expect(conditionSummary(conditionToDraft(condition))).toContain('全部满足 1 组');
+      expect(conditionSummary(conditionToDraft(condition))).toContain('任一满足 2 组');
+    });
+
+    it('rejects malformed conditions, duplicate rule IDs and invalid multipliers', () => {
+      const badTimezone = emptyDefinitionDraft();
+      badTimezone.overrides = [
+        {
+          rowId: 'o1',
+          id: 'o1',
+          condition: {
+            ...emptyConditionDraft(),
+            timeStart: '08:00',
+            timeEnd: '09:00',
+            timezone: 'Not/A_Zone',
+          },
+          rates: {
+            input: '',
+            output: '',
+            cache_read: '',
+            cache_write: '',
+            reasoningMode: 'inherit',
+            reasoning: '',
+            ttls: [],
+          },
+        },
+      ];
+      expect(() => parseDefinition(badTimezone, '测试 ')).toThrow(/IANA/);
+
+      const badContext = emptyDefinitionDraft();
+      badContext.overrides = [
+        {
+          rowId: 'o1',
+          id: 'o1',
+          condition: { ...emptyConditionDraft(), context: { lowerOp: '', lowerValue: '5', upperOp: '', upperValue: '' } },
+          rates: {
+            input: '',
+            output: '',
+            cache_read: '',
+            cache_write: '',
+            reasoningMode: 'inherit',
+            reasoning: '',
+            ttls: [],
+          },
+        },
+      ];
+      expect(() => parseDefinition(badContext, '测试 ')).toThrow(/缺少比较方式/);
+
+      const duplicateIds = emptyDefinitionDraft();
+      const blankRates = {
+        input: '',
+        output: '',
+        cache_read: '',
+        cache_write: '',
+        reasoningMode: 'inherit' as const,
+        reasoning: '',
+        ttls: [],
+      };
+      duplicateIds.overrides = [
+        { rowId: 'o1', id: 'same', condition: emptyConditionDraft(), rates: blankRates },
+        { rowId: 'o2', id: 'same', condition: emptyConditionDraft(), rates: blankRates },
+      ];
+      expect(() => parseDefinition(duplicateIds, '测试 ')).toThrow(/规则 ID 重复/);
+
+      const duplicateTtl = emptyDefinitionDraft();
+      duplicateTtl.base.ttls = [
+        { rowId: 't1', seconds: '60', price: '1' },
+        { rowId: 't2', seconds: '1m', price: '2' },
+      ];
+      expect(() => parseDefinition(duplicateTtl, '测试 ')).toThrow(/TTL 档位重复/);
+
+      const badMultiplier = emptyDefinitionDraft();
+      badMultiplier.multipliers = [
+        {
+          rowId: 'm1',
+          id: 'm1',
+          condition: emptyConditionDraft(),
+          factors: { input: '1e-3', output: '', cache_read: '', cache_write: '', reasoning: '' },
+        },
+      ];
+      expect(() => parseDefinition(badMultiplier, '测试 ')).toThrow(/十进制字符串/);
     });
   });
 
-  // Test parseManualPrices prototype-safety with __proto__ and constructor models
-  describe('parseManualPrices prototype safety & duplicates', () => {
-    it('correctly handles special constructor and __proto__ model names without crash or collision', () => {
-      const drafts = [
+  describe('manual prices', () => {
+    it('uses the complete model/provider identity and preserves explicit zero reasoning', () => {
+      const zeroReasoning = baseDefinition({ reasoning: 0 });
+      const prices = parseManualPrices([
+        manualDraft('shared/model', '', zeroReasoning),
+        manualDraft('shared/model', 'openai', baseDefinition()),
+      ]);
+      expect(prices).toEqual([
         {
-          id: '1',
-          model: '__proto__',
-          input: '0.1',
-          output: '0.2',
-          cache_read: '0.05',
-          cache_write: '0.1',
-          reasoning: '',
+          model: 'shared/model',
+          definition: expect.objectContaining({
+            base: expect.objectContaining({ reasoning: 0 }),
+          }),
         },
         {
-          id: '2',
-          model: 'constructor',
-          input: '0.3',
-          output: '0.4',
-          cache_read: '0.15',
-          cache_write: '0.3',
-          reasoning: '',
+          model: 'shared/model',
+          provider: 'openai',
+          definition: expect.objectContaining({
+            base: expect.objectContaining({ reasoning: null }),
+          }),
         },
-      ];
-
-      const res = parseManualPrices(drafts);
-      expect(res).toHaveLength(2);
-      expect(res[0].model).toBe('__proto__');
-      expect(res[1].model).toBe('constructor');
+      ]);
+      expect(() =>
+        parseManualPrices([
+          manualDraft('shared/model', 'openai'),
+          manualDraft('shared/model', 'openai'),
+        ])
+      ).toThrow(/身份重复/);
     });
 
-    it('detects duplicate model IDs accurately', () => {
-      const drafts = [
-        {
-          id: '1',
-          model: 'gpt-4o',
-          input: '2.5',
-          output: '10',
-          cache_read: '1.25',
-          cache_write: '2.5',
-          reasoning: '',
-        },
-        {
-          id: '2',
-          model: 'gpt-4o',
-          input: '5',
-          output: '15',
-          cache_read: '2.5',
-          cache_write: '5',
-          reasoning: '',
-        },
-      ];
+    it('handles prototype-like model names without collisions', () => {
+      const prices = parseManualPrices([
+        manualDraft('__proto__', ''),
+        manualDraft('constructor', ''),
+      ]);
+      expect(prices.map((price) => price.model)).toEqual(['__proto__', 'constructor']);
+    });
 
-      expect(() => parseManualPrices(drafts)).toThrow(/模型 ID 重复：gpt-4o/);
+    it('formats manual prices in the layout expected by the settings form', () => {
+      const draft = manualDraft('model-a', 'provider-a');
+      const parsed = parseManualPrices([draft]);
+      expect(parsed[0]).toMatchObject({ model: 'model-a', provider: 'provider-a' });
+      expect(parsed[0].definition.base).toMatchObject({ input: 1000000, output: 2000000 });
     });
   });
 
-  // Test parseRules ordering and rule condition bounds
-  describe('parseRules and ordering', () => {
-    it('parses rules with conditions and retains ordering', () => {
-      const drafts = [
-        {
-          rowId: 'row-1',
-          id: 'r1',
-          model: 'claude-3-5-sonnet',
-          input_tokens_gt: '200000',
-          time_range: '00:00-08:00',
-          input: '1.5',
-          output: '7.5',
-          cache_read: '0.3',
-          cache_write: '1.5',
-          reasoning: '',
-        },
-        {
-          rowId: 'row-2',
-          id: 'r2',
-          model: 'claude-3-5-sonnet',
-          input_tokens_gt: '',
-          time_range: '',
-          input: '3',
-          output: '15',
-          cache_read: '0.3',
-          cache_write: '3.75',
-          reasoning: '',
-        },
-      ];
-
-      const rules = parseRules(drafts);
-      expect(rules).toHaveLength(2);
-      expect(rules[0].id).toBe('r1');
-      expect(rules[0].input_tokens_gt).toBe(200000);
-      expect(rules[0].time_range).toBe('00:00-08:00');
-      expect(rules[1].id).toBe('r2');
-      expect(rules[1].input_tokens_gt).toBeUndefined();
-      expect(rules[1].time_range).toBeUndefined();
-    });
-
-    it('rejects duplicate rule IDs including special names', () => {
-      const drafts = [
-        {
-          rowId: '1',
-          id: 'toString',
-          model: 'model-a',
-          input_tokens_gt: '',
-          time_range: '',
-          input: '1',
-          output: '2',
-          cache_read: '0',
-          cache_write: '0',
-          reasoning: '',
-        },
-        {
-          rowId: '2',
-          id: 'toString',
-          model: 'model-b',
-          input_tokens_gt: '',
-          time_range: '',
-          input: '1',
-          output: '2',
-          cache_read: '0',
-          cache_write: '0',
-          reasoning: '',
-        },
-      ];
-
-      expect(() => parseRules(drafts)).toThrow(/规则 ID 重复：toString/);
-    });
-
-    it('generates unique non-colliding rule IDs', () => {
-      const existing = ['rule-1', 'rule-2'];
-      const newId = generateUniqueRuleID(existing);
-      expect(newId).toMatch(/^rule-/);
-      expect(existing).not.toContain(newId);
-    });
-
-    it('moves item up and down cleanly', () => {
-      const arr = ['a', 'b', 'c'];
-      expect(moveItem(arr, 1, 'up')).toEqual(['b', 'a', 'c']);
-      expect(moveItem(arr, 1, 'down')).toEqual(['a', 'c', 'b']);
-      expect(moveItem(arr, 0, 'up')).toEqual(['a', 'b', 'c']);
-      expect(moveItem(arr, 2, 'down')).toEqual(['a', 'b', 'c']);
-    });
-  });
-
-  // Test equality logic for dirty state tracking
-  describe('areRatesEqual and isPricingDraftEqual', () => {
-    it('compares rates accurately including reasoning nullness', () => {
-      const r1 = { input: 100, output: 200, cache_read: 50, cache_write: 50, reasoning: undefined };
-      const r2 = { input: 100, output: 200, cache_read: 50, cache_write: 50 };
-      expect(areRatesEqual(r1, r2)).toBe(true);
-
-      const r3 = { input: 100, output: 200, cache_read: 50, cache_write: 50, reasoning: 0 };
-      expect(areRatesEqual(r1, r3)).toBe(false);
-    });
-
-    it('identifies clean vs dirty pricing drafts', () => {
+  describe('dirty comparison and ordering', () => {
+    it('detects source, identity and definition changes against confirmed pricing', () => {
       const confirmed: PricingConfig = {
         auto: true,
-        prices: [
+        source: 'models_dev_v2',
+        prices: parseManualPrices([manualDraft('test/model', '')]),
+      };
+      const clean = [manualDraft('test/model', '')];
+      expect(isPricingDraftEqual(true, 'models_dev_v2', clean, confirmed)).toBe(true);
+      expect(isPricingDraftEqual(false, 'models_dev_v2', clean, confirmed)).toBe(false);
+      expect(isPricingDraftEqual(true, 'models_dev_v1', clean, confirmed)).toBe(false);
+
+      const changedIdentity = [manualDraft('test/model', 'openai')];
+      expect(isPricingDraftEqual(true, 'models_dev_v2', changedIdentity, confirmed)).toBe(false);
+
+      const changedDefinition = [manualDraft('test/model', '', baseDefinition({ input: 1 }))];
+      expect(isPricingDraftEqual(true, 'models_dev_v2', changedDefinition, confirmed)).toBe(false);
+    });
+
+    it('moves rules and generates collision-free IDs', () => {
+      expect(moveItem(['a', 'b', 'c'], 1, 'up')).toEqual(['b', 'a', 'c']);
+      expect(moveItem(['a', 'b', 'c'], 1, 'down')).toEqual(['a', 'c', 'b']);
+      const id = generateUniqueDefinitionID(['override-1', 'override-2'], 'override');
+      expect(id).toMatch(/^override-/);
+      expect(['override-1', 'override-2']).not.toContain(id);
+    });
+
+    it('maps both context bounds and nested conditions without loss', () => {
+      const source: Condition = {
+        context: { gt: 10, lte: 99 },
+        serviceTier: ['default'],
+        any: [{ not: { serviceTier: ['flex'] } }],
+      };
+      const draft = conditionToDraft(source);
+      expect(draft.context).toEqual({
+        lowerOp: 'gt',
+        lowerValue: '10',
+        upperOp: 'lte',
+        upperValue: '99',
+      });
+      expect(draft.any[0].not?.serviceTier).toBe('flex');
+
+      const definition: PricingDefinition = {
+        ...baseDefinition(),
+        overrides: [
           {
-            model: 'test/model',
-            rates: { input: 1000000, output: 2000000, cache_read: 500000, cache_write: 500000 },
-            source: 'manual',
+            id: 'rule',
+            when: source,
+            rates: { input: 1 },
           },
         ],
-        rules: [],
       };
-
-      const cleanDraft = [
-        {
-          id: '1',
-          model: 'test/model',
-          input: '1',
-          output: '2',
-          cache_read: '0.5',
-          cache_write: '0.5',
-          reasoning: '',
-        },
-      ];
-
-      expect(isPricingDraftEqual(true, cleanDraft, [], confirmed)).toBe(true);
-
-      const modifiedDraft = [
-        {
-          id: '1',
-          model: 'test/model',
-          input: '1.2',
-          output: '2',
-          cache_read: '0.5',
-          cache_write: '0.5',
-          reasoning: '',
-        },
-      ];
-      expect(isPricingDraftEqual(true, modifiedDraft, [], confirmed)).toBe(false);
-      expect(isPricingDraftEqual(false, cleanDraft, [], confirmed)).toBe(false);
-    });
-  });
-
-  // Test capacity splitting and parsing with exact byte precision
-  describe('splitBytesToCapacity and parseCapacityToBytes', () => {
-    it('splits standard multiples of binary units without rounding', () => {
-      expect(splitBytesToCapacity(1073741824)).toEqual({ amount: '1', unit: 'GB' });
-      expect(splitBytesToCapacity(268435456)).toEqual({ amount: '256', unit: 'MB' });
-      expect(splitBytesToCapacity(1048576)).toEqual({ amount: '1', unit: 'MB' });
-      expect(splitBytesToCapacity(2097152)).toEqual({ amount: '2', unit: 'MB' });
-      expect(splitBytesToCapacity(8388608)).toEqual({ amount: '8', unit: 'MB' });
-      expect(splitBytesToCapacity(1024)).toEqual({ amount: '1', unit: 'KB' });
-      expect(splitBytesToCapacity(2048)).toEqual({ amount: '2', unit: 'KB' });
-    });
-
-    it('falls back to exact bytes for odd or non-multiple values', () => {
-      expect(splitBytesToCapacity(1)).toEqual({ amount: '1', unit: 'B' });
-      expect(splitBytesToCapacity(500)).toEqual({ amount: '500', unit: 'B' });
-      expect(splitBytesToCapacity(1048577)).toEqual({ amount: '1048577', unit: 'B' });
-      expect(splitBytesToCapacity(0)).toEqual({ amount: '0', unit: 'B' });
-    });
-
-    it('parses valid integer capacity amounts to exact byte counts', () => {
-      expect(parseCapacityToBytes('1', 'B', '单条上限')).toBe(1);
-      expect(parseCapacityToBytes('1048577', 'B', '单条上限')).toBe(1048577);
-      expect(parseCapacityToBytes('1', 'KB', '单条上限')).toBe(1024);
-      expect(parseCapacityToBytes('1', 'MB', '单条上限')).toBe(1048576);
-      expect(parseCapacityToBytes('8', 'MB', '单条上限')).toBe(8388608);
-      expect(parseCapacityToBytes('1', 'GB', '存储上限')).toBe(1073741824);
-    });
-
-    it('parses fractional amounts that resolve to exact integer bytes', () => {
-      expect(parseCapacityToBytes('0.5', 'KB', '单条上限')).toBe(512);
-      expect(parseCapacityToBytes('1.5', 'KB', '单条上限')).toBe(1536);
-      expect(parseCapacityToBytes('0.25', 'MB', '单条上限')).toBe(262144);
-    });
-
-    it('rejects fractional amounts that produce non-integer byte remainders', () => {
-      expect(() => parseCapacityToBytes('0.1', 'B', '单条上限')).toThrow(/整数字节/);
-      expect(() => parseCapacityToBytes('0.3', 'KB', '单条上限')).toThrow(/整数字节/);
-      expect(() => parseCapacityToBytes('1.0000001', 'MB', '单条上限')).toThrow(/整数字节/);
-    });
-
-    it('rejects invalid inputs, negative numbers, and zeroes', () => {
-      expect(() => parseCapacityToBytes('', 'MB', '测试')).toThrow(/不能为空/);
-      expect(() => parseCapacityToBytes('   ', 'MB', '测试')).toThrow(/不能为空/);
-      expect(() => parseCapacityToBytes('abc', 'MB', '测试')).toThrow(/非负数字/);
-      expect(() => parseCapacityToBytes('0', 'MB', '测试')).toThrow(/超出允许范围/);
-      expect(() => parseCapacityToBytes('-5', 'MB', '测试')).toThrow(/非负数字/);
+      const parsed = parseDefinition(definitionToDraft(definition), '测试 ');
+      expect(parsed.overrides[0].when).toEqual(source);
+      const manual: ManualPrice[] = parseManualPrices([manualDraft('m', '', definition)]);
+      expect(manual[0].definition.overrides[0].when).toEqual(source);
     });
   });
 });

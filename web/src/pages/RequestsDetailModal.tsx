@@ -56,7 +56,7 @@ export function RequestsDetailModal({
   const tps = record && complete
     ? calculateTPS(record.tokens?.output, record.latency_ms, record.ttft_ms, record.stream)
     : null;
-  const priceSource = record ? formatPriceSource(record.price_source, record.rule_id) : null;
+  const priceSource = record ? formatPriceSource(record.price_source) : null;
 
   // Header and Body statuses
   const rawHeadersStatus = detail?.headers_status || detail?.capture_status || 'missing';
@@ -234,7 +234,6 @@ export function RequestsDetailModal({
                     <span className="requests-detail-item-label">定价来源</span>
                     <span className="requests-detail-item-val">
                       {priceSource?.label}
-                      {record.rule_id ? ` [${record.rule_id}]` : ''}
                     </span>
                   </div>
                   <div className="requests-detail-item">

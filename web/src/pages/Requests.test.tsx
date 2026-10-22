@@ -50,7 +50,6 @@ function createSampleRequestView(): RequestView {
       latency_samples: 12,
       ttft_ms: 600,
       ttft_samples: 10,
-      unpriced_requests: 1,
       detailed_requests: 12,
     },
     series: {
@@ -95,7 +94,7 @@ function createSampleRequestView(): RequestView {
           total: 150,
         },
         cost_micro_usd: 5000,
-        price_source: 'catalog',
+        price_source: 'auto',
         accounting_quality: 'standard',
       },
       {
@@ -120,7 +119,7 @@ function createSampleRequestView(): RequestView {
           total: 200,
         },
         cost_micro_usd: 1,
-        price_source: 'unpriced',
+        price_source: 'zero',
         accounting_quality: 'unclassified',
       },
     ],
@@ -218,7 +217,7 @@ function createMockApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
               total: 150,
             },
             cost_micro_usd: 5000,
-            price_source: 'catalog',
+            price_source: 'auto',
             accounting_quality: 'standard',
           },
           headers: {
@@ -493,7 +492,7 @@ describe('RequestsPage and RequestsHelpers', () => {
               ttft_ms: 0,
               tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0, total: 0 },
               cost_micro_usd: 0,
-              price_source: 'catalog',
+              price_source: 'auto',
               accounting_quality: 'standard',
             },
           ];
@@ -570,7 +569,7 @@ describe('RequestsPage and RequestsHelpers', () => {
               ttft_ms: 0,
               tokens: { input: 10, output: 0, cache_read: 0, cache_write: 0, reasoning: 0, total: 10 },
               cost_micro_usd: 0,
-              price_source: 'catalog',
+              price_source: 'auto',
               accounting_quality: 'standard',
             },
             headers: {
@@ -605,7 +604,7 @@ describe('RequestsPage and RequestsHelpers', () => {
               ttft_ms: 0,
               tokens: { input: 10, output: 0, cache_read: 0, cache_write: 0, reasoning: 0, total: 10 },
               cost_micro_usd: 0,
-              price_source: 'catalog',
+              price_source: 'auto',
               accounting_quality: 'standard',
             },
           ];
@@ -916,7 +915,7 @@ describe('RequestsPage and RequestsHelpers', () => {
               ttft_ms: 0,
               tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0, total: 0 },
               cost_micro_usd: 0,
-              price_source: 'catalog',
+              price_source: 'auto',
               accounting_quality: 'standard',
             },
             headers: {},
@@ -944,7 +943,7 @@ describe('RequestsPage and RequestsHelpers', () => {
               ttft_ms: 0,
               tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0, total: 0 },
               cost_micro_usd: 0,
-              price_source: 'catalog',
+              price_source: 'auto',
               accounting_quality: 'standard',
             },
           ];

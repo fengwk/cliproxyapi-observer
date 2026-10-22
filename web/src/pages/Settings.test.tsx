@@ -8,6 +8,18 @@ describe('SettingsPage', () => {
   let mockApi: ApiClient;
   let onDirtyChange: ReturnType<typeof vi.fn<(dirty: boolean) => void>>;
 
+  const manualDefinition = {
+    base: {
+      input: 3000000,
+      output: 15000000,
+      cache_read: 300000,
+      cache_write: 3750000,
+      reasoning: 0,
+    },
+    overrides: [],
+    multipliers: [],
+  };
+
   const initialSettings: Settings = {
     capture_enabled: false,
     max_body_bytes: 1048576,
@@ -16,19 +28,11 @@ describe('SettingsPage', () => {
     daily_retention_days: 365,
     pricing: {
       auto: true,
+      source: 'models_dev_v2',
       prices: [
         {
           model: 'claude-3-5-sonnet',
-          rates: { input: 3000000, output: 15000000, cache_read: 300000, cache_write: 3750000, reasoning: 0 },
-          source: 'manual',
-        },
-      ],
-      rules: [
-        {
-          id: 'rule-night',
-          model: 'claude-3-5-sonnet',
-          time_range: '00:00-08:00',
-          rates: { input: 1500000, output: 7500000, cache_read: 150000, cache_write: 1875000, reasoning: null },
+          definition: manualDefinition,
         },
       ],
     },
@@ -40,12 +44,19 @@ describe('SettingsPage', () => {
         model: 'gpt-4o',
         provider: 'openai',
         rates: { input: 2500000, output: 10000000, cache_read: 1250000, cache_write: 2500000, reasoning: 0 },
+        definition: {
+          base: { input: 2500000, output: 10000000, cache_read: 1250000, cache_write: 2500000, reasoning: 0 },
+          overrides: [],
+          multipliers: [],
+        },
         source: 'auto',
+        pricing_supported: true,
       },
     ],
     last_sync: '2026-10-18T12:00:00Z',
     refreshing: false,
     catalog_entries: 1500,
+    source: 'models_dev_v2',
   };
 
   const initialHealth: Health = {
@@ -58,7 +69,7 @@ describe('SettingsPage', () => {
 
   const initialModels: ModelInfo[] = [
     { id: 'gpt-4o', owned_by: 'openai' },
-    { id: 'custom-unpriced-model' },
+    { id: 'custom-zero-model' },
   ];
 
   const initialPreview: PricePreview = {
@@ -67,14 +78,24 @@ describe('SettingsPage', () => {
         model: 'gpt-4o',
         provider: 'openai',
         rates: { input: 2500000, output: 10000000, cache_read: 1250000, cache_write: 2500000, reasoning: 0 },
+        definition: {
+          base: { input: 2500000, output: 10000000, cache_read: 1250000, cache_write: 2500000, reasoning: 0 },
+          overrides: [],
+          multipliers: [],
+        },
         source: 'auto',
-        has_rules: false,
+        pricing_supported: true,
       },
       {
-        model: 'custom-unpriced-model',
-        rates: { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: undefined },
-        source: 'unpriced',
-        has_rules: true,
+        model: 'custom-zero-model',
+        rates: { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: null },
+        definition: {
+          base: { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: null },
+          overrides: [{ id: 'night', when: {}, rates: { input: 0 } }],
+          multipliers: [],
+        },
+        source: 'zero',
+        pricing_supported: true,
       },
     ],
   };
@@ -193,8 +214,8 @@ describe('SettingsPage', () => {
     });
   });
 
-  // Test section draft isolation: saving Pricing preserves confirmed General settings and preserves reasoning: 0
-  it('enforces section draft isolation: saving pricing preserves confirmed general settings and preserves explicit reasoning 0', async () => {
+  // Test section draft isolation: saving Pricing preserves confirmed General settings and the complete definition.
+  it('enforces section draft isolation: saving pricing preserves confirmed general settings and parses exact definition rates', async () => {
     render(<SettingsPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
 
     await waitFor(() => {
@@ -205,16 +226,22 @@ describe('SettingsPage', () => {
     const captureSwitch = screen.getByLabelText('保存请求内容');
     fireEvent.click(captureSwitch);
 
-    // 2. Modify Pricing draft (add a manual price row with explicit reasoning 0)
+    // 2. Modify Pricing draft (add a complete manual identity and exact micro-USD rate)
     const addManualBtn = screen.getByTestId('manual-price-add');
     fireEvent.click(addManualBtn);
 
-    const newModelInput = screen.getByLabelText('第 2 条手工价格模型 ID');
-    fireEvent.change(newModelInput, { target: { value: 'deepseek-chat' } });
-
-    // Set reasoning to explicit 0
-    const newReasoningInput = screen.getByLabelText('第 2 条推理价格');
-    fireEvent.change(newReasoningInput, { target: { value: '0' } });
+    fireEvent.change(screen.getByLabelText('第 2 条手工价格模型 ID'), {
+      target: { value: 'deepseek-chat' },
+    });
+    fireEvent.change(screen.getByLabelText('第 2 条手工价格 Provider'), {
+      target: { value: 'openai' },
+    });
+    fireEvent.change(screen.getByLabelText('第 2 条手工价格 输入价格'), {
+      target: { value: '0.000001' },
+    });
+    fireEvent.change(screen.getByLabelText('第 2 条手工价格 输出价格'), {
+      target: { value: '2' },
+    });
 
     // 3. Save Pricing Settings
     const savePricingBtn = screen.getByTestId('settings-pricing-save');
@@ -228,10 +255,16 @@ describe('SettingsPage', () => {
       const payload = putCalls[0][1].body as Settings;
       // General settings sent MUST be confirmed (capture_enabled: false), NOT the unsaved draft (true)!
       expect(payload.capture_enabled).toBe(false);
-      // Pricing includes the new manual price with reasoning explicitly 0
       const deepseekPrice = payload.pricing.prices.find((p) => p.model === 'deepseek-chat');
       expect(deepseekPrice).toBeDefined();
-      expect(deepseekPrice?.rates.reasoning).toBe(0);
+      expect(deepseekPrice?.provider).toBe('openai');
+      expect(deepseekPrice?.definition.base).toMatchObject({
+        input: 1,
+        output: 2000000,
+        reasoning: null,
+      });
+      expect(deepseekPrice?.definition.overrides).toEqual([]);
+      expect(deepseekPrice?.definition.multipliers).toEqual([]);
     });
   });
 
@@ -258,8 +291,8 @@ describe('SettingsPage', () => {
     });
   });
 
-  // Test preview table display, unpriced warning, has_rules badge, and falsey reasoning 0 display
-  it('displays available model prices preview with unpriced warning, rule badges, and explicit reasoning 0', async () => {
+  // Test preview table display, normal zero pricing, rule count, and inherited reasoning.
+  it('displays available model prices preview with normal zero pricing, rule badges, and inherited reasoning', async () => {
     render(<SettingsPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
 
     await waitFor(() => {
@@ -274,7 +307,7 @@ describe('SettingsPage', () => {
         body: {
           models: [
             { model: 'gpt-4o', provider: '' },
-            { model: 'custom-unpriced-model', provider: '' },
+            { model: 'custom-zero-model', provider: '' },
           ],
         },
       })
@@ -286,10 +319,12 @@ describe('SettingsPage', () => {
     expect(screen.getByText('$10')).toBeDefined();
     expect(screen.getAllByText('$0').length).toBeGreaterThanOrEqual(1);
 
-    // custom-unpriced-model row shows distinct warning and rule annotation
-    expect(screen.getByText('custom-unpriced-model')).toBeDefined();
-    expect(screen.getByText('未定价（按 $0 计费）')).toBeDefined();
-    expect(screen.getByText('含条件规则')).toBeDefined();
+    // Zero price is a normal amount, not a pending/unpriced warning.
+    expect(screen.getByText('custom-zero-model')).toBeDefined();
+    expect(screen.getByText('零价格')).toBeDefined();
+    expect(screen.queryByText(/未定价/)).toBeNull();
+    expect(screen.getByText('1 条条件规则')).toBeDefined();
+    expect(screen.getByText('同输出')).toBeDefined();
   });
 
   // Test catalog refresh failure displays honest error and retains cache
@@ -376,23 +411,24 @@ describe('SettingsPage', () => {
     });
   });
 
-  // Test rule ordering operations: up, down, remove
-  it('manages rule ordering with up/down controls and preserves order in save payload', async () => {
+  // Test definition override ordering: up/down controls preserve order in the saved definition.
+  it('manages definition override ordering with up/down controls and preserves order in save payload', async () => {
     const multiRuleSettings: Settings = {
       ...initialSettings,
       pricing: {
         auto: true,
-        prices: [],
-        rules: [
+        source: 'models_dev_v2',
+        prices: [
           {
-            id: 'rule-1',
             model: 'model-a',
-            rates: { input: 1000000, output: 2000000, cache_read: 0, cache_write: 0 },
-          },
-          {
-            id: 'rule-2',
-            model: 'model-b',
-            rates: { input: 3000000, output: 4000000, cache_read: 0, cache_write: 0 },
+            definition: {
+              base: { input: 1000000, output: 2000000, cache_read: 0, cache_write: 0, reasoning: null },
+              overrides: [
+                { id: 'rule-1', when: {}, rates: { input: 1000000 } },
+                { id: 'rule-2', when: {}, rates: { input: 3000000 } },
+              ],
+              multipliers: [],
+            },
           },
         ],
       },
@@ -420,17 +456,10 @@ describe('SettingsPage', () => {
       expect(screen.getByTestId('observer-settings')).toBeDefined();
     });
 
-    // Expand rules details
-    const rulesSummary = screen.getByText(/条件匹配规则（高级/);
-    fireEvent.click(rulesSummary);
-
-    // Rule-2 Move Up button
-    const moveUpBtns = screen.getAllByTestId('rule-up');
-    // For rule 1, move up is disabled; for rule 2, move up is enabled
+    // The second override can move up; the first cannot.
+    const moveUpBtns = screen.getAllByTestId('override-up');
     expect((moveUpBtns[0] as HTMLButtonElement).disabled).toBe(true);
     expect((moveUpBtns[1] as HTMLButtonElement).disabled).toBe(false);
-
-    // Move rule 2 up
     fireEvent.click(moveUpBtns[1]);
 
     // Save Pricing
@@ -442,9 +471,10 @@ describe('SettingsPage', () => {
         (call) => call[0] === '/settings' && call[1]?.method === 'PUT'
       );
       expect(putCalls.length).toBe(1);
-      const savedRules = (putCalls[0][1].body as Settings).pricing.rules;
-      expect(savedRules[0].id).toBe('rule-2');
-      expect(savedRules[1].id).toBe('rule-1');
+      const savedOverrides = (putCalls[0][1].body as Settings).pricing.prices[0].definition
+        .overrides;
+      expect(savedOverrides[0].id).toBe('rule-2');
+      expect(savedOverrides[1].id).toBe('rule-1');
     });
   });
 
@@ -876,7 +906,7 @@ describe('SettingsPage', () => {
       return original(path, options);
     }) as ApiClient['request'];
     render(<SettingsPage api={mockApi} onDirtyChange={onDirtyChange} />);
-    const row = (await screen.findByText('custom-unpriced-model')).closest('tr');
+    const row = (await screen.findByText('custom-zero-model')).closest('tr');
     fireEvent.change(screen.getByLabelText('单条请求体上限数值'), { target: { value: '2' } });
     failRefresh = true;
     fireEvent.click(screen.getByRole('button', { name: '刷新状态' }));
@@ -887,7 +917,7 @@ describe('SettingsPage', () => {
     expect(vi.mocked(mockApi.request).mock.calls.filter(([, opts]) => opts?.method === 'PUT')).toHaveLength(0);
     await act(async () => { rejectRefresh(new Error('state offline')); });
     expect(screen.getByText(/state offline.*保留上次成功状态/)).toBeInTheDocument();
-    expect(screen.getByText('custom-unpriced-model').closest('tr')).toBe(row);
+    expect(screen.getByText('custom-zero-model').closest('tr')).toBe(row);
     expect(screen.getByLabelText('单条请求体上限数值')).toHaveValue('2');
     expect(save).toBeEnabled();
     fireEvent.click(save);
@@ -948,10 +978,21 @@ describe('SettingsPage', () => {
   // model-route rewrite or an immediate server write.
   it('saves a selected catalog candidate as an explicit pricing mapping', async () => {
     const original = mockApi.request;
+    const zeroDefinition = {
+      base: { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: null },
+      overrides: [],
+      multipliers: [],
+    };
     mockApi.request = vi.fn((path, options) => path === '/prices/preview' ? Promise.resolve({ items: [{
-      model: 'channel/model', source: 'unpriced', has_rules: false, reason: 'ambiguous',
-      rates: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
-      candidates: [{ provider: 'channel', model: 'full/model', rates: { input: 1, output: 2, cache_read: 0, cache_write: 0 } }],
+      model: 'channel/model', provider: 'channel', source: 'zero', reason: 'ambiguous',
+      rates: { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: null },
+      definition: zeroDefinition,
+      pricing_supported: true,
+      candidates: [{ provider: 'channel', model: 'full/model', definition: {
+        base: { input: 1, output: 2, cache_read: 0, cache_write: 0, reasoning: null },
+        overrides: [],
+        multipliers: [],
+      }, pricing_supported: true }],
     }] }) : original(path, options)) as ApiClient['request'];
     render(<SettingsPage api={mockApi} onDirtyChange={onDirtyChange} />);
     fireEvent.click(await screen.findByRole('button', { name: '为 channel/model 选择价格来源' }));

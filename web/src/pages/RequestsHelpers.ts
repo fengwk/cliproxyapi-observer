@@ -237,21 +237,18 @@ export const CAPTURE_STATUS_LABELS: Record<string, string> = {
 /**
  * Pricing source human label mapping.
  */
-export function formatPriceSource(
-  source?: string,
-  ruleId?: string
-): { label: string; isWarning: boolean } {
-  if (!source || source === 'unpriced') {
-    return { label: '未定价按 0', isWarning: true };
+export function formatPriceSource(source?: string): { label: string; isWarning: boolean } {
+  if (!source) {
+    return { label: '—', isWarning: false };
+  }
+  if (source === 'zero') {
+    return { label: '零价格（按 $0 计费）', isWarning: false };
   }
   if (source === 'manual') {
-    return { label: '手动定价', isWarning: false };
+    return { label: '手工价格', isWarning: false };
   }
   if (source === 'catalog' || source === 'auto') {
-    return { label: '公共参考价', isWarning: false };
-  }
-  if (source === 'rule') {
-    return { label: ruleId ? `规则 (${ruleId})` : '自定义规则', isWarning: false };
+    return { label: '自动目录', isWarning: false };
   }
   return { label: source, isWarning: false };
 }

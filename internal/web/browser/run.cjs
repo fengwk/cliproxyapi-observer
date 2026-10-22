@@ -480,6 +480,15 @@ async function readonlyPages(env, name) {
   await verifyContentPane(env, name + ': settings top');
   await verifyControlClear(env, name + ': settings refresh', '.settings-toolbar');
   await shot(page, name + '-settings-top');
+  if (name === '390-light') {
+    await frame.locator('#settings-pricing-heading').scrollIntoViewIfNeeded();
+    await verifyPricingLayout(env, name + ': pricing');
+    check(name + ': zero price is shown as a normal amount, not unpriced',
+      await frame.getByText('零价格', { exact: true }).count() > 0 &&
+      await frame.getByText(/未定价|missing_rates/).count() === 0);
+    await frame.locator('.settings-definition').first().scrollIntoViewIfNeeded();
+    await shot(page, name + '-settings-pricing');
+  }
   const capacity = await frame.locator('#settings-max-body-amount').boundingBox();
   check(name + ': capacity input has readable width', capacity && capacity.width >= (name.startsWith('390') ? 75 : 100), JSON.stringify(capacity));
   // Scroll the capture Select to a partially clipped position. Its bounding
@@ -515,6 +524,37 @@ async function readonlyPages(env, name) {
   await shot(page, name + '-settings-bottom');
   check(name + ': XSS strings stayed text', await frame.evaluate(() => !window.__observerXss &&
     !document.querySelector('#content script,#content img[onerror],#content iframe')));
+}
+
+async function verifyPricingLayout(env, name) {
+  const { frame } = env;
+  const layout = await frame.evaluate(() => {
+    const content = document.querySelector('#content');
+    const section = document.querySelector('[aria-labelledby="settings-pricing-heading"]');
+    const definition = section?.querySelector('.settings-definition');
+    const contentRect = content?.getBoundingClientRect();
+    const definitionRect = definition?.getBoundingClientRect();
+    return {
+      viewport: innerWidth,
+      document: document.documentElement.scrollWidth,
+      body: document.body.scrollWidth,
+      contentClient: content?.clientWidth,
+      contentScroll: content?.scrollWidth,
+      sectionClient: section?.clientWidth,
+      sectionScroll: section?.scrollWidth,
+      definitionClient: definition?.clientWidth,
+      definitionScroll: definition?.scrollWidth,
+      definitionRight: definitionRect?.right,
+      contentRight: contentRect?.right,
+    };
+  });
+  check(name + ': pricing section does not stretch the viewport',
+    layout.document <= layout.viewport + 1 && layout.body <= layout.viewport + 1 &&
+    layout.contentScroll <= layout.contentClient + 1 &&
+    layout.sectionScroll <= layout.sectionClient + 1, JSON.stringify(layout));
+  check(name + ': pricing definition stays inside the content pane',
+    layout.definitionScroll <= layout.definitionClient + 1 &&
+    layout.definitionRight <= layout.contentRight + 1, JSON.stringify(layout));
 }
 
 async function interactions(env) {
@@ -651,9 +691,43 @@ async function interactions(env) {
   await frame.getByText('请求记录与存储限制设置已保存', { exact: true }).waitFor();
   check('general save excludes unsaved pricing draft', JSON.stringify(server.state.settings.pricing) === originalPricing);
   assert.equal(await frame.getByRole('switch', { name: '自动使用 models.dev 公共价格目录', exact: true }).getAttribute('aria-checked'), 'false');
+  await frame.locator('#settings-pricing-heading').scrollIntoViewIfNeeded();
+  await verifyPricingLayout(env, 'settings-pricing');
+  const sourceSelect = frame.getByRole('combobox', { name: '价格目录来源', exact: true });
+  check('pricing UI defaults to models.dev v2',
+    (await sourceSelect.innerText()).includes('models.dev v2'));
+  check('manual price keeps the complete model/provider identity',
+    await frame.getByLabel('第 1 条手工价格模型 ID', { exact: true }).inputValue() === 'gpt-5-codex' &&
+    await frame.getByLabel('第 1 条手工价格 Provider', { exact: true }).inputValue() === '');
+  check('structured definition renders base rates and reasoning inheritance',
+    await frame.getByLabel('第 1 条手工价格 输入价格', { exact: true }).inputValue() === '1.25' &&
+    await frame.getByLabel('第 1 条手工价格 输出价格', { exact: true }).inputValue() === '10' &&
+    (await frame.getByLabel('第 1 条手工价格 思考计价方式', { exact: true }).innerText()).includes('同输出'));
+  const definitionParts = {
+    overrides: await frame.locator('[data-testid="definition-override"]').count(),
+    multipliers: await frame.locator('[data-testid="definition-multiplier"]').count(),
+    ttlSummaries: await frame.locator('.settings-details > summary').filter({ hasText: '缓存写入 TTL 覆盖' }).count(),
+  };
+  check('structured definition renders overrides, multipliers and TTL section',
+    definitionParts.overrides === 1 && definitionParts.multipliers === 1 &&
+    definitionParts.ttlSummaries >= 1, JSON.stringify(definitionParts));
+  check('preview marks manual and zero prices with rule counts, never unpriced',
+    await frame.getByText('手工价格', { exact: true }).count() > 0 &&
+    await frame.getByText('零价格', { exact: true }).count() > 0 &&
+    await frame.getByText('2 条条件规则', { exact: true }).count() > 0 &&
+    await frame.getByText(/未定价|missing_rates/).count() === 0);
+  await shot(page, 'settings-pricing-host');
+  await sourceSelect.click();
+  await frame.getByRole('option', { name: 'models.dev v1', exact: true }).click();
+  await frame.getByLabel('第 1 条手工价格 Provider', { exact: true }).fill('openai');
   await frame.getByTestId('settings-pricing-save').click();
   await frame.getByText('价格设置已保存', { exact: true }).waitFor();
+  const savedPrice = server.state.settings.pricing.prices.find(price => price.model === 'gpt-5-codex');
+  check('pricing save persists v1 source and exact provider pair',
+    server.state.settings.pricing.source === 'models_dev_v1' && savedPrice?.provider === 'openai' &&
+    savedPrice?.definition.base.input === 1_250_000);
   check('pricing save preserves confirmed capture settings', server.state.settings.capture_enabled && !server.state.settings.pricing.auto);
+  await shot(page, 'settings-pricing-saved-host');
   server.state.pricesError = 'test catalog offline';
   const sync = server.state.pricesLastSync;
   await frame.getByTestId('prices-refresh').click();

@@ -14,8 +14,8 @@ import type { PageProps } from '../lib/api';
 import type {
   Settings,
   PricingConfig,
-  Price,
-  Rule,
+  ManualPrice,
+  PricingSource,
   PriceSnapshot,
   PricePreview,
   PricePreviewItem,
@@ -29,17 +29,17 @@ import {
   formatBytes,
   formatInt,
   formatRateDisplay,
+  formatReasoningDisplay,
+  sourceLabel,
+  pricingSourceLabel,
   validateGeneralSettings,
-  ratesToForm,
+  definitionToDraft,
+  emptyDefinitionDraft,
   parseManualPrices,
-  parseRules,
-  generateUniqueRuleID,
-  moveItem,
   areGeneralSettingsEqual,
   isPricingDraftEqual,
   GeneralSettingsDraft,
   ManualPriceDraft,
-  RuleDraft,
   CapacityUnit,
   splitBytesToCapacity,
   parseCapacityToBytes,
@@ -49,6 +49,7 @@ import {
   MAX_RAW_RETENTION_HOURS,
   MAX_DAILY_RETENTION_DAYS,
 } from './Settings.helpers';
+import { PriceDefinitionEditor } from './PricingDefinitionEditor';
 import './Settings.css';
 
 const DEFAULT_SETTINGS: Settings = {
@@ -59,8 +60,8 @@ const DEFAULT_SETTINGS: Settings = {
   daily_retention_days: 365,
   pricing: {
     auto: true,
+    source: 'models_dev_v2',
     prices: [],
-    rules: [],
   },
 };
 
@@ -69,6 +70,7 @@ const DEFAULT_SNAPSHOT: PriceSnapshot = {
   last_sync: '',
   refreshing: false,
   catalog_entries: 0,
+  source: 'models_dev_v2',
 };
 
 const DEFAULT_HEALTH: Health = {
@@ -147,8 +149,8 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
   // Section 2: 模型价格 Draft
   // ---------------------------------------------------------------------------
   const [pricingAuto, setPricingAuto] = useState<boolean>(true);
+  const [pricingSource, setPricingSource] = useState<PricingSource>('models_dev_v2');
   const [manualDrafts, setManualDrafts] = useState<ManualPriceDraft[]>([]);
-  const [ruleDrafts, setRuleDrafts] = useState<RuleDraft[]>([]);
   const [mappingDrafts, setMappingDrafts] = useState<ModelMapping[]>([]);
   const [mappingItem, setMappingItem] = useState<PricePreviewItem | null>(null);
   const [pricingSaving, setPricingSaving] = useState(false);
@@ -209,39 +211,16 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
 
   const syncPricingFromConfirmed = useCallback((pricing: PricingConfig) => {
     setPricingAuto(pricing.auto !== false);
+    setPricingSource(pricing.source === 'models_dev_v1' ? 'models_dev_v1' : 'models_dev_v2');
     setMappingDrafts(pricing.mappings ?? []);
 
-    const manuals: ManualPriceDraft[] = (pricing.prices || []).map((p, index) => {
-      const f = ratesToForm(p.rates);
-      return {
-        id: `manual-${index}-${p.model}`,
-        model: p.model,
-        input: f.input,
-        output: f.output,
-        cache_read: f.cache_read,
-        cache_write: f.cache_write,
-        reasoning: f.reasoning,
-        source: p.source,
-      };
-    });
+    const manuals: ManualPriceDraft[] = (pricing.prices || []).map((price, index) => ({
+      id: `manual-${index}-${price.model}-${price.provider ?? ''}`,
+      model: price.model,
+      provider: price.provider ?? '',
+      definition: definitionToDraft(price.definition),
+    }));
     setManualDrafts(manuals);
-
-    const rules: RuleDraft[] = (pricing.rules || []).map((r, index) => {
-      const f = ratesToForm(r.rates);
-      return {
-        rowId: `rule-${index}-${r.id}`,
-        id: r.id,
-        model: r.model,
-        input_tokens_gt: r.input_tokens_gt !== undefined && r.input_tokens_gt !== null ? String(r.input_tokens_gt) : '',
-        time_range: r.time_range || '',
-        input: f.input,
-        output: f.output,
-        cache_read: f.cache_read,
-        cache_write: f.cache_write,
-        reasoning: f.reasoning,
-      };
-    });
-    setRuleDrafts(rules);
   }, []);
 
   // ---------------------------------------------------------------------------
@@ -280,9 +259,9 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
   }, [generalDraft, maxBodyAmount, maxBodyUnit, maxStorageAmount, maxStorageUnit, confirmedSettings]);
 
   const isPricingDirty = useMemo(() => {
-    return !isPricingDraftEqual(pricingAuto, manualDrafts, ruleDrafts, confirmedSettings.pricing) ||
+    return !isPricingDraftEqual(pricingAuto, pricingSource, manualDrafts, confirmedSettings.pricing) ||
       JSON.stringify(mappingDrafts) !== JSON.stringify(confirmedSettings.pricing.mappings ?? []);
-  }, [pricingAuto, manualDrafts, ruleDrafts, mappingDrafts, confirmedSettings.pricing]);
+  }, [pricingAuto, pricingSource, manualDrafts, mappingDrafts, confirmedSettings.pricing]);
 
   isGeneralDirtyRef.current = isGeneralDirty;
   isPricingDirtyRef.current = isPricingDirty;
@@ -599,7 +578,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
     }
   };
 
-  const handleAddManualPrice = (initialModel = '') => {
+  const handleAddManualPrice = (initialModel = '', initialProvider = '') => {
     if (manualDrafts.length >= MAX_CONFIG_ENTRIES) {
       setPricingStatus({ tone: 'danger', message: `手工价格不能超过 ${MAX_CONFIG_ENTRIES} 条` });
       return;
@@ -607,12 +586,8 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
     const newDraft: ManualPriceDraft = {
       id: `manual-new-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       model: initialModel,
-      input: '0',
-      output: '0',
-      cache_read: '0',
-      cache_write: '0',
-      reasoning: '',
-      source: 'manual',
+      provider: initialProvider,
+      definition: emptyDefinitionDraft(),
     };
     setManualDrafts((prev) => [...prev, newDraft]);
   };
@@ -629,60 +604,14 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
     setManualDrafts((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const handleAddRule = () => {
-    if (ruleDrafts.length >= MAX_CONFIG_ENTRIES) {
-      setPricingStatus({ tone: 'danger', message: `规则不能超过 ${MAX_CONFIG_ENTRIES} 条` });
-      return;
-    }
-    const existingIds = ruleDrafts.map((r) => r.id);
-    const newRuleId = generateUniqueRuleID(existingIds);
-    const newDraft: RuleDraft = {
-      rowId: `rule-new-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      id: newRuleId,
-      model: '',
-      input_tokens_gt: '',
-      time_range: '',
-      input: '0',
-      output: '0',
-      cache_read: '0',
-      cache_write: '0',
-      reasoning: '',
-    };
-    setRuleDrafts((prev) => [...prev, newDraft]);
-  };
-
-  const handleUpdateRuleDraft = (index: number, patch: Partial<RuleDraft>) => {
-    setRuleDrafts((prev) => {
-      const next = [...prev];
-      next[index] = { ...next[index], ...patch };
-      return next;
-    });
-  };
-
-  const handleMoveRule = (index: number, direction: 'up' | 'down') => {
-    setRuleDrafts((prev) => moveItem(prev, index, direction));
-  };
-
-  const handleRemoveRule = (index: number) => {
-    setRuleDrafts((prev) => prev.filter((_, i) => i !== index));
-  };
-
   const handleSavePricing = async () => {
     if (isMutatingRef.current || !hasLoadedSuccessfullyRef.current || isMutationBusy) return;
     isMutatingRef.current = true;
     setPricingStatus(null);
 
-    let parsedPrices: Price[];
-    let parsedRules: Rule[];
+    let parsedPrices: ManualPrice[];
     try {
       parsedPrices = parseManualPrices(manualDrafts);
-    } catch (err) {
-      isMutatingRef.current = false;
-      setPricingStatus({ tone: 'danger', message: errorMessage(err) });
-      return;
-    }
-    try {
-      parsedRules = parseRules(ruleDrafts);
     } catch (err) {
       isMutatingRef.current = false;
       setPricingStatus({ tone: 'danger', message: errorMessage(err) });
@@ -693,8 +622,8 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
     try {
       const newPricing: PricingConfig = {
         auto: pricingAuto,
+        source: pricingSource,
         prices: parsedPrices,
-        rules: parsedRules,
         mappings: mappingDrafts,
       };
 
@@ -722,7 +651,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
       syncPricingFromConfirmed(updated.pricing);
       setPricingStatus({ tone: 'success', message: '价格设置已保存' });
 
-      // Update preview to reflect newly saved manual overrides and rules
+      // Update preview to reflect newly saved manual definitions.
       fetchPreview(availableModels);
     } catch (saveErr) {
       if (!isMountedRef.current) return;
@@ -743,10 +672,21 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
   // Filtered and paginated preview items
   const filteredPreview = useMemo(() => {
     const lower = previewFilter.trim().toLowerCase();
-    return previewItems.filter(
-      (item) => (previewStatus === 'all' || (previewStatus === 'matched' ? item.source !== 'unpriced' : previewStatus === 'ambiguous' ? item.reason?.includes('ambiguous') || (item.candidates?.length ?? 0) > 1 : item.source === 'unpriced')) &&
-        (item.model.toLowerCase().includes(lower) || (item.provider && item.provider.toLowerCase().includes(lower)))
-    );
+    return previewItems.filter((item) => {
+      const ambiguous = item.reason?.includes('ambiguous') || (item.candidates?.length ?? 0) > 1;
+      const matchesStatus =
+        previewStatus === 'all' ||
+        (previewStatus === 'matched'
+          ? item.source === 'manual' || item.source === 'auto'
+          : previewStatus === 'ambiguous'
+            ? ambiguous
+            : item.source === 'zero');
+      return (
+        matchesStatus &&
+        (item.model.toLowerCase().includes(lower) ||
+          (item.provider && item.provider.toLowerCase().includes(lower)))
+      );
+    });
   }, [previewItems, previewFilter, previewStatus]);
 
   const totalPreviewPages = Math.max(1, Math.ceil(filteredPreview.length / PREVIEW_PAGE_SIZE));
@@ -1058,7 +998,8 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
           {isPricingDirty && <Badge tone="warning">价格有未保存更改</Badge>}
         </div>
         <p className="settings-section-desc">
-          管理模型费率与多级计费规则。支持 models.dev 公共目录自动同步与精确手工覆盖；新价格仅对后续请求生效。
+          管理模型价格定义与条件规则。支持 models.dev v1/v2 固定目录同步，并按完整
+          (model, provider) 身份精确手工覆盖；缺价按 $0 计费，新价格仅对后续请求生效。
         </p>
 
         {pricingStatus && <Notice tone={pricingStatus.tone}>{pricingStatus.message}</Notice>}
@@ -1067,7 +1008,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
           <div className="settings-toggle-info">
             <span className="settings-toggle-title">自动使用 models.dev 公共价格目录</span>
             <span className="settings-toggle-hint">
-              开启后自动同步 models.dev 公共参考价格，可能与实际账单不同。可在下方通过手工价格或规则针对特定模型进行覆盖。
+              开启后按所选目录自动同步参考价格，可能与实际账单不同。手工价格以完整定义替换目录价格。
             </span>
           </div>
           <Switch
@@ -1077,6 +1018,24 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
             disabled={isMutationBusy}
             onChange={(checked) => setPricingAuto(checked)}
           />
+        </div>
+
+        <div className="settings-grid">
+          <Field
+            label="价格目录来源"
+            hint="固定 models.dev 端点；保存后刷新目录并使用所选版本，缺失价格按 $0 计费。"
+          >
+            <Select
+              aria-label="价格目录来源"
+              value={pricingSource}
+              disabled={isMutationBusy}
+              options={[
+                { value: 'models_dev_v2', label: 'models.dev v2（默认）' },
+                { value: 'models_dev_v1', label: 'models.dev v1' },
+              ]}
+              onChange={(value) => setPricingSource(value as PricingSource)}
+            />
+          </Field>
         </div>
 
         {/* Public Catalog Sync Status */}
@@ -1092,11 +1051,16 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
           }}
         >
           <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+            <span>目录来源：{pricingSourceLabel(snapshot.source)}</span>
+            <span style={{ margin: '0 8px' }}>·</span>
             <span>公共目录总收录：{formatInt(snapshot.catalog_entries ?? 0)} 条</span>
             <span style={{ margin: '0 8px' }}>·</span>
             <span>已记录模型与手工价格：{formatInt(snapshot.prices?.length ?? 0)} 条</span>
             <span style={{ margin: '0 8px' }}>·</span>
             <span>上次同步：{isLastSyncValid ? new Date(snapshot.last_sync).toLocaleString('zh-CN') : '尚未同步'}</span>
+            {pricingSource !== snapshot.source && (
+              <span style={{ marginLeft: 8 }}>（保存并刷新后切换目录）</span>
+            )}
             {snapshot.error && (
               <span style={{ color: 'var(--error-color, #c65746)', marginLeft: 8 }}>
                 （目录同步警告：{snapshot.error}）
@@ -1126,7 +1090,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
 
           <div className="settings-table-filter-bar">
             <Select aria-label="价格匹配状态" value={previewStatus}
-              options={[{ value: 'all', label: '全部状态' }, { value: 'matched', label: '已匹配' }, { value: 'ambiguous', label: '存在候选 / 歧义' }, { value: 'unpriced', label: '未定价' }]}
+              options={[{ value: 'all', label: '全部状态' }, { value: 'matched', label: '已匹配' }, { value: 'ambiguous', label: '存在候选 / 歧义' }, { value: 'zero', label: '零价格' }]}
               onChange={value => { setPreviewStatus(value); setPreviewPage(1); }} />
             <div className="settings-search-input">
               <Input
@@ -1169,9 +1133,11 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
                 </thead>
                 <tbody>
                   {currentPreviewPageItems.map((item) => {
-                    const isUnpriced = item.source === 'unpriced';
+                    const ruleCount =
+                      (item.definition?.overrides?.length ?? 0) +
+                      (item.definition?.multipliers?.length ?? 0);
                     return (
-                      <tr key={item.model}>
+                      <tr key={`${item.model}\u0000${item.provider ?? ''}`}>
                         <td>
                           <strong>{item.model}</strong>
                           {item.provider && (
@@ -1180,24 +1146,27 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
                             </span>
                           )}
                         </td>
-                        <td>{isUnpriced || item.missing_rates?.includes('input') ? '—' : formatRateDisplay(item.rates.input)}</td>
-                        <td>{isUnpriced || item.missing_rates?.includes('output') ? '—' : formatRateDisplay(item.rates.output)}</td>
+                        <td>{formatRateDisplay(item.rates.input)}</td>
+                        <td>{formatRateDisplay(item.rates.output)}</td>
                         <td>
-                          {isUnpriced || item.missing_rates?.includes('cache_read') ? '—' : formatRateDisplay(item.rates.cache_read)} / {isUnpriced || item.missing_rates?.includes('cache_write') ? '—' : formatRateDisplay(item.rates.cache_write)}
+                          {formatRateDisplay(item.rates.cache_read)} / {formatRateDisplay(item.rates.cache_write)}
                         </td>
-                        <td>{item.rates.reasoning !== undefined && item.rates.reasoning !== null ? formatRateDisplay(item.rates.reasoning) : '—'}</td>
+                        <td>{formatReasoningDisplay(item.rates.reasoning)}</td>
                         <td>
                           <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                            {isUnpriced ? (
-                              <Badge tone="warning">未定价（按 $0 计费）</Badge>
-                            ) : item.source === 'manual' ? (
-                              <Badge tone="neutral">手工</Badge>
-                            ) : (
-                              <Badge tone="neutral">自动目录</Badge>
+                            <Badge tone="neutral">{sourceLabel(item.source)}</Badge>
+                            {ruleCount > 0 && <Badge tone="neutral">{ruleCount} 条条件规则</Badge>}
+                            {item.pricing_supported === false && (
+                              <Badge tone="warning">价格规则不受支持</Badge>
                             )}
-                            {item.has_rules && <Badge tone="neutral">含条件规则</Badge>}
+                            {(item.candidates?.length ?? 0) > 1 && (
+                              <Badge tone="warning">候选 {item.candidates?.length}</Badge>
+                            )}
                           </div>
                           <div className="settings-note">{item.reason || item.match || '—'}</div>
+                          {item.support_issues?.length ? (
+                            <div className="settings-note">适配问题：{item.support_issues.join('；')}</div>
+                          ) : null}
                           {item.catalog_provider && <div className="settings-note">{item.catalog_provider} / {item.catalog_model}</div>}
                         </td>
                         <td>
@@ -1205,7 +1174,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
                           <Button
                             variant="ghost"
                             disabled={isMutationBusy}
-                            onClick={() => handleAddManualPrice(item.model)}
+                            onClick={() => handleAddManualPrice(item.model, item.provider ?? '')}
                             aria-label={`为 ${item.model} 添加手工价格覆盖`}
                           >
                             手工覆盖
@@ -1256,8 +1225,16 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
         {mappingItem && <Modal title={`选择价格来源：${mappingItem.model}`} size="lg" onClose={() => setMappingItem(null)}>
           <p className="settings-note">这是显式计费映射，不修改 CPA 路由。加入草稿后需点击“保存价格设置”，只影响后续请求。</p>
           {(mappingItem.candidates ?? []).map(candidate => <div className="settings-row" key={`${candidate.provider}/${candidate.model}`}>
-            <div><strong>{candidate.provider} / {candidate.model}</strong><div className="settings-note">输入 {candidate.missing_rates?.includes('input') ? '—' : formatRateDisplay(candidate.rates?.input)} · 输出 {candidate.missing_rates?.includes('output') ? '—' : formatRateDisplay(candidate.rates?.output)}</div></div>
-            <Button disabled={isMutationBusy} onClick={() => {
+            <div>
+              <strong>{candidate.provider} / {candidate.model}</strong>
+              <div className="settings-note">
+                输入 {formatRateDisplay(candidate.definition.base.input)} · 输出 {formatRateDisplay(candidate.definition.base.output)} · 思考 {formatReasoningDisplay(candidate.definition.base.reasoning)}
+              </div>
+              {candidate.pricing_supported === false && (
+                <div className="settings-note">不可导入：{candidate.support_issues?.join('；') || '价格规则不受支持'}</div>
+              )}
+            </div>
+            <Button disabled={isMutationBusy || candidate.pricing_supported === false} onClick={() => {
               setMappingDrafts(prev => [...prev.filter(v => v.model !== mappingItem.model), { model: mappingItem.model, provider: candidate.provider, catalog_model: candidate.model }]);
               setMappingItem(null);
             }}>加入草稿</Button>
@@ -1279,27 +1256,17 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
             </Button>
           </div>
           <p className="settings-note" style={{ marginBottom: 12 }}>
-            为特定完整模型 ID 指定费率，精确覆盖公共目录。显式输入的 $0 为有效费率，不同于未定价。
+            使用完整 (model, provider) 身份精确覆盖公共目录。显式输入的 $0 是有效费率；目录缺价同样按 $0 计费。
           </p>
 
           {manualDrafts.length === 0 ? (
-            <EmptyState title="暂无手工价格覆盖" description="未配置手工价格时，将优先使用公共目录或按未定价计费。" />
+            <EmptyState title="暂无手工价格覆盖" description="未配置手工价格时使用所选公共目录；目录缺价按 $0 计费。" />
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {manualDrafts.map((draft, index) => (
                 <div key={draft.id} className="settings-rule-card">
                   <div className="settings-rule-header">
-                    <div style={{ flex: 1, minWidth: 200 }}>
-                      <Field label={`第 ${index + 1} 条：完整模型 ID`}>
-                        <Input
-                          placeholder="例如 openai/gpt-4o 或 custom-model"
-                          value={draft.model}
-                          disabled={isMutationBusy}
-                          onChange={(e) => handleUpdateManualDraft(index, { model: e.target.value })}
-                          aria-label={`第 ${index + 1} 条手工价格模型 ID`}
-                        />
-                      </Field>
-                    </div>
+                    <strong>第 {index + 1} 条手工价格</strong>
                     <div className="settings-rule-actions">
                       <Button
                         type="button"
@@ -1314,234 +1281,38 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
                     </div>
                   </div>
 
-                  <div className="settings-rates-grid">
-                    <Field label="输入 ($/1M)">
+                  <div className="settings-rule-conditions-grid">
+                    <Field label="完整模型 ID">
                       <Input
-                        type="number"
-                        step="0.000001"
-                        min="0"
-                        value={draft.input}
+                        placeholder="例如 openai/gpt-4o 或 custom-model"
+                        value={draft.model}
                         disabled={isMutationBusy}
-                        onChange={(e) => handleUpdateManualDraft(index, { input: e.target.value })}
-                        aria-label={`第 ${index + 1} 条输入价格`}
+                        onChange={(e) => handleUpdateManualDraft(index, { model: e.target.value })}
+                        aria-label={`第 ${index + 1} 条手工价格模型 ID`}
                       />
                     </Field>
-                    <Field label="输出 ($/1M)">
+                    <Field label="Provider（可空）" hint="空 Provider 只匹配真实的空 Provider，不会通配其他渠道。">
                       <Input
-                        type="number"
-                        step="0.000001"
-                        min="0"
-                        value={draft.output}
+                        placeholder="例如 openai"
+                        value={draft.provider}
                         disabled={isMutationBusy}
-                        onChange={(e) => handleUpdateManualDraft(index, { output: e.target.value })}
-                        aria-label={`第 ${index + 1} 条输出价格`}
-                      />
-                    </Field>
-                    <Field label="缓存读 ($/1M)">
-                      <Input
-                        type="number"
-                        step="0.000001"
-                        min="0"
-                        value={draft.cache_read}
-                        disabled={isMutationBusy}
-                        onChange={(e) => handleUpdateManualDraft(index, { cache_read: e.target.value })}
-                        aria-label={`第 ${index + 1} 条缓存读价格`}
-                      />
-                    </Field>
-                    <Field label="缓存写 ($/1M)">
-                      <Input
-                        type="number"
-                        step="0.000001"
-                        min="0"
-                        value={draft.cache_write}
-                        disabled={isMutationBusy}
-                        onChange={(e) => handleUpdateManualDraft(index, { cache_write: e.target.value })}
-                        aria-label={`第 ${index + 1} 条缓存写价格`}
-                      />
-                    </Field>
-                    <Field label="推理 ($/1M，可选)">
-                      <Input
-                        type="number"
-                        step="0.000001"
-                        min="0"
-                        placeholder="留空 = 无"
-                        value={draft.reasoning}
-                        disabled={isMutationBusy}
-                        onChange={(e) => handleUpdateManualDraft(index, { reasoning: e.target.value })}
-                        aria-label={`第 ${index + 1} 条推理价格`}
+                        onChange={(e) => handleUpdateManualDraft(index, { provider: e.target.value })}
+                        aria-label={`第 ${index + 1} 条手工价格 Provider`}
                       />
                     </Field>
                   </div>
+
+                  <PriceDefinitionEditor
+                    label={`第 ${index + 1} 条手工价格`}
+                    draft={draft.definition}
+                    disabled={isMutationBusy}
+                    onChange={(definition) => handleUpdateManualDraft(index, { definition })}
+                  />
                 </div>
               ))}
             </div>
           )}
         </div>
-
-        {/* Conditional Rules (Collapsed) */}
-        <details className="settings-details" style={{ marginTop: 20 }}>
-          <summary>条件匹配规则（高级，{ruleDrafts.length} 条已配置）</summary>
-          <div style={{ marginTop: 10 }}>
-            <div className="settings-section-header" style={{ borderBottom: 'none' }}>
-              <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
-                规则自上而下匹配，首条条件全部满足（AND）的规则生效。完整提示词 Token 严格大于生效；留空项表示不设限。
-              </span>
-              <Button
-                type="button"
-                variant="secondary"
-                disabled={isMutationBusy}
-                onClick={handleAddRule}
-                data-testid="rule-add"
-              >
-                + 添加规则
-              </Button>
-            </div>
-
-            {ruleDrafts.length === 0 ? (
-              <EmptyState title="暂无条件规则" description="如需根据 Token 上下文大小或 UTC 时间段调整费率，可添加规则。" />
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {ruleDrafts.map((rule, index) => (
-                  <div key={rule.rowId} className="settings-rule-card">
-                    <div className="settings-rule-header">
-                      <div className="settings-rule-conditions-grid" style={{ flex: 1 }}>
-                        <Field label="规则 ID（唯一）">
-                          <Input
-                            value={rule.id}
-                            disabled={isMutationBusy}
-                            onChange={(e) => handleUpdateRuleDraft(index, { id: e.target.value })}
-                            aria-label={`第 ${index + 1} 条规则 ID`}
-                          />
-                        </Field>
-                        <Field label="模型 ID">
-                          <Input
-                            placeholder="例如 claude-3-5-sonnet"
-                            value={rule.model}
-                            disabled={isMutationBusy}
-                            onChange={(e) => handleUpdateRuleDraft(index, { model: e.target.value })}
-                            aria-label={`第 ${index + 1} 条规则模型 ID`}
-                          />
-                        </Field>
-                        <Field label="提示词 Token 严格大于" hint="含缓存读写，留空不限制">
-                          <Input
-                            type="number"
-                            min="0"
-                            placeholder="留空 = 不限制"
-                            value={rule.input_tokens_gt}
-                            disabled={isMutationBusy}
-                            onChange={(e) => handleUpdateRuleDraft(index, { input_tokens_gt: e.target.value })}
-                            aria-label={`第 ${index + 1} 条规则 Token 阈值`}
-                          />
-                        </Field>
-                        <Field label="UTC 时间区间" hint="格式 HH:mm-HH:mm，支持跨夜">
-                          <Input
-                            placeholder="例如 00:00-08:00"
-                            value={rule.time_range}
-                            disabled={isMutationBusy}
-                            onChange={(e) => handleUpdateRuleDraft(index, { time_range: e.target.value })}
-                            aria-label={`第 ${index + 1} 条规则 UTC 时间区间`}
-                          />
-                        </Field>
-                      </div>
-
-                      <div className="settings-rule-actions">
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          disabled={index === 0 || isMutationBusy}
-                          onClick={() => handleMoveRule(index, 'up')}
-                          aria-label={`上移第 ${index + 1} 条规则`}
-                          data-testid="rule-up"
-                        >
-                          上移
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          disabled={index === ruleDrafts.length - 1 || isMutationBusy}
-                          onClick={() => handleMoveRule(index, 'down')}
-                          aria-label={`下移第 ${index + 1} 条规则`}
-                          data-testid="rule-down"
-                        >
-                          下移
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="danger"
-                          disabled={isMutationBusy}
-                          onClick={() => handleRemoveRule(index)}
-                          aria-label={`删除第 ${index + 1} 条规则`}
-                          data-testid="rule-remove"
-                        >
-                          删除
-                        </Button>
-                      </div>
-                    </div>
-
-                    <div className="settings-rates-grid">
-                      <Field label="输入 ($/1M)">
-                        <Input
-                          type="number"
-                          step="0.000001"
-                          min="0"
-                          value={rule.input}
-                          disabled={isMutationBusy}
-                          onChange={(e) => handleUpdateRuleDraft(index, { input: e.target.value })}
-                          aria-label={`第 ${index + 1} 条规则输入价格`}
-                        />
-                      </Field>
-                      <Field label="输出 ($/1M)">
-                        <Input
-                          type="number"
-                          step="0.000001"
-                          min="0"
-                          value={rule.output}
-                          disabled={isMutationBusy}
-                          onChange={(e) => handleUpdateRuleDraft(index, { output: e.target.value })}
-                          aria-label={`第 ${index + 1} 条规则输出价格`}
-                        />
-                      </Field>
-                      <Field label="缓存读 ($/1M)">
-                        <Input
-                          type="number"
-                          step="0.000001"
-                          min="0"
-                          value={rule.cache_read}
-                          disabled={isMutationBusy}
-                          onChange={(e) => handleUpdateRuleDraft(index, { cache_read: e.target.value })}
-                          aria-label={`第 ${index + 1} 条规则缓存读价格`}
-                        />
-                      </Field>
-                      <Field label="缓存写 ($/1M)">
-                        <Input
-                          type="number"
-                          step="0.000001"
-                          min="0"
-                          value={rule.cache_write}
-                          disabled={isMutationBusy}
-                          onChange={(e) => handleUpdateRuleDraft(index, { cache_write: e.target.value })}
-                          aria-label={`第 ${index + 1} 条规则缓存写价格`}
-                        />
-                      </Field>
-                      <Field label="推理 ($/1M，可选)">
-                        <Input
-                          type="number"
-                          step="0.000001"
-                          min="0"
-                          placeholder="留空 = 无"
-                          value={rule.reasoning}
-                          disabled={isMutationBusy}
-                          onChange={(e) => handleUpdateRuleDraft(index, { reasoning: e.target.value })}
-                          aria-label={`第 ${index + 1} 条规则推理价格`}
-                        />
-                      </Field>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </details>
 
         <div className="settings-actions">
           <Button
