@@ -52,7 +52,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: refs/tags/${{ env.RELEASE_TAG }}
 
@@ -101,7 +101,7 @@ jobs:
       # the trusted default branch so retrying an older tag never executes that
       # tag's code.
       - name: Check out trusted publisher helper
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.repository.default_branch }}
 
