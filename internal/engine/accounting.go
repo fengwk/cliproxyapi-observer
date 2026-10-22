@@ -168,6 +168,11 @@ func (s *Store) persistLocked(p pending) error {
 		if e := applyRollup(tx, "hourly", r, r.Time.UTC().Truncate(time.Hour)); e != nil {
 			return e
 		}
+		// Minute buckets keep timezone-local day boundaries exact after raw
+		// records and short-lived hourly rollups expire.
+		if e := applyRollup(tx, "minutes", r, r.Time.UTC().Truncate(time.Minute)); e != nil {
+			return e
+		}
 		if e := put(tx.Bucket([]byte("records")), r.ID, recordData{Record: r, Quote: p.Quote, CaptureEnabled: p.CaptureEnabled, CaptureMode: p.CaptureMode, StatsVersion: statsVersion}); e != nil {
 			return e
 		}

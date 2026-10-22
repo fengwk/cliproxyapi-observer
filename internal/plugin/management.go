@@ -95,7 +95,7 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPost, Path: routeKeyReset, Description: "Reset selected usage windows for a client key."},
 			{Method: http.MethodPost, Path: routeKeyRecover, Description: "Acknowledge unknown accounting for a client key."},
 			{Method: http.MethodGet, Path: routeRequests, Description: "Paginated request records."},
-			{Method: http.MethodGet, Path: routeRequestView, Description: "Consistent UTC summary, series and records or groups."},
+			{Method: http.MethodGet, Path: routeRequestView, Description: "Consistent timezone-local summary, series and records or groups."},
 			{Method: http.MethodGet, Path: routeRequestFacets, Description: "Searchable historical request dimensions."},
 			{Method: http.MethodGet, Path: routeRequestDetail, Description: "One request record plus captured details selected by the id query parameter."},
 			{Method: http.MethodGet, Path: routeSummary, Description: "Aggregated request and cost summary."},

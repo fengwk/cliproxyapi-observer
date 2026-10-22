@@ -39,6 +39,7 @@ type queryEnv struct {
 	now       time.Time
 	rawCut    time.Time
 	dailyCut  time.Time
+	minuteCut time.Time
 	rawHours  int
 	dailyDays int
 }
@@ -61,8 +62,19 @@ func (s *Store) queryEnv() (*queryEnv, func(), error) {
 	}
 	env.rawCut = env.now.Add(-time.Duration(env.rawHours) * time.Hour)
 	env.dailyCut = day(env.now).AddDate(0, 0, -env.dailyDays)
+	env.minuteCut = minuteRetentionCut(env.rawCut, env.dailyCut)
 	s.mu.Unlock()
 	return env, s.dbMu.RUnlock, nil
+}
+
+// minuteRetentionCut keeps minute aggregates while either the daily window or
+// the raw window still needs them. Raw detail retention itself is unchanged.
+func minuteRetentionCut(rawCut, dailyCut time.Time) time.Time {
+	rawMinute := rawCut.UTC().Truncate(time.Minute)
+	if rawMinute.Before(dailyCut) {
+		return rawMinute
+	}
+	return dailyCut
 }
 
 func pageLimits(page, size, max int) (int, int, bool) {
@@ -136,27 +148,37 @@ func (s *Store) Summary(q Query) (Summary, error) {
 }
 
 // RequestView returns the summary, trend and one current view inside one read
-// transaction. Date-only inputs are inclusive UTC dates; the end is clamped to
-// the query instant so a "today" range never includes future buckets.
+// transaction. Date-only inputs are inclusive calendar dates in the requested
+// IANA timezone; the end is clamped to the query instant so a "today" range
+// never includes future buckets. UTC retains the existing daily/hourly fast
+// paths; other zones group retained minute aggregates into local days or
+// elapsed-hour buckets so region boundaries survive raw-record expiry.
 func (s *Store) RequestView(v ViewQuery) (RequestView, error) {
 	env, release, e := s.queryEnv()
 	if e != nil {
 		return RequestView{}, e
 	}
 	defer release()
-	q, view, e := env.normalizeView(v)
+	q, view, zone, loc, e := env.normalizeView(v)
 	if e != nil {
 		return RequestView{}, e
 	}
 	out := RequestView{
-		Range:   ViewRange{From: q.From, To: q.To, AsOf: env.now, Timezone: "UTC"},
+		Range:   ViewRange{From: q.From, To: q.To, AsOf: env.now, Timezone: zone},
 		Series:  Series{Granularity: "day", Buckets: []Bucket{}},
 		Records: []Record{}, Groups: []Group{},
 		Pagination: Pagination{Page: q.Page, PageSize: q.PageSize},
 	}
-	granularity, e := summaryGranularity(env, q)
-	if e != nil {
-		return out, e
+	var granularity string
+	if loc == time.UTC {
+		granularity, e = summaryGranularity(env, q)
+		if e != nil {
+			return out, e
+		}
+	} else if q.From.Before(env.rawCut) {
+		granularity = "day"
+	} else {
+		granularity = "hour"
 	}
 	out.Series.Granularity = granularity
 	rawFrom, dailyFrom := env.rawCut, env.dailyCut
@@ -166,7 +188,14 @@ func (s *Store) RequestView(v ViewQuery) (RequestView, error) {
 		if view == viewKey || view == viewKeyModel {
 			keyLabels = readKeyLabels(tx)
 		}
-		agg, buckets, groups, e := collect(tx, env, q, granularity, view, keyLabels)
+		var agg Aggregate
+		var buckets map[time.Time]*Bucket
+		var groups map[string]*Group
+		if loc == time.UTC {
+			agg, buckets, groups, e = collect(tx, env, q, granularity, view, keyLabels)
+		} else {
+			agg, buckets, groups, e = collectLocal(tx, env, q, granularity, view, keyLabels, loc)
+		}
 		if e != nil {
 			return e
 		}
@@ -588,6 +617,94 @@ func collectDaily(tx *bolt.Tx, env *queryEnv, q Query, a *aggregator) error {
 	return nil
 }
 
+// collectLocal combines retained UTC minute aggregates for complete minutes
+// with raw records only for partial edge minutes. This keeps [from,to) exact
+// when to is the pre-transaction query instant or when a direct caller supplies
+// second boundaries. A partial edge older than raw retention is rejected rather
+// than answered with an imprecise minute bucket.
+func collectLocal(tx *bolt.Tx, env *queryEnv, q Query, granularity, view string, keyLabels map[string]string, loc *time.Location) (Aggregate, map[time.Time]*Bucket, map[string]*Group, error) {
+	a := newAggregator(view, keyLabels)
+	anchor := q.From.UTC()
+	to := q.To.UTC()
+	fullStart := ceilMinute(anchor)
+	fullEnd := floorMinute(to)
+	if fullStart.Before(fullEnd) {
+		if anchor.Before(fullStart) {
+			if e := collectLocalRawEdge(tx, env, q, a, anchor, fullStart, granularity, loc); e != nil {
+				return Aggregate{}, nil, nil, e
+			}
+		}
+		from := fullStart
+		if from.Before(env.minuteCut) {
+			// Minute aggregates follow the union of daily and raw retention.
+			// Read-time filtering keeps an overdue cleanup from reviving them.
+			from = env.minuteCut
+		}
+		if e := scanRollups(tx.Bucket([]byte("minutes")), from, fullEnd, func(d daily) error {
+			if d.Bucket.Time.Before(env.minuteCut) || !matches(q, d.KeyID, d.Model, d.Provider, d.AuthIndex, d.Failed) {
+				return nil
+			}
+			at := localBucketStart(d.Bucket.Time, anchor, granularity, loc)
+			return a.add(at, d.KeyID, d.Model, d.Provider, d.AuthIndex, d.Failed, d.Bucket.Aggregate)
+		}); e != nil {
+			return Aggregate{}, nil, nil, e
+		}
+		if fullEnd.Before(to) {
+			if e := collectLocalRawEdge(tx, env, q, a, fullEnd, to, granularity, loc); e != nil {
+				return Aggregate{}, nil, nil, e
+			}
+		}
+	} else if e := collectLocalRawEdge(tx, env, q, a, anchor, to, granularity, loc); e != nil {
+		return Aggregate{}, nil, nil, e
+	}
+	if granularity == "hour" && to.Sub(anchor) <= 168*time.Hour {
+		// Elapsed-hour stepping retains both repeated instants of a fall-back
+		// hour instead of collapsing equal wall-clock labels.
+		for t := anchor; t.Before(to); t = t.Add(time.Hour) {
+			if a.series[t] == nil {
+				a.series[t] = &Bucket{Time: t}
+			}
+		}
+	}
+	return a.total, a.series, a.groups, nil
+}
+
+func collectLocalRawEdge(tx *bolt.Tx, env *queryEnv, q Query, a *aggregator, from, to time.Time, granularity string, loc *time.Location) error {
+	if !to.After(from) {
+		return nil
+	}
+	if from.Before(env.rawCut) {
+		return ErrInvalid
+	}
+	return scanRecordRange(tx, env, q, from, to, func(r Record) error {
+		return a.add(localBucketStart(r.Time, q.From.UTC(), granularity, loc), r.KeyID, r.Model, r.Provider, r.AuthIndex, r.Failed, recordAggregate(r))
+	})
+}
+
+func ceilMinute(t time.Time) time.Time {
+	u := t.UTC()
+	floor := u.Truncate(time.Minute)
+	if floor.Before(u) {
+		return floor.Add(time.Minute)
+	}
+	return floor
+}
+
+func floorMinute(t time.Time) time.Time {
+	return t.UTC().Truncate(time.Minute)
+}
+
+func localBucketStart(at, from time.Time, granularity string, loc *time.Location) time.Time {
+	if granularity == "day" {
+		return localDayStart(at, loc)
+	}
+	elapsed := at.Sub(from)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	return from.Add(elapsed / time.Hour * time.Hour).UTC()
+}
+
 // scanRecordRange walks the reverse timeline only for an explicit partial edge.
 // It never decodes capture bodies or scans outside the requested interval.
 func scanRecordRange(tx *bolt.Tx, env *queryEnv, q Query, from, to time.Time, fn func(Record) error) error {
@@ -635,54 +752,61 @@ func sortedBuckets(buckets map[time.Time]*Bucket) []Bucket {
 	return out
 }
 
-func (e *queryEnv) normalizeView(v ViewQuery) (Query, string, error) {
+func (e *queryEnv) normalizeView(v ViewQuery) (Query, string, string, *time.Location, error) {
 	q := v.Query
 	view := v.View
 	if view == "" {
 		view = viewRequests
 	}
 	if view != viewRequests && view != viewModel && view != viewKey && view != viewKeyModel && view != viewAccount && view != viewProvider {
-		return Query{}, "", ErrInvalid
+		return Query{}, "", "", nil, ErrInvalid
+	}
+	loc, err := viewLocation(v.Timezone)
+	if err != nil {
+		return Query{}, "", "", nil, ErrInvalid
+	}
+	zone := "UTC"
+	if loc.String() != "UTC" {
+		zone = loc.String()
 	}
 	if v.FromDate == "" && v.ToDate == "" && !q.From.IsZero() && !q.To.IsZero() {
 		// Direct callers may use the legacy RFC3339 half-open range.
 	} else {
-		today := day(e.now)
+		today := e.now.In(loc).Format("2006-01-02")
 		fromDate, toDate := v.FromDate, v.ToDate
 		if fromDate == "" {
-			fromDate = today.Format("2006-01-02")
+			fromDate = today
 		}
 		if toDate == "" {
-			toDate = today.Format("2006-01-02")
+			toDate = today
 		}
-		from, e1 := strictDate(fromDate)
-		to, e2 := strictDate(toDate)
+		from, e1 := parseLocalDate(fromDate, loc)
+		to, e2 := parseLocalDate(toDate, loc)
 		if e1 != nil || e2 != nil || to.Before(from) {
-			return Query{}, "", ErrInvalid
+			return Query{}, "", "", nil, ErrInvalid
 		}
-		q.From = from
-		q.To = to.AddDate(0, 0, 1)
+		toEnd, e3 := localDayEnd(to, loc)
+		if e3 != nil {
+			return Query{}, "", "", nil, ErrInvalid
+		}
+		// Each boundary uses that date's own first representable instant, so
+		// 23/25-hour DST days and skipped midnights stay correct. Response and
+		// storage instants are UTC.
+		q.From = from.UTC()
+		q.To = toEnd
 		if q.To.After(e.now) {
 			q.To = e.now
 		}
 	}
 	page, size, ok := pageLimits(q.Page, q.PageSize, 100)
 	if !ok {
-		return Query{}, "", ErrInvalid
+		return Query{}, "", "", nil, ErrInvalid
 	}
 	q.Page, q.PageSize = page, size
 	if !validQuery(q) {
-		return Query{}, "", ErrInvalid
+		return Query{}, "", "", nil, ErrInvalid
 	}
-	return q, view, nil
-}
-
-func strictDate(value string) (time.Time, error) {
-	t, e := time.Parse("2006-01-02", value)
-	if e != nil || t.Format("2006-01-02") != value {
-		return time.Time{}, ErrInvalid
-	}
-	return t.UTC(), nil
+	return q, view, zone, loc, nil
 }
 
 func minTime(a, b time.Time) time.Time {

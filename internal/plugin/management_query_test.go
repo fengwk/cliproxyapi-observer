@@ -38,6 +38,17 @@ func TestManagementRequestViewAndFacets(t *testing.T) {
 	if view.Range.To.After(time.Now()) {
 		t.Fatal("future view end")
 	}
+	loc, err := time.LoadLocation("Asia/Kathmandu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localDate := at.In(loc).Format("2006-01-02")
+	zoned := url.Values{"from_date": {localDate}, "to_date": {localDate}, "timezone": {"Asia/Kathmandu"}, "view": {"provider"}}
+	response = dispatchForTest(t, m, http.MethodGet, managementBasePath+"/requests/view", zoned, "")
+	if response.StatusCode != 200 || json.Unmarshal(response.Body, &view) != nil ||
+		view.Range.Timezone != "Asia/Kathmandu" || view.Summary.Requests != 1 || len(view.Groups) != 1 {
+		t.Fatalf("timezone view not connected: %d %s", response.StatusCode, response.Body)
+	}
 	query.Set("view", "provider")
 	response = dispatchForTest(t, m, http.MethodGet, managementBasePath+"/requests/view", query, "")
 	if response.StatusCode != 200 || json.Unmarshal(response.Body, &view) != nil || len(view.Groups) != 1 || view.Groups[0].Provider != "openai" {
@@ -61,6 +72,9 @@ func TestManagementRequestViewAndFacets(t *testing.T) {
 		{"view": {"unknown"}},
 		{"page_size": {"101"}},
 		{"from_date": {"2024-02-30"}},
+		{"timezone": {"Local"}},
+		{"timezone": {"Mars/Olympus"}},
+		{"timezone": {"Asia/Kathmandu", "Asia/Kathmandu"}},
 		{"unknown": {"1"}},
 	} {
 		if got := dispatchForTest(t, m, http.MethodGet, managementBasePath+"/requests/view", query, ""); got.StatusCode != 400 {

@@ -46,6 +46,7 @@ func (s *Store) Maintenance() error {
 	now := s.now().UTC()
 	cut := now.Add(-time.Duration(s.settings.RawRetentionHours) * time.Hour)
 	dc := day(now).AddDate(0, 0, -s.settings.DailyRetentionDays)
+	mc := minuteRetentionCut(cut, dc)
 	var cleaned CleanupResult
 	maintenanceErr := ""
 	e := s.db.Update(func(tx *bolt.Tx) error {
@@ -62,7 +63,7 @@ func (s *Store) Maintenance() error {
 		if e != nil {
 			return e
 		}
-		for _, name := range []string{"records", "hourly", "daily", "dedup", "correlations"} {
+		for _, name := range []string{"records", "hourly", "minutes", "daily", "dedup", "correlations"} {
 			b := tx.Bucket([]byte(name))
 			c := b.Cursor()
 			for k, v := c.First(); k != nil; k, v = c.Next() {
@@ -94,6 +95,14 @@ func (s *Store) Maintenance() error {
 						return e
 					}
 					expired = d.Bucket.Time.Before(cut)
+				case "minutes":
+					var d daily
+					if e := decode(v, &d); e != nil {
+						return e
+					}
+					// Minute aggregates remain while either the daily history or
+					// the raw window still needs them; raw detail is unchanged.
+					expired = d.Bucket.Time.Before(mc)
 				case "dedup":
 					var entry dedupEntry
 					if e := decode(v, &entry); e != nil {

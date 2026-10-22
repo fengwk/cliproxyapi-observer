@@ -143,11 +143,13 @@ type Query struct {
 }
 
 // ViewQuery is the stable input for RequestView. Date-only fields are inclusive
-// UTC calendar dates; View is one of requests/model/key/account/provider.
+// calendar dates in Timezone (UTC when omitted). View is one of
+// requests/model/key/key_model/account/provider.
 type ViewQuery struct {
 	Query
-	FromDate string `json:"from_date,omitempty"` // YYYY-MM-DD
+	FromDate string `json:"from_date,omitempty"` // YYYY-MM-DD in Timezone
 	ToDate   string `json:"to_date,omitempty"`   // YYYY-MM-DD, inclusive
+	Timezone string `json:"timezone,omitempty"`  // IANA location; empty means UTC
 	View     string `json:"view,omitempty"`
 }
 
