@@ -146,7 +146,7 @@ field 为 `model|key_id|provider|auth_index`，返回
 
 `pricing.mappings` 是 `{model,provider,catalog_model}` 数组，按完整公开 ID 生效，
 只影响未来计费，不改路由。人工价按完整 `(model, provider)` 匹配；空 provider
-不是模型通配。价格定义统一为 `{base, overrides/multipliers}`：所有匹配的
+不是模型通配。价格定义统一为 `{base, overrides, multipliers}`：所有匹配的
 override 按数组顺序应用、later wins，所有匹配倍率依次复合；缺少计算事实返回 0，
 非法配置/溢出/真实存储故障报错。缺价统一为 `source=zero`、成本 0，不再存在
 “未定价”计数或补价流程。models.dev v1/v2 独立适配，默认 v2，不自动混合或回退。

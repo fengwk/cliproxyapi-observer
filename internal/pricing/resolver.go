@@ -21,7 +21,7 @@ type resolution struct {
 }
 
 func zeroResolution(reason, match string) resolution {
-	return resolution{source: "zero", match: match, reason: reason, definition: zeroDefinition()}
+	return resolution{source: "zero", match: match, reason: reason, definition: zeroDefinition(), supported: true}
 }
 
 func manualResolution(p ManualPrice) resolution {
@@ -76,6 +76,8 @@ func candidateList(entries []entry) []Candidate {
 func (s *Service) fromEntry(e entry, match string) resolution {
 	if !e.Supported {
 		r := zeroResolution(reasonPricingUnsupported, matchAmbiguous)
+		r.supported = false
+		r.supportIssues = cloneStrings(e.SupportIssues)
 		r.catalogProvider, r.catalogModel, r.catalogTime = e.Provider, e.Model, s.catalogTimeLocked()
 		r.candidates = []Candidate{candidateFromEntry(e)}
 		return r

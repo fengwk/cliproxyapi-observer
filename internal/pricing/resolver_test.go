@@ -56,6 +56,9 @@ func TestUnsupportedCandidateIsZeroAndNotPriced(t *testing.T) {
 	if q.Source != "zero" || q.CostMicroUSD != 0 || q.PricingSupported || q.Reason != reasonPricingUnsupported {
 		t.Fatal(q)
 	}
+	if len(q.SupportIssues) != 1 || q.SupportIssues[0] != "unsupported_condition" {
+		t.Fatal("unsupported pricing lost its diagnostic", q)
+	}
 	if len(q.Candidates) != 1 || q.Candidates[0].Definition.Base.Input != 0 || q.Candidates[0].PricingSupported {
 		t.Fatal(q.Candidates)
 	}
@@ -80,6 +83,9 @@ func TestPreviewReadOnlyAndDefinition(t *testing.T) {
 	}
 	if items[1].Source != "zero" || items[2].Source != "zero" {
 		t.Fatal("auto off or exact identity leaked", items)
+	}
+	if !items[1].PricingSupported || !items[2].PricingSupported {
+		t.Fatal("ordinary zero prices must not be labeled as unsupported rules", items)
 	}
 	for _, item := range items {
 		if item.Definition.Overrides == nil || item.Definition.Multipliers == nil {
@@ -192,5 +198,19 @@ func TestCacheFileIsSourceSpecific(t *testing.T) {
 	}
 	if _, err := os.Stat(s.cacheFile(SourceV2)); !os.IsNotExist(err) {
 		t.Fatal("unexpected cache")
+	}
+}
+
+// Empty sets decide the condition without inventing a missing fact: an empty
+// tier set never matches, while a date without bounds imposes no restriction.
+func TestEmptyConditionFactsDoNotEraseBaseCost(t *testing.T) {
+	def := definition(RateSet{Input: 1_000_000}, []Override{
+		{ID: "empty-tier", When: Condition{ServiceTier: []string{}}, Rates: RatePatch{Input: ptr(0)}},
+		{ID: "unbounded-date", When: Condition{Date: &DateCondition{}}, Rates: RatePatch{Input: ptr(2_000_000)}},
+	}, nil)
+	s := service(t, Config{Prices: []ManualPrice{{Model: "m", Definition: def}}})
+	q := quote(t, s, "m", "", Tokens{Input: 1}, time.Time{})
+	if q.CostMicroUSD != 2 || q.Reason == reasonMissingFacts {
+		t.Fatal("fact-independent conditions must preserve ordinary pricing", q)
 	}
 }

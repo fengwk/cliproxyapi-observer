@@ -1,6 +1,5 @@
 # Observer: core implementation and integration contract
 
-The v0.6.0 baseline replaced the former observation-only backend. No migration
 The current clean-slate database schema is **3** with `observer_features=3`.
 Databases without that exact marker, including schema2 and earlier, are rejected
 before a writable open and are never migrated or rewritten. Current additions and
@@ -129,7 +128,7 @@ type Tokens struct {
     Reasoning, Total int64
 }
 type Quote struct {
-    CostMicroUSD int64; Source string // manual/mapping/provider/.../zero
+    CostMicroUSD int64; Source string // manual/auto/zero
     Rates Rates; Definition PricingDefinition
     Reason, Match string; CatalogProvider, CatalogModel string
     PricingSupported bool; SupportIssues []string

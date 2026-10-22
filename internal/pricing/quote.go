@@ -45,7 +45,9 @@ func evalCondition(c Condition, f evalFacts) (bool, bool) {
 		apply(match, true)
 	}
 	if c.ServiceTier != nil {
-		if f.tier == "" {
+		if len(c.ServiceTier) == 0 {
+			apply(false, true)
+		} else if f.tier == "" {
 			apply(false, false)
 		} else {
 			found := false
@@ -59,7 +61,9 @@ func evalCondition(c Condition, f evalFacts) (bool, bool) {
 		}
 	}
 	if c.Date != nil {
-		if f.at.IsZero() {
+		if c.Date.GTE == "" && c.Date.LT == "" {
+			apply(true, true)
+		} else if f.at.IsZero() {
 			apply(false, false)
 		} else {
 			date := f.at.UTC().Format("2006-01-02")
