@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { RequestsPage } from './Requests';
 import {
   buildRequestViewParams,
@@ -456,7 +456,7 @@ describe('RequestsPage and RequestsHelpers', () => {
     });
 
     // Modal dialog is displayed
-    expect(screen.getByText(/请求详情: req-001/)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '请求详情' })).toBeInTheDocument();
   });
 
   /**
@@ -513,7 +513,7 @@ describe('RequestsPage and RequestsHelpers', () => {
     });
 
     // Open detail
-    fireEvent.click(screen.getByRole('button', { name: '查看请求详情 req-slow' }));
+    fireEvent.click(within(screen.getByTestId('record-row-req-slow')).getByRole('button', { name: '查看请求详情' }));
     expect(screen.getByText('请求详情')).toBeInTheDocument();
 
     // Close modal while request is still pending
@@ -521,7 +521,7 @@ describe('RequestsPage and RequestsHelpers', () => {
     fireEvent.click(closeBtn);
 
     // Modal is closed
-    expect(screen.queryByText(/请求详情: req-slow/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
     // Now resolve the late response
     await act(async () => {
@@ -539,7 +539,7 @@ describe('RequestsPage and RequestsHelpers', () => {
     });
 
     // Late response must not reopen the modal
-    expect(screen.queryByText(/请求详情: req-slow/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
   /**
@@ -627,7 +627,7 @@ describe('RequestsPage and RequestsHelpers', () => {
 
     // Open detail
     fireEvent.click(modelBtn);
-    await screen.findByText(/请求详情: req-xss/);
+    await screen.findByRole('heading', { name: '请求详情' });
 
     // Switch to Headers tab
     fireEvent.click(screen.getByRole('tab', { name: '请求头' }));
@@ -730,8 +730,8 @@ describe('RequestsPage and RequestsHelpers', () => {
 
     // Detail modal uses the same seconds representation.
     fireEvent.click(screen.getByRole('tab', { name: '请求明细' }));
-    fireEvent.click(await screen.findByRole('button', { name: '查看请求详情 req-001' }));
-    await screen.findByText(/请求详情: req-001/);
+    fireEvent.click(within(await screen.findByTestId('record-row-req-001')).getByRole('button', { name: '查看请求详情' }));
+    await screen.findByRole('heading', { name: '请求详情' });
     await waitFor(() => {
       expect(screen.getByText('0.12 s (TTFT: 0.05 s)')).toBeInTheDocument();
     });
@@ -747,8 +747,8 @@ describe('RequestsPage and RequestsHelpers', () => {
     const api = createMockApiClient();
     render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: '查看请求详情 req-001' }));
-    await screen.findByText(/请求详情: req-001/);
+    fireEvent.click(within(await screen.findByTestId('record-row-req-001')).getByRole('button', { name: '查看请求详情' }));
+    await screen.findByRole('heading', { name: '请求详情' });
     fireEvent.click(screen.getByRole('tab', { name: '请求头' }));
 
     expect(screen.getByText('x-request-id')).toBeInTheDocument();
@@ -869,9 +869,9 @@ describe('RequestsPage and RequestsHelpers', () => {
   /**
    * Why covered:
    * Proves that Key labels display friendly names, deleted keys show [已删除] tag,
-   * 64-hex IDs are truncated with a full-ID tooltip, and no copy-ID action is shown.
+   * Unresolved IDs have readable fallbacks without ID tooltips or copy actions.
    */
-  it('Key labels & deleted keys: friendly name, deleted tag, 64-hex truncation, no copy action', async () => {
+  it('Key labels & deleted keys: friendly fallback without raw ID tooltip or copy action', async () => {
     const api = createMockApiClient();
     render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
 
@@ -880,13 +880,10 @@ describe('RequestsPage and RequestsHelpers', () => {
       expect(screen.getByText('Production Key', { selector: '.requests-key-name' })).toBeInTheDocument();
     });
 
-    // req-002 has a 64-hex ID; should show 12-char prefix + ellipsis
-    const truncatedKey = screen.getByText('4f68a2d1e09c…');
-    expect(truncatedKey).toBeInTheDocument();
-    expect(truncatedKey).toHaveAttribute(
-      'title',
-      '4f68a2d1e09c8b7a6543210fedcba9874f68a2d1e09c8b7a6543210fedcba987'
-    );
+    // Unresolved Key identity stays internal, including accessible tooltips.
+    const fallbackKey = screen.getByText('Key 名称不可用');
+    expect(fallbackKey).toBeInTheDocument();
+    expect(fallbackKey).not.toHaveAttribute('title');
 
     // The request list must not expose an internal Key ID copy action.
     expect(screen.queryByRole('button', { name: '复制 ID' })).not.toBeInTheDocument();
@@ -959,10 +956,10 @@ describe('RequestsPage and RequestsHelpers', () => {
 
     render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
 
-    const viewBtn = await screen.findByRole('button', { name: '查看请求详情 req-disabled' });
+    const viewBtn = within(await screen.findByTestId('record-row-req-disabled')).getByRole('button', { name: '查看请求详情' });
     fireEvent.click(viewBtn);
 
-    await screen.findByText(/请求详情: req-disabled/);
+    await screen.findByRole('heading', { name: '请求详情' });
     // Switch to JSON body tab
     fireEvent.click(screen.getByRole('tab', { name: '请求体 (JSON)' }));
 
@@ -1089,7 +1086,7 @@ describe('RequestsPage and RequestsHelpers', () => {
 
   // Names are display metadata, not group/filter identities. Keep duplicate
   // names on separate indexes and preserve the full long name in its tooltip.
-  it('shows account names with index tooltips and filters by the original index', async () => {
+  it('shows account names without index tooltips and filters by the original index', async () => {
     const name = `production-${'long-account-name-'.repeat(6)}.json`;
     const base = createMockApiClient();
     const api = createMockApiClient({
@@ -1118,9 +1115,9 @@ describe('RequestsPage and RequestsHelpers', () => {
 
     const names = await screen.findAllByText(name, { selector: '.requests-account-name' });
     expect(names).toHaveLength(2);
-    expect(names[0]).toHaveAttribute('title', `${name}\nAuthIndex: auth-a`);
-    expect(names[1]).toHaveAttribute('title', `${name}\nAuthIndex: auth-b`);
-    expect(screen.getByText('legacy-auth', { selector: '.requests-account-name' })).toBeInTheDocument();
+    expect(names[0]).toHaveAttribute('title', name);
+    expect(names[1]).toHaveAttribute('title', name);
+    expect(screen.getByText('账户名称不可用', { selector: '.requests-account-name' })).toBeInTheDocument();
     expect(screen.getByRole('columnheader', { name: '账户' })).toBeInTheDocument();
 
     const trigger = screen.getByRole('combobox', { name: '账户' });
@@ -1187,7 +1184,7 @@ describe('RequestsPage and RequestsHelpers', () => {
       expect(reads()).toBe(3);
       await advance(5000);
       expect(reads()).toBe(4); // resuming did not start a duplicate immediate fetch
-      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '查看请求详情 req-001' })); });
+      await act(async () => { fireEvent.click(within(screen.getByTestId('record-row-req-001')).getByRole('button', { name: '查看请求详情' })); });
       await advance(10000);
       expect(reads()).toBe(4);
       fireEvent.click(screen.getByRole('button', { name: '关闭' }));
@@ -1271,7 +1268,7 @@ describe('RequestsPage and RequestsHelpers', () => {
     const advance = async (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
     try {
       await act(async () => {});
-      const row = screen.getByRole('button', { name: '查看请求详情 req-001' }).closest('tr');
+      const row = screen.getByTestId('record-row-req-001');
       await advance(5000);
       expect(count).toBe(2);
       await advance(60000);
@@ -1286,7 +1283,7 @@ describe('RequestsPage and RequestsHelpers', () => {
       await advance(5000); // the next timer fails
       expect(count).toBe(4);
       expect(screen.getByText('offline')).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: '查看请求详情 req-001' }).closest('tr')).toBe(row);
+      expect(screen.getByTestId('record-row-req-001')).toBe(row);
       await advance(5000);
       expect(count).toBe(4); // backoff to ten seconds
       await advance(5000);

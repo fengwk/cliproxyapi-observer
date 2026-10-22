@@ -19,6 +19,7 @@ for (let i = 2; i < process.argv.length; i++) {
   if (name === '--report-dir') args.reportDir = path.resolve(process.argv[++i]);
   else if (name === '--base-url') args.baseUrl = process.argv[++i];
   else if (name === '--chrome') args.chrome = process.argv[++i];
+  else if (name === '--account-display') args.accountDisplay = true;
   else throw new Error('Unknown argument: ' + name);
 }
 const real = Boolean(args.baseUrl);
@@ -847,6 +848,51 @@ async function main() {
   let browser, server;
   try {
     await fs.mkdir(path.join(args.reportDir, 'screenshots'), { recursive: true });
+    if (args.accountDisplay) {
+      server = await mock.startServer();
+      browser = await chromium.launch({ executablePath: args.chrome, headless: true, args: ['--no-sandbox'] });
+      for (const width of [390, 1440]) {
+        const page = await browser.newPage({ viewport: { width, height: 900 } });
+        await page.goto(server.resourceURL);
+        await loginObserver(page);
+        const rows = page.locator('.requests-table tbody tr');
+        await rows.first().waitFor();
+        assert.ok(await rows.getByText('生产账户', { exact: true }).count());
+        assert.ok(await rows.getByText('账户名称不可用', { exact: true }).count());
+        assert.ok(await rows.getByText('Key 名称不可用', { exact: true }).count());
+        assert.doesNotMatch(await page.locator('.requests-table tbody').innerText(), /auth-openai-1|auth-anthropic-1|auth-mock-keyid|0123456789abcdef/);
+        assert.equal(await page.locator('[title*="AuthIndex"]').count(), 0);
+        await page.screenshot({ path: path.join(args.reportDir, `records-${width}.png`), fullPage: true });
+        await rows.filter({ hasText: '生产账户' }).filter({ hasText: 'openai' }).first().getByRole('button', { name: '查看请求详情' }).click();
+        const dialog = page.getByRole('dialog');
+        await dialog.getByRole('heading', { name: '请求详情' }).waitFor();
+        await page.waitForFunction(() => getComputedStyle(document.querySelector('[role="dialog"]')).opacity === '1');
+        const technical = dialog.locator('details');
+        assert.equal(await technical.getAttribute('open'), null);
+        assert.ok(await dialog.getByText('生产账户', { exact: true }).count());
+        await page.screenshot({ path: path.join(args.reportDir, `detail-${width}.png`), fullPage: true });
+        await technical.locator('summary').click();
+        assert.match(await technical.innerText(), /auth-openai-1/);
+        await page.keyboard.press('Escape');
+        await page.getByRole('tab', { name: '账户分组', exact: true }).click();
+        await page.locator('.requests-account-name').first().waitFor();
+        assert.equal(await page.locator('.requests-account-name').filter({ hasText: '生产账户' }).count(), 2);
+        await page.screenshot({ path: path.join(args.reportDir, `groups-${width}.png`), fullPage: true });
+        for (let index = 0; index < 2; index++) {
+          await page.getByRole('combobox', { name: '账户', exact: true }).click();
+          await page.getByRole('option', { name: '生产账户', exact: true }).nth(index).click();
+          const response = page.waitForResponse(r => r.url().includes('/requests/view?') && r.url().includes('auth_index='));
+          await page.getByRole('button', { name: '查询', exact: true }).click();
+          const received = await response;
+          assert.equal(new URL(received.url()).searchParams.get('auth_index'), index === 0 ? 'auth-anthropic-1' : 'auth-openai-1');
+        }
+        await page.screenshot({ path: path.join(args.reportDir, `filter-${width}.png`), fullPage: true });
+        check(`${width}: account display, collapsed diagnostics and exact filter identity`, true);
+        await page.close();
+      }
+      report.outcome = 'completed';
+      return;
+    }
     const shell = await ensureManagementHTML();
     report.management_shell_sha256 = shell.sha256;
     if (!real) server = await mock.startServer({ shellHTML: shell.content });

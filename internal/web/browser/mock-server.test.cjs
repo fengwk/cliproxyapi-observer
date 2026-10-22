@@ -103,6 +103,10 @@ test('requests: filters, RFC3339 validation, pagination and no accidental detail
     assert.equal(first.body.page_size, 25);
     assert.ok(Array.isArray(first.body.items) && first.body.items.length > 0);
     assert.equal(typeof first.body.has_more, 'boolean');
+    // 同名账户仍由各自 index 关联，未知名称不伪造名称。
+    const named = first.body.items.filter(record => record.account_name === '生产账户');
+    assert.equal(new Set(named.map(record => record.auth_index)).size, 2);
+    assert.equal(first.body.items.find(record => record.id === 'req-007').account_name, '');
 
     const item = first.body.items[0];
     for (const field of [

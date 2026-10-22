@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { accountDisplay, accountingQualityLabel, captureReasonLabel } from './RequestsHelpers';
 import type { Detail, Key } from '../lib/types';
 import {
   calculateCacheHitRate,
@@ -61,13 +62,13 @@ export function RequestsDetailModal({
   // Header and Body statuses
   const rawHeadersStatus = detail?.headers_status || detail?.capture_status || 'missing';
   const headersStatusInfo = CAPTURE_STATUS_MAP[rawHeadersStatus] || {
-    label: rawHeadersStatus,
+    label: '未知采集状态',
     tone: 'neutral',
   };
 
   const rawBodyStatus = detail?.body_status || detail?.capture_status || 'missing';
   const bodyStatusInfo = CAPTURE_STATUS_MAP[rawBodyStatus] || {
-    label: rawBodyStatus,
+    label: '未知采集状态',
     tone: 'neutral',
   };
 
@@ -82,7 +83,7 @@ export function RequestsDetailModal({
 
   return (
     <Modal
-      title={record ? `请求详情: ${record.id}` : '请求详情'}
+      title="请求详情"
       onClose={onClose}
       size="lg"
     >
@@ -146,16 +147,24 @@ export function RequestsDetailModal({
               <div className="requests-detail-pane" data-testid="detail-tab-summary">
                 {/* Basic Info Grid */}
                 <div className="requests-detail-grid">
+                  <details>
+                    <summary>技术信息</summary>
+                    <div>账户标识：{record.auth_index || '—'}</div>
+                    <div>Key 标识：{record.key_id || '—'}</div>
+                    <div>记账质量原始码：{record.accounting_quality || '—'}</div>
+                    <div>采集原因原始码：{detail.capture_reason || '—'}</div>
                   <div className="requests-detail-item">
-                    <span className="requests-detail-item-label">请求 ID</span>
+                    <span className="requests-detail-item-label">请求标识</span>
                     <span className="requests-detail-item-val font-mono">{record.id}</span>
                   </div>
                   <div className="requests-detail-item">
-                    <span className="requests-detail-item-label">Trace ID</span>
+                    <span className="requests-detail-item-label">追踪标识</span>
                     <span className="requests-detail-item-val font-mono">
                       {record.trace_id || '—'}
                     </span>
                   </div>
+                    <Button variant="ghost" onClick={() => copyToClipboard(record.key_id, 'Key 标识')}>复制 Key 标识</Button>
+                  </details>
                   <div className="requests-detail-item">
                     <span className="requests-detail-item-label">时间 (本地)</span>
                     <span className="requests-detail-item-val">{formatLocalDateTime(record.time)}</span>
@@ -184,9 +193,9 @@ export function RequestsDetailModal({
                     <span className="requests-detail-item-val">{record.provider || '—'}</span>
                   </div>
                   <div className="requests-detail-item">
-                    <span className="requests-detail-item-label">账户 (AuthIndex)</span>
+                    <span className="requests-detail-item-label">账户</span>
                     <span className="requests-detail-item-val font-mono">
-                      {record.auth_index || '—'}
+                      {accountDisplay(record.auth_index, record.account_name)}
                     </span>
                   </div>
                   <div className="requests-detail-item">
@@ -197,16 +206,6 @@ export function RequestsDetailModal({
                         <Badge tone="danger" className="requests-deleted-tag">
                           已删除
                         </Badge>
-                      )}
-                      {keyInfo?.fullId && (
-                        <Button
-                          variant="ghost"
-                          className="cpa-btn-sm"
-                          style={{ marginLeft: 6, padding: '2px 6px' }}
-                          onClick={() => copyToClipboard(keyInfo.fullId, '完整 Key ID')}
-                        >
-                          复制 ID
-                        </Button>
                       )}
                     </div>
                   </div>
@@ -227,7 +226,7 @@ export function RequestsDetailModal({
                   <div className="requests-detail-item">
                     <span className="requests-detail-item-label">记账质量</span>
                     <span className="requests-detail-item-val">
-                      {record.accounting_quality || '标准'}
+                      {accountingQualityLabel(record.accounting_quality)}
                     </span>
                   </div>
                   <div className="requests-detail-item">
@@ -307,7 +306,7 @@ export function RequestsDetailModal({
                   {detail.capture_reason && (
                     <div className="requests-capture-status-item">
                       <span className="requests-subtext">原因:</span>
-                      <span>{detail.capture_reason}</span>
+                      <span>{captureReasonLabel(detail.capture_reason)}</span>
                     </div>
                   )}
                   {detail.captured_at && (
@@ -404,7 +403,7 @@ export function RequestsDetailModal({
                   {detail.capture_reason && (
                     <div className="requests-capture-status-item">
                       <span className="requests-subtext">原因:</span>
-                      <span>{detail.capture_reason}</span>
+                      <span>{captureReasonLabel(detail.capture_reason)}</span>
                     </div>
                   )}
                   {detail.captured_at && (

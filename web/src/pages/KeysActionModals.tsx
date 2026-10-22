@@ -594,7 +594,7 @@ export interface DetailsModalProps {
 export function DetailsModal({ keyData, onClose, onCopy, copiedId, copyError }: DetailsModalProps) {
   return (
     <Modal
-      title={`Key 详情: ${keyData.label}`}
+      title={`Key 详情: ${keyData.label || '未命名 Key'}`}
       onClose={onClose}
       size="md"
       footer={
@@ -784,7 +784,7 @@ export function DeleteKeyModal({ keyData, api, onClose, onSuccess }: DeleteKeyMo
 
   return (
     <Modal
-      title={`删除 Key: ${keyData.label || keyData.id}`}
+      title={`删除 Key: ${keyData.label || '未命名 Key'}`}
       onClose={handleSafeClose}
       size="md"
       footer={
@@ -809,11 +809,10 @@ export function DeleteKeyModal({ keyData, api, onClose, onSuccess }: DeleteKeyMo
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', fontSize: '0.9rem' }}>
           <div>
             <span style={{ color: 'var(--text-secondary)' }}>Key 名称：</span>
-            <strong>{keyData.label || '(未命名)'}</strong>
+            <strong>{keyData.label || '未命名 Key'}</strong>
           </div>
           <div>
-            <span style={{ color: 'var(--text-secondary)' }}>内部 ID：</span>
-            <span style={{ fontFamily: 'var(--font-mono)' }}>{keyData.id}</span>
+            <details><summary>技术信息</summary><span style={{ fontFamily: 'var(--font-mono)' }}>Key 标识：{keyData.id}</span></details>
           </div>
           <p style={{ margin: '0.5rem 0 0', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
             该 Key 既往产生的用量、费用明细与统计记录将作为最小审计账目予以保留，原有历史数据与累计金额不受影响。

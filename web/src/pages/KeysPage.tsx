@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import { blockedReasonLabel } from './RequestsHelpers';
 import type { PageProps } from '../lib/api';
 import type { Key } from '../lib/types';
 import { formatUSD, formatDateTime, errorMessage } from '../lib/format';
@@ -360,7 +361,7 @@ export function KeysPage({ api, onDirtyChange }: KeysPageProps) {
                               minWidth: 0,
                             }}
                           >
-                            <strong style={{ fontSize: '0.95rem' }}>{k.label || '(未命名)'}</strong>
+                            <strong style={{ fontSize: '0.95rem' }}>{k.label || '未命名 Key'}</strong>
                           </button>
                           {isDeleted ? (
                             <Badge tone="danger">已删除</Badge>
@@ -378,7 +379,7 @@ export function KeysPage({ api, onDirtyChange }: KeysPageProps) {
                         </div>
                         {isBlocked && (
                           <span style={{ fontSize: '0.78rem', color: 'var(--danger-color)' }}>
-                            {k.blocked_reason}
+                            {blockedReasonLabel(k.blocked_reason || '')}
                           </span>
                         )}
                         {isDeleted && (
