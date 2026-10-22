@@ -207,7 +207,7 @@ async function main() {
           rowText);
         const axisText = await page.getByTestId('requests-trend-axis').innerText();
         check(`${zone}: chart axis uses local offsets instead of a bare UTC label`,
-          axisText.includes(offsetLabel(Date.now(), zone)) && !/ \d{2}:\d{2} UTC(?:\s|$)/.test(axisText),
+          axisText.includes(offsetLabel(Date.parse(crossIso), zone)) && !/ \d{2}:\d{2} UTC(?:\s|$)/.test(axisText),
           axisText);
         await shot(page, `${zone.replace('/', '-')}-requests`);
 

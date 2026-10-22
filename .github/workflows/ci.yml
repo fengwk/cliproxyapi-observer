@@ -109,6 +109,11 @@ jobs:
           BROWSER_REPORT_DIR: ${{ runner.temp }}/browser-report
         run: make browser
 
+      - name: Browser-local timezone acceptance
+        run: >-
+          node internal/web/browser/timezone-check.cjs
+          --report-dir "${{ runner.temp }}/browser-report/timezone"
+
       - name: Upload browser report and screenshots
         if: always()
         uses: actions/upload-artifact@v7
@@ -118,6 +123,7 @@ jobs:
             ${{ runner.temp }}/browser-report/report.json
             ${{ runner.temp }}/browser-report/summary.txt
             ${{ runner.temp }}/browser-report/screenshots/
+            ${{ runner.temp }}/browser-report/timezone/
           if-no-files-found: warn
           retention-days: 14
 

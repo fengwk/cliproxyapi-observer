@@ -255,6 +255,21 @@ test('request view: DST local days and elapsed hours remain exact', async () => 
       '2025-11-02T04:00:00.000Z',
       '2025-11-03T05:00:00.000Z',
     ]);
+
+    // Empty local days must keep distinct keys while the timezone offset changes.
+    server.state.records = [];
+    const empty = await json(server,
+      '/requests/view?from_date=2025-10-30&to_date=2025-11-03&timezone=America%2FNew_York');
+    assert.deepEqual(empty.body.series.buckets.map((bucket) => bucket.time), [
+      '2025-10-30T04:00:00.000Z',
+      '2025-10-31T04:00:00.000Z',
+      '2025-11-01T04:00:00.000Z',
+      '2025-11-02T04:00:00.000Z',
+      '2025-11-03T05:00:00.000Z',
+    ]);
+    const skipped = await json(server,
+      '/requests/view?from_date=2011-12-30&to_date=2011-12-30&timezone=Pacific%2FApia');
+    assert.equal(skipped.res.status, 400);
   });
 });
 

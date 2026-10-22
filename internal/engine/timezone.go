@@ -101,6 +101,13 @@ func localDayStart(t time.Time, loc *time.Location) time.Time {
 }
 
 func firstLocalInstant(target civilDate, loc *time.Location) (time.Time, bool) {
+	// Ordinary midnights are already exact. Only transitions that skip or
+	// repeat midnight need the search, not every retained minute in a chart.
+	midnight := time.Date(target.year, target.month, target.day, 0, 0, 0, 0, loc)
+	if civilOf(midnight) == target && midnight.Hour() == 0 &&
+		civilOf(midnight.Add(-time.Second).In(loc)).compare(target) < 0 {
+		return midnight, true
+	}
 	noon := time.Date(target.year, target.month, target.day, 12, 0, 0, 0, loc)
 	first, ok := firstInstantAtOrAfter(noon.Add(-48*time.Hour), noon, target, loc)
 	if !ok || civilOf(first.In(loc)).compare(target) != 0 {

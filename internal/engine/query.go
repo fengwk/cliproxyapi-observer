@@ -626,21 +626,26 @@ func collectLocal(tx *bolt.Tx, env *queryEnv, q Query, granularity, view string,
 	a := newAggregator(view, keyLabels)
 	anchor := q.From.UTC()
 	to := q.To.UTC()
-	fullStart := ceilMinute(anchor)
+	from := anchor
+	// The retained boundary may fall inside a minute when the raw window is
+	// longer than daily history. That boundary needs exact raw filtering too;
+	// retaining its whole aggregate must not revive the expired prefix.
+	retainedFrom := minTime(env.rawCut, env.dailyCut)
+	if from.Before(retainedFrom) {
+		from = retainedFrom
+	}
+	if !to.After(from) {
+		return a.total, a.series, a.groups, nil
+	}
+	fullStart := ceilMinute(from)
 	fullEnd := floorMinute(to)
 	if fullStart.Before(fullEnd) {
-		if anchor.Before(fullStart) {
-			if e := collectLocalRawEdge(tx, env, q, a, anchor, fullStart, granularity, loc); e != nil {
+		if from.Before(fullStart) {
+			if e := collectLocalRawEdge(tx, env, q, a, from, fullStart, granularity, loc); e != nil {
 				return Aggregate{}, nil, nil, e
 			}
 		}
-		from := fullStart
-		if from.Before(env.minuteCut) {
-			// Minute aggregates follow the union of daily and raw retention.
-			// Read-time filtering keeps an overdue cleanup from reviving them.
-			from = env.minuteCut
-		}
-		if e := scanRollups(tx.Bucket([]byte("minutes")), from, fullEnd, func(d daily) error {
+		if e := scanRollups(tx.Bucket([]byte("minutes")), fullStart, fullEnd, func(d daily) error {
 			if d.Bucket.Time.Before(env.minuteCut) || !matches(q, d.KeyID, d.Model, d.Provider, d.AuthIndex, d.Failed) {
 				return nil
 			}
@@ -654,7 +659,7 @@ func collectLocal(tx *bolt.Tx, env *queryEnv, q Query, granularity, view string,
 				return Aggregate{}, nil, nil, e
 			}
 		}
-	} else if e := collectLocalRawEdge(tx, env, q, a, anchor, to, granularity, loc); e != nil {
+	} else if e := collectLocalRawEdge(tx, env, q, a, from, to, granularity, loc); e != nil {
 		return Aggregate{}, nil, nil, e
 	}
 	if granularity == "hour" && to.Sub(anchor) <= 168*time.Hour {

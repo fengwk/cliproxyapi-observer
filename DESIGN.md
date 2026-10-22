@@ -69,9 +69,14 @@ untouched. SDK baseline v8.0.30, schema 6 minimum.
   the same quote. Never silently drop money or reprice a retried event.
 - Daily rollup retention cannot erase independent Key used amounts. Raw detail
   default 24h; daily default 365d. Cleanup plus physical bbolt compaction.
-- UTC, half-open [from,to) ranges. Summary must state bucket granularity.
-  For historical dates with only daily rollups, reject partial-day boundaries
-  instead of silently fabricating exact totals. UI offers whole-date queries.
+- Persist UTC instants and half-open [from,to) ranges. The browser sends its
+  current IANA timezone with inclusive calendar dates; interpret local day
+  boundaries before converting to UTC, including DST and skipped midnights.
+  Retained UTC minute aggregates support historical local-day projection
+  without extending raw detail retention. Keep them for the union of daily
+  and raw windows; filter partial edge minutes with available raw rows.
+  Reject unreconstructable historical second boundaries, never invent totals.
+  Summary and series always state their actual bucket granularity.
 
 ## Pricing public API (package pricing)
 
@@ -371,7 +376,9 @@ replays cannot be billed again. A too-old unseen event must fail closed for its
 Key, not silently recharge it. Max captured body <=8MiB; queue and storage are
 bounded. Compress request metadata/details as well as bodies. Short ranges fully
 covered by raw retention return useful hourly trends; older whole-day ranges use
-daily buckets. Do not count full daily rollups into an hourly chart.
+daily buckets. UTC uses hourly/daily fast paths; other IANA zones project minute
+aggregates onto local days or distinct elapsed hours from local midnight.
+Do not count full daily rollups into an hourly chart.
 
 Pricing rule input_tokens_gt uses full prompt context (uncached+read+write),
 not only uncached billable input. Expose optional provider in price snapshots

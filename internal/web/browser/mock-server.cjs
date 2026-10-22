@@ -731,10 +731,14 @@ function zonedDateTimeToMs(year, month, day, timeZone) {
 
   // Nonexistent wall time (spring-forward gap). Return the first instant whose
   // local wall clock has reached the requested value.
-  for (let t = target - 12 * 3600000; t <= target + 12 * 3600000; t += 60000) {
-    if (wallAt(t) >= target) return t;
+  let lower = (target - 36 * 3600000) / 1000;
+  let upper = (target + 36 * 3600000) / 1000;
+  while (lower < upper) {
+    const middle = Math.floor((lower + upper) / 2);
+    if (wallAt(middle * 1000) >= target) upper = middle;
+    else lower = middle + 1;
   }
-  return target;
+  return lower * 1000;
 }
 
 function parseViewDate(value, timeZone, name) {
@@ -746,12 +750,18 @@ function parseViewDate(value, timeZone, name) {
   if (roundTrip.toISOString().slice(0, 10) !== value) {
     throw failure(400, 'invalid_query', name + ' must be a valid local calendar date');
   }
+  if (localDateString(zonedDateTimeToMs(year, month, day, timeZone), timeZone) !== value) {
+    throw failure(400, 'invalid_query', name + ' is a skipped local calendar date');
+  }
   return { year, month, day, value };
 }
 
 function nextCalendarDate(date) {
   const next = new Date(Date.UTC(date.year, date.month - 1, date.day + 1));
-  return { year: next.getUTCFullYear(), month: next.getUTCMonth() + 1, day: next.getUTCDate() };
+  return {
+    year: next.getUTCFullYear(), month: next.getUTCMonth() + 1, day: next.getUTCDate(),
+    value: next.toISOString().slice(0, 10)
+  };
 }
 
 function computeSummary(records, query, timeZone = 'UTC') {
@@ -797,8 +807,8 @@ function computeSummary(records, query, timeZone = 'UTC') {
       : localDateString(at, timeZone);
     let bucket = buckets.get(key);
     if (!bucket) {
-      const time = granularity === 'hour' ? key : zonedDateTimeToMs(
-        ...Object.values(parseViewDate(String(key), timeZone, 'series')).slice(0, 3), timeZone);
+      const date = granularity === 'day' ? parseViewDate(String(key), timeZone, 'series') : null;
+      const time = date ? zonedDateTimeToMs(date.year, date.month, date.day, timeZone) : key;
       bucket = { time: iso(time), requests: 0, failures: 0, cost_micro_usd: 0, tokens: 0 };
       buckets.set(key, bucket);
     }

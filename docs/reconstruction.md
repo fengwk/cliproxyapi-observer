@@ -11,7 +11,7 @@ v0.6/v0.7/v0.8 发布说明保留各版本历史行为。当前采用最小非�
 | R01 全宽 | 三页占满 iframe 安全可用宽度，表格局部横滚 | `internal/web/browser/run.cjs` 官方壳、多宽度、侧栏切换与截图 |
 | R02 记住登录 | Observer 自有存储、明确偏好、结构化 401/退出清理 | `web/src/App.test.tsx`、官方壳重载/401 |
 | R03 稳定刷新 | 仅请求页单在途定时器、失败退避、原位保留旧行 | `Requests.test.tsx` 的暂停/迟到响应/失败测试、浏览器 12 次实际 5 秒刷新 |
-| R04 UTC 日期 | 草稿快捷范围，包含结束日，今天截止查询时刻 | `statistics_test.go`、`management_query_test.go`、`Requests.test.tsx` |
+| R04 本地日期/时间 | 浏览器时区显示与筛选，包含结束日，支持夏令时/非整小时时差 | `timezone_test.go`、`Requests.test.tsx`、`internal/web/browser/timezone-check.cjs` |
 | R05 平铺筛选 | 查询/Enter 才应用，历史维度及下线模型可选 | `ui.test.tsx`、`Requests.test.tsx`、真实宿主 `rebuild_test.go` |
 | R06 细分统计 | 事务性小时/日汇总、一致视图、五种分组、样本覆盖 | `statistics*_test.go`、`load_acceptance_test.go`、真实升级测试 |
 | R07 终态删除 | 墓碑清哈希，busy/幂等/410，保留账本 | `key_lifecycle_test.go`、`rebuild_test.go`、浏览器删除流程 |
@@ -66,10 +66,12 @@ ID 用 query，响应 `no-store`，错误不回显凭据或底层敏感异常。
 ### 请求视图
 
 ```http
-GET /requests/view?from_date=2026-10-01&to_date=2026-10-20&view=model&page=1&page_size=25
+GET /requests/view?from_date=2026-10-01&to_date=2026-10-20&timezone=Asia%2FShanghai&view=model&page=1&page_size=25
 ```
 
-UTC 日期包含结束日，今天截到本次查询时刻；不接受混入 `from/to`。
+日期按 `timezone` 指定的 IANA 时区解释，包含结束日，今天截到本次查询时刻；
+浏览器总是发送当前时区，直接 API 省略时默认 UTC。不接受混入 `from/to`。
+日界使用当地第一个有效瞬间，正确处理夏令时跳过午夜和 23/25 小时日期。
 过滤参数仍为 `key_id/model/provider/auth_index/status`，状态 `success|failed`；
 view 为 `requests|model|key|key_model|account|provider`，page_size 最多 100。
 `key_model` 以 JSON `[key_id,provider,model]` 为分组身份，不因 Key 标签相同或
@@ -79,7 +81,7 @@ view 为 `requests|model|key|key_model|account|provider`，page_size 最多 100�
 返回：
 
 ```text
-range      {from, to, as_of, timezone:"UTC"}
+range      {from, to, as_of, timezone:"Asia/Shanghai"}   # 时间点仍为 UTC
 summary    Aggregate
 series     {granularity:"hour"|"day", buckets:[Bucket]}
 records    [Record]                  # 仅 requests 视图
@@ -103,8 +105,11 @@ reasoning 已在 output 内。每条 TPS 仅用于完整、有效流式样本，
 其中 input 是未缓存输入；不包含输出/reasoning，也不平均每请求百分比，统一显示两位小数。
 样本覆盖不足时不代表全量请求的缓存命中率；分母为零显示 `—`，不补造缺失细分。
 旧日汇总没有细分时 `detailed_requests=0`，不能把缺失视为已知零。
-可用原始明细只在查询范围/不足一小时的边界解码，完整小时复用小时汇总；
-跨日图表仍按天合并，不把小时直接塞进日图。
+UTC 查询复用小时/日汇总。其他时区使用事务写入的 UTC 分钟汇总，并且只在不足一分钟
+的边界读取可用原始明细；分钟汇总保留至历史与原始窗口的并集，不延长原始明细保留。
+历史图表按当地日界合并；近期按当地午夜起的实际经过小时分桶，重复小时保留不同瞬间。
+汇总会增加长期存储量。原始明细过期后，无法精确回答的任意秒边界明确拒绝；
+浏览器的本地整日日期筛选不受此限制。
 
 ```http
 GET /requests/facets?field=model&search=claude&limit=100&cursor=...

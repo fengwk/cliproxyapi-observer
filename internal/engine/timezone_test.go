@@ -354,3 +354,35 @@ func TestMinuteAggregatesFollowRetentionUnion(t *testing.T) {
 		return nil
 	}))
 }
+
+// Retaining the minute that contains rawCut must not retain its expired prefix
+// when daily history is shorter than the raw window.
+func TestLocalViewFiltersPartialRetentionMinute(t *testing.T) {
+	s, now, _ := fixture(t)
+	k, _ := key(t, s, KeySpec{Enabled: true})
+	settings, err := s.Settings()
+	must(t, err)
+	settings.RawRetentionHours = 72
+	settings.DailyRetentionDays = 1
+	_, err = s.UpdateSettings(settings)
+	must(t, err)
+	base := *now
+	*now = base.Add(time.Minute)
+	must(t, s.RecordUsage(event(k, "expired-prefix", base.Add(20*time.Second))))
+	must(t, s.RecordUsage(event(k, "retained-suffix", base.Add(40*time.Second))))
+	*now = base.Add(72*time.Hour + 30*time.Second)
+
+	for _, cleanup := range []bool{false, true} {
+		if cleanup {
+			must(t, s.Maintenance())
+		}
+		view, err := s.RequestView(ViewQuery{
+			FromDate: "2024-01-31", ToDate: "2024-01-31",
+			Timezone: "Europe/Berlin", View: viewProvider,
+		})
+		must(t, err)
+		if view.Summary.Requests != 1 || len(view.Groups) != 1 || view.Groups[0].Requests != 1 {
+			t.Fatalf("cleanup=%v revived expired minute prefix: %+v/%+v", cleanup, view.Summary, view.Groups)
+		}
+	}
+}
