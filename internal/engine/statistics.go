@@ -36,7 +36,6 @@ func addAggregate(dst *Aggregate, src Aggregate) error {
 		{&dst.LatencySamples, src.LatencySamples},
 		{&dst.TTFTMS, src.TTFTMS},
 		{&dst.TTFTSamples, src.TTFTSamples},
-		{&dst.UnpricedRequests, src.UnpricedRequests},
 		{&dst.DetailedRequests, src.DetailedRequests},
 	}
 	for _, p := range pairs {
@@ -70,9 +69,6 @@ func detailedAggregate(r Record) Aggregate {
 	if r.Stream && r.LatencyMS > 0 && r.TTFTMS > 0 && r.TTFTMS < r.LatencyMS {
 		a.TTFTMS = r.TTFTMS
 		a.TTFTSamples = 1
-	}
-	if r.PriceSource == "unpriced" {
-		a.UnpricedRequests = 1
 	}
 	return a
 }

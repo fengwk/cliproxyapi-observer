@@ -112,7 +112,7 @@ const (
 	captureReasonCorrelation  = "trace_collision"
 	captureHeaderLimit        = 16 << 10
 	captureEnvelopeVersion    = 1
-	supportedObserverFeature  = 2
+	supportedObserverFeature  = 3
 )
 
 type Health struct {
@@ -171,24 +171,24 @@ type FacetPage struct {
 	NextCursor string      `json:"next_cursor,omitempty"`
 }
 type Record struct {
-	ID                string                `json:"id"`
-	TraceID           string                `json:"trace_id"`
-	KeyID             string                `json:"key_id"`
-	Time              time.Time             `json:"time"`
-	Model             string                `json:"model"`
-	Provider          string                `json:"provider"`
-	AuthIndex         string                `json:"auth_index"`
-	Failed            bool                  `json:"failed"`
-	StatusCode        int                   `json:"status_code"`
-	Stream            bool                  `json:"stream"`
-	LatencyMS         int64                 `json:"latency_ms"`
-	TTFTMS            int64                 `json:"ttft_ms"`
-	Tokens            pricing.Tokens        `json:"tokens"`
-	RawUsage          pluginapi.UsageDetail `json:"raw_usage"`
-	CostMicroUSD      int64                 `json:"cost_micro_usd"`
-	PriceSource       string                `json:"price_source"`
-	RuleID            string                `json:"rule_id,omitempty"`
-	AccountingQuality string                `json:"accounting_quality"`
+	ID                  string                `json:"id"`
+	TraceID             string                `json:"trace_id"`
+	KeyID               string                `json:"key_id"`
+	Time                time.Time             `json:"time"`
+	Model               string                `json:"model"`
+	Provider            string                `json:"provider"`
+	AuthIndex           string                `json:"auth_index"`
+	Failed              bool                  `json:"failed"`
+	StatusCode          int                   `json:"status_code"`
+	Stream              bool                  `json:"stream"`
+	LatencyMS           int64                 `json:"latency_ms"`
+	TTFTMS              int64                 `json:"ttft_ms"`
+	Tokens              pricing.Tokens        `json:"tokens"`
+	RawUsage            pluginapi.UsageDetail `json:"raw_usage"`
+	ResponseServiceTier string                `json:"response_service_tier,omitempty"`
+	CostMicroUSD        int64                 `json:"cost_micro_usd"`
+	PriceSource         string                `json:"price_source"`
+	AccountingQuality   string                `json:"accounting_quality"`
 }
 type RequestPage struct {
 	Items    []Record `json:"items"`
@@ -215,7 +215,6 @@ type Aggregate struct {
 	LatencySamples   int64 `json:"latency_samples"`
 	TTFTMS           int64 `json:"ttft_ms"`
 	TTFTSamples      int64 `json:"ttft_samples"`
-	UnpricedRequests int64 `json:"unpriced_requests"`
 	DetailedRequests int64 `json:"detailed_requests"`
 }
 

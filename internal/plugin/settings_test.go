@@ -43,8 +43,8 @@ func TestSettingsPreserveOptionalFields(t *testing.T) {
 	saved.CaptureRetentionSeconds = 120
 	saved.Pricing = pricing.Config{
 		Auto:   true,
-		Prices: []pricing.Price{{Model: "saved", Rates: pricing.Rates{Input: 1}}},
-		Rules:  []pricing.Rule{},
+		Source: pricing.SourceV2,
+		Prices: []pricing.ManualPrice{{Model: "saved", Definition: pricing.PricingDefinition{Base: pricing.RateSet{Input: 1}}}},
 		Mappings: []pricing.Mapping{{
 			Model: "public", Provider: "catalog", CatalogModel: "catalog/model",
 		}},

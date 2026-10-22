@@ -12,3 +12,13 @@ from `xai`, `opencode-go`, `opencode`, `aihubmix`, `302ai` and `requesty`; their
 differing complete rates (including `cache_write`) are asserted in the tests. Provider `fixture` contains synthetic entries that
 exercise partial rates, explicit zero, an unsupported tier type and the legacy
 `context_over_200k` fallback. The multi-megabyte upstream file is not committed.
+
+`models.dev.v2.sample.json` is a hand-extracted subset of
+`https://models.dev/experimental/v2.0/api.json`. It keeps the real v2 shapes
+needed by the adapter regression tests: `cost.text.input/output`, field-wise
+`overrides`, TTL cache writes (`5m`/`1h`), scalar and object `multipliers`,
+`canonical_id`, and conditions using `context`, `service_tier`, `date`,
+`utc_days` and `utc_hours`. It also includes an unsupported `region` condition
+and a `unit: "character"` price that must be rejected rather than treated as a
+per-token price. Provider/model names are retained only for this small local
+fixture; tests never contact the network.

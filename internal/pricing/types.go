@@ -1,4 +1,5 @@
-// Package pricing calculates immutable micro-USD quotes without network I/O.
+// Package pricing resolves an internal pricing definition and calculates an
+// immutable micro-USD quote without network I/O on the request path.
 package pricing
 
 import (
@@ -7,8 +8,25 @@ import (
 	"time"
 )
 
-// Rate names are stable diagnostic identifiers. The empty string is never a
-// rate name; absent rates are listed instead of being inferred as zero.
+const (
+	// SourceV1 and SourceV2 are the only accepted external catalog sources.
+	// V2 is the default; the two sources are never mixed.
+	SourceV1 = "models_dev_v1"
+	SourceV2 = "models_dev_v2"
+
+	maxSafe           = 9_000_000_000_000_000
+	maxCandidates     = 32
+	maxDefinitions    = 4096
+	maxMappings       = 4096
+	maxRulesPerModel  = 64
+	maxConditionNodes = 64
+	maxConditionDepth = 8
+	maxConditionList  = 16
+	maxTiers          = 16
+)
+
+// Rate names are diagnostic identifiers for support issues, not absence
+// markers. Missing catalog prices are normalized to zero.
 const (
 	rateInput      = "input"
 	rateOutput     = "output"
@@ -16,8 +34,6 @@ const (
 	rateCacheWrite = "cache_write"
 )
 
-// Match and reason strings are part of the management JSON contract. They are
-// intentionally specific so the UI never has to guess why a price is absent.
 const (
 	matchManual    = "manual"
 	matchMapping   = "mapping"
@@ -25,64 +41,112 @@ const (
 	matchNamespace = "namespace"
 	matchCanonical = "canonical"
 	matchExact     = "exact"
-	matchRule      = "rule"
 	matchAmbiguous = "ambiguous"
 	matchNone      = "none"
 
 	reasonManual             = "manual"
-	reasonRule               = "rule"
 	reasonAutoDisabled       = "auto_disabled"
 	reasonCatalogUnavailable = "catalog_unavailable"
 	reasonNotFound           = "not_found"
 	reasonAmbiguous          = "ambiguous"
 	reasonProviderConflict   = "provider_conflict"
 	reasonMappingMissing     = "mapping_missing"
-	reasonTiersUnsupported   = "tiers_unsupported"
-	reasonContextTiers       = "context_tiers"
-	reasonMissingRates       = "missing_rates"
-	reasonVariantOnly        = "variant_only"
+	reasonPricingUnsupported = "pricing_unsupported"
+	reasonMissingFacts       = "missing_facts"
 )
 
-const maxCandidates = 32
-
-type Rates struct {
-	Input      int64  `json:"input"`
-	Output     int64  `json:"output"`
-	CacheRead  int64  `json:"cache_read"`
-	CacheWrite int64  `json:"cache_write"`
-	Reasoning  *int64 `json:"reasoning,omitempty"`
+// RateSet is an effective token price in USD per million tokens represented as
+// integer micro-USD. Reasoning is null to inherit output, or an independent
+// price (including an explicit zero). CacheWriteByTTL overrides CacheWrite for
+// an exactly matching positive TTL in seconds.
+type RateSet struct {
+	Input           int64           `json:"input"`
+	Output          int64           `json:"output"`
+	CacheRead       int64           `json:"cache_read"`
+	CacheWrite      int64           `json:"cache_write"`
+	CacheWriteByTTL map[int64]int64 `json:"cache_write_by_ttl"`
+	Reasoning       *int64          `json:"reasoning"`
 }
 
-// Candidate is one catalog identity that could explain an ambiguous match.
-// It is diagnostic only: it never becomes the billed price without an explicit
-// mapping (or a provider-qualified request).
-type Candidate struct {
-	Provider     string   `json:"provider"`
-	Model        string   `json:"model"`
-	Rates        Rates    `json:"rates"`
-	MissingRates []string `json:"missing_rates,omitempty"`
+// Condition combines every populated field with AND. Empty objects are always
+// true. Time ranges are left-closed/right-open; weekdays use ISO 1=Monday and
+// belong to the start day for a range crossing midnight.
+type Condition struct {
+	Context     *ContextCondition `json:"context,omitempty"`
+	ServiceTier []string          `json:"serviceTier,omitempty"`
+	Date        *DateCondition    `json:"date,omitempty"`
+	Time        *TimeCondition    `json:"time,omitempty"`
+	All         []Condition       `json:"all,omitempty"`
+	Any         []Condition       `json:"any,omitempty"`
+	Not         *Condition        `json:"not,omitempty"`
 }
 
-type Price struct {
-	Model           string      `json:"model"`
-	Provider        string      `json:"provider,omitempty"` // requested/observed channel; manual overrides are model-wide
-	Rates           Rates       `json:"rates"`
-	Source          string      `json:"source"`
-	Reason          string      `json:"reason,omitempty"`
-	Match           string      `json:"match,omitempty"`
-	CatalogProvider string      `json:"catalog_provider,omitempty"`
-	CatalogModel    string      `json:"catalog_model,omitempty"`
-	CatalogTime     *time.Time  `json:"catalog_time,omitempty"`
-	MissingRates    []string    `json:"missing_rates,omitempty"`
-	Candidates      []Candidate `json:"candidates,omitempty"`
+type ContextCondition struct {
+	GT  *int64 `json:"gt,omitempty"`
+	GTE *int64 `json:"gte,omitempty"`
+	LT  *int64 `json:"lt,omitempty"`
+	LTE *int64 `json:"lte,omitempty"`
 }
 
-type Rule struct {
-	ID            string `json:"id"`
-	Model         string `json:"model"`
-	InputTokensGT *int64 `json:"input_tokens_gt,omitempty"`
-	TimeRange     string `json:"time_range,omitempty"`
-	Rates         Rates  `json:"rates"`
+type DateCondition struct {
+	GTE string `json:"gte,omitempty"`
+	LT  string `json:"lt,omitempty"`
+}
+
+type TimeCondition struct {
+	Start    string `json:"start"`
+	End      string `json:"end"`
+	Timezone string `json:"timezone"`
+	Weekdays []int  `json:"weekdays,omitempty"`
+}
+
+// RatePatch leaves omitted fields unchanged. ReasoningSet distinguishes an
+// omitted reasoning field from an explicit null, which restores inheritance.
+type RatePatch struct {
+	Input              *int64
+	Output             *int64
+	CacheRead          *int64
+	CacheWrite         *int64
+	CacheWriteByTTL    map[int64]int64
+	HasCacheWriteByTTL bool
+	Reasoning          *int64
+	ReasoningSet       bool
+}
+
+type Override struct {
+	ID    string    `json:"id"`
+	When  Condition `json:"when"`
+	Rates RatePatch `json:"rates"`
+}
+
+type FactorSet struct {
+	Input      *string `json:"input,omitempty"`
+	Output     *string `json:"output,omitempty"`
+	CacheRead  *string `json:"cache_read,omitempty"`
+	CacheWrite *string `json:"cache_write,omitempty"`
+	Reasoning  *string `json:"reasoning,omitempty"`
+}
+
+type Multiplier struct {
+	ID      string    `json:"id"`
+	When    Condition `json:"when"`
+	Factors FactorSet `json:"factors"`
+}
+
+// PricingDefinition is the complete internal price. The base rates are always
+// present; overrides and multipliers are applied in array order.
+type PricingDefinition struct {
+	Base        RateSet      `json:"base"`
+	Overrides   []Override   `json:"overrides"`
+	Multipliers []Multiplier `json:"multipliers"`
+}
+
+// ManualPrice is a complete manual identity. An empty provider only matches an
+// actual empty observed provider; it is never a model-wide wildcard.
+type ManualPrice struct {
+	Model      string            `json:"model"`
+	Provider   string            `json:"provider,omitempty"`
+	Definition PricingDefinition `json:"definition"`
 }
 
 // Mapping chooses an exact catalog identity for a complete public model ID.
@@ -94,40 +158,95 @@ type Mapping struct {
 }
 
 type Config struct {
-	Auto     bool      `json:"auto"`
-	Prices   []Price   `json:"prices"`
-	Rules    []Rule    `json:"rules"`
-	Mappings []Mapping `json:"mappings,omitempty"`
+	Auto     bool          `json:"auto"`
+	Source   string        `json:"source"`
+	Prices   []ManualPrice `json:"prices"`
+	Mappings []Mapping     `json:"mappings,omitempty"`
+}
+
+// Rates is the outward legacy-shaped base/effective rate projection. Its keys
+// remain snake_case because the existing management/UI contract uses them.
+type Rates struct {
+	Input           int64           `json:"input"`
+	Output          int64           `json:"output"`
+	CacheRead       int64           `json:"cache_read"`
+	CacheWrite      int64           `json:"cache_write"`
+	CacheWriteByTTL map[int64]int64 `json:"cache_write_by_ttl,omitempty"`
+	Reasoning       *int64          `json:"reasoning,omitempty"`
+}
+
+// Candidate is one exact catalog identity that could explain an ambiguous or
+// unsupported identity. An unsupported candidate carries a complete zero
+// definition so callers never import a half-understood price.
+type Candidate struct {
+	Provider         string            `json:"provider"`
+	Model            string            `json:"model"`
+	Rates            Rates             `json:"rates"`
+	Definition       PricingDefinition `json:"definition"`
+	PricingSupported bool              `json:"pricing_supported"`
+	SupportIssues    []string          `json:"support_issues,omitempty"`
+}
+
+type Price struct {
+	Model            string            `json:"model"`
+	Provider         string            `json:"provider,omitempty"`
+	Rates            Rates             `json:"rates"`
+	Definition       PricingDefinition `json:"definition"`
+	Source           string            `json:"source"`
+	Reason           string            `json:"reason,omitempty"`
+	Match            string            `json:"match,omitempty"`
+	CatalogProvider  string            `json:"catalog_provider,omitempty"`
+	CatalogModel     string            `json:"catalog_model,omitempty"`
+	CatalogTime      *time.Time        `json:"catalog_time,omitempty"`
+	PricingSupported bool              `json:"pricing_supported"`
+	SupportIssues    []string          `json:"support_issues,omitempty"`
+	Candidates       []Candidate       `json:"candidates,omitempty"`
 }
 
 type Tokens struct {
 	// Input is uncached and disjoint from CacheRead and CacheWrite.
 	Input int64 `json:"input"`
 	// Output includes Reasoning.
-	Output     int64 `json:"output"`
-	CacheRead  int64 `json:"cache_read"`
-	CacheWrite int64 `json:"cache_write"`
-	Reasoning  int64 `json:"reasoning"`
-	Total      int64 `json:"total"`
+	Output int64 `json:"output"`
+	// CacheWrite is the total cache-write token count. CacheWriteByTTL, when
+	// populated, must partition it exactly; unknown TTLs use the generic rate.
+	CacheWrite      int64           `json:"cache_write"`
+	CacheWriteByTTL map[int64]int64 `json:"cache_write_by_ttl,omitempty"`
+	CacheRead       int64           `json:"cache_read"`
+	Reasoning       int64           `json:"reasoning"`
+	Total           int64           `json:"total"`
 }
 
-// Quote is a fully materialized, immutable accounting result. Diagnostic
-// fields describe the resolution but never participate in a later repricing.
+// UsageFacts is the complete fact set used by a quote. RequestedAt is the
+// original call start, never the ingestion time; ServiceTier is the final
+// upstream-reported tier, not a requested preference.
+type UsageFacts struct {
+	Tokens      Tokens
+	RequestedAt time.Time
+	ServiceTier string
+}
+
+// Quote is a fully materialized, immutable accounting result. Definition and
+// Rates explain the price; diagnostics never participate in later repricing.
 type Quote struct {
-	CostMicroUSD    int64       `json:"cost_micro_usd"`
-	Source          string      `json:"source"`
-	RuleID          string      `json:"rule_id,omitempty"`
-	Rates           Rates       `json:"rates"`
-	Reason          string      `json:"reason,omitempty"`
-	Match           string      `json:"match,omitempty"`
-	CatalogProvider string      `json:"catalog_provider,omitempty"`
-	CatalogModel    string      `json:"catalog_model,omitempty"`
-	CatalogTime     *time.Time  `json:"catalog_time,omitempty"`
-	MissingRates    []string    `json:"missing_rates,omitempty"`
-	Candidates      []Candidate `json:"candidates,omitempty"`
+	CostMicroUSD     int64             `json:"cost_micro_usd"`
+	Source           string            `json:"source"`
+	Rates            Rates             `json:"rates"`
+	Definition       PricingDefinition `json:"definition"`
+	Reason           string            `json:"reason,omitempty"`
+	Match            string            `json:"match,omitempty"`
+	CatalogProvider  string            `json:"catalog_provider,omitempty"`
+	CatalogModel     string            `json:"catalog_model,omitempty"`
+	CatalogTime      *time.Time        `json:"catalog_time,omitempty"`
+	PricingSupported bool              `json:"pricing_supported"`
+	SupportIssues    []string          `json:"support_issues,omitempty"`
+	Candidates       []Candidate       `json:"candidates,omitempty"`
 }
 
+// Snapshot is the selected source's state. Nothing from an unselected source
+// is exposed or used to fill gaps.
 type Snapshot struct {
+	Source         string    `json:"source"`
 	Prices         []Price   `json:"prices"`
 	LastSync       time.Time `json:"last_sync"`
 	Error          string    `json:"error,omitempty"`
@@ -135,43 +254,82 @@ type Snapshot struct {
 	CatalogEntries int       `json:"catalog_entries"`
 }
 
-// Preview gives base rates, not a quote for invented token usage.
 type ModelIdentity struct {
 	Model    string `json:"model"`
 	Provider string `json:"provider"`
 }
-type PreviewPrice struct {
-	Price
-	HasRules bool `json:"has_rules"`
-}
+
 type Pricer interface {
-	Quote(string, string, Tokens, time.Time) (Quote, error)
+	Quote(string, string, Tokens, time.Time, string) (Quote, error)
 	Observe(string, string)
 	Configure(Config) error
 	Snapshot() Snapshot
+	Preview([]ModelIdentity) ([]Price, error)
 	Refresh(context.Context) error
 }
 
-const maxSafe int64 = 9_000_000_000_000_000
-
-var errInvalid = errors.New("invalid pricing configuration or tokens")
+var errInvalid = errors.New("invalid pricing configuration or usage")
 
 func DefaultConfig() Config {
-	return Config{Auto: true, Prices: []Price{}, Rules: []Rule{}}
+	return Config{Auto: true, Source: SourceV2, Prices: []ManualPrice{}, Mappings: []Mapping{}}
 }
-func cloneRates(r Rates) Rates {
+
+func zeroRateSet() RateSet {
+	return RateSet{CacheWriteByTTL: map[int64]int64{}}
+}
+
+func completeDefinition(d PricingDefinition) PricingDefinition {
+	d.Base = cloneRateSet(d.Base)
+	if d.Overrides == nil {
+		d.Overrides = []Override{}
+	}
+	if d.Multipliers == nil {
+		d.Multipliers = []Multiplier{}
+	}
+	return d
+}
+
+func zeroDefinition() PricingDefinition {
+	return PricingDefinition{Base: zeroRateSet(), Overrides: []Override{}, Multipliers: []Multiplier{}}
+}
+
+func cloneRateSet(r RateSet) RateSet {
+	m := make(map[int64]int64, len(r.CacheWriteByTTL))
+	for k, v := range r.CacheWriteByTTL {
+		m[k] = v
+	}
+	r.CacheWriteByTTL = m
 	if r.Reasoning != nil {
 		v := *r.Reasoning
 		r.Reasoning = &v
 	}
 	return r
 }
+
+func cloneRatePatch(p RatePatch) RatePatch {
+	for _, ptr := range []**int64{&p.Input, &p.Output, &p.CacheRead, &p.CacheWrite, &p.Reasoning} {
+		if *ptr != nil {
+			v := **ptr
+			*ptr = &v
+		}
+	}
+	if p.CacheWriteByTTL != nil {
+		m := make(map[int64]int64, len(p.CacheWriteByTTL))
+		for k, v := range p.CacheWriteByTTL {
+			m[k] = v
+		}
+		p.CacheWriteByTTL = m
+	}
+	return p
+}
+
 func cloneStrings(in []string) []string {
 	if in == nil {
 		return nil
 	}
 	return append([]string{}, in...)
 }
+
 func cloneTime(t *time.Time) *time.Time {
 	if t == nil {
 		return nil
@@ -179,104 +337,165 @@ func cloneTime(t *time.Time) *time.Time {
 	v := t.UTC()
 	return &v
 }
+
+func cloneCondition(c Condition) Condition {
+	if c.Context != nil {
+		v := *c.Context
+		if v.GT != nil {
+			n := *v.GT
+			v.GT = &n
+		}
+		if v.GTE != nil {
+			n := *v.GTE
+			v.GTE = &n
+		}
+		if v.LT != nil {
+			n := *v.LT
+			v.LT = &n
+		}
+		if v.LTE != nil {
+			n := *v.LTE
+			v.LTE = &n
+		}
+		c.Context = &v
+	}
+	c.ServiceTier = cloneStrings(c.ServiceTier)
+	if c.Date != nil {
+		v := *c.Date
+		c.Date = &v
+	}
+	if c.Time != nil {
+		v := *c.Time
+		v.Weekdays = cloneInt64sToInt(v.Weekdays)
+		c.Time = &v
+	}
+	if c.All != nil {
+		v := make([]Condition, len(c.All))
+		for i := range c.All {
+			v[i] = cloneCondition(c.All[i])
+		}
+		c.All = v
+	}
+	if c.Any != nil {
+		v := make([]Condition, len(c.Any))
+		for i := range c.Any {
+			v[i] = cloneCondition(c.Any[i])
+		}
+		c.Any = v
+	}
+	if c.Not != nil {
+		v := cloneCondition(*c.Not)
+		c.Not = &v
+	}
+	return c
+}
+
+func cloneInt64sToInt(in []int) []int {
+	if in == nil {
+		return nil
+	}
+	return append([]int{}, in...)
+}
+
+func cloneFactorSet(f FactorSet) FactorSet {
+	for _, ptr := range []**string{&f.Input, &f.Output, &f.CacheRead, &f.CacheWrite, &f.Reasoning} {
+		if *ptr != nil {
+			v := **ptr
+			*ptr = &v
+		}
+	}
+	return f
+}
+
+func CloneDefinition(d PricingDefinition) PricingDefinition {
+	out := PricingDefinition{Base: cloneRateSet(d.Base), Overrides: make([]Override, len(d.Overrides)), Multipliers: make([]Multiplier, len(d.Multipliers))}
+	for i, o := range d.Overrides {
+		o.When = cloneCondition(o.When)
+		o.Rates = cloneRatePatch(o.Rates)
+		out.Overrides[i] = o
+	}
+	for i, m := range d.Multipliers {
+		m.When = cloneCondition(m.When)
+		m.Factors = cloneFactorSet(m.Factors)
+		out.Multipliers[i] = m
+	}
+	return out
+}
+
+// NormalizeConfig returns a detached configuration with default source and
+// complete definition arrays/maps for the management JSON contract.
+func NormalizeConfig(c Config) Config {
+	normalizeConfig(&c)
+	return cloneConfig(c)
+}
+
+func cloneConfig(c Config) Config {
+	if c.Source == "" {
+		c.Source = SourceV2
+	}
+	prices := make([]ManualPrice, len(c.Prices))
+	for i := range c.Prices {
+		prices[i] = c.Prices[i]
+		prices[i].Definition = CloneDefinition(c.Prices[i].Definition)
+	}
+	c.Prices = prices
+	c.Mappings = append([]Mapping{}, c.Mappings...)
+	return c
+}
+
+func ratesFromSet(r RateSet) Rates {
+	out := Rates{Input: r.Input, Output: r.Output, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite}
+	if r.CacheWriteByTTL != nil {
+		out.CacheWriteByTTL = make(map[int64]int64, len(r.CacheWriteByTTL))
+		for k, v := range r.CacheWriteByTTL {
+			out.CacheWriteByTTL[k] = v
+		}
+	}
+	if r.Reasoning != nil {
+		v := *r.Reasoning
+		out.Reasoning = &v
+	}
+	return out
+}
+
+func cloneRates(r Rates) Rates {
+	return ratesFromSet(cloneRateSet(RateSet{Input: r.Input, Output: r.Output, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite, CacheWriteByTTL: r.CacheWriteByTTL, Reasoning: r.Reasoning}))
+}
+
+func cloneCandidate(c Candidate) Candidate {
+	c.Rates = cloneRates(c.Rates)
+	c.Definition = CloneDefinition(c.Definition)
+	c.SupportIssues = cloneStrings(c.SupportIssues)
+	return c
+}
+
 func cloneCandidates(in []Candidate) []Candidate {
 	if in == nil {
 		return nil
 	}
 	out := make([]Candidate, len(in))
-	for i, c := range in {
-		out[i] = c
-		out[i].Rates = cloneRates(c.Rates)
-		out[i].MissingRates = cloneStrings(c.MissingRates)
+	for i := range in {
+		out[i] = cloneCandidate(in[i])
 	}
 	return out
 }
+
 func clonePrice(p Price) Price {
 	p.Rates = cloneRates(p.Rates)
+	p.Definition = CloneDefinition(p.Definition)
 	p.CatalogTime = cloneTime(p.CatalogTime)
-	p.MissingRates = cloneStrings(p.MissingRates)
+	p.SupportIssues = cloneStrings(p.SupportIssues)
 	p.Candidates = cloneCandidates(p.Candidates)
 	return p
 }
-func cloneConfig(c Config) Config {
-	c.Prices = append([]Price{}, c.Prices...)
-	for i := range c.Prices {
-		c.Prices[i] = clonePrice(c.Prices[i])
-		// Configuration entries are model-wide overrides; diagnostics are
-		// generated by the resolver and must never be persisted as user input.
-		c.Prices[i].Provider = ""
-		c.Prices[i].Reason = ""
-		c.Prices[i].Match = ""
-		c.Prices[i].CatalogProvider = ""
-		c.Prices[i].CatalogModel = ""
-		c.Prices[i].CatalogTime = nil
-		c.Prices[i].MissingRates = nil
-		c.Prices[i].Candidates = nil
-	}
-	c.Rules = append([]Rule{}, c.Rules...)
-	for i := range c.Rules {
-		c.Rules[i].Rates = cloneRates(c.Rules[i].Rates)
-		if c.Rules[i].InputTokensGT != nil {
-			v := *c.Rules[i].InputTokensGT
-			c.Rules[i].InputTokensGT = &v
-		}
-	}
-	if c.Mappings != nil {
-		c.Mappings = append([]Mapping{}, c.Mappings...)
-	}
-	return c
+
+func CloneQuote(q Quote) Quote {
+	q.Rates = cloneRates(q.Rates)
+	q.Definition = CloneDefinition(q.Definition)
+	q.CatalogTime = cloneTime(q.CatalogTime)
+	q.SupportIssues = cloneStrings(q.SupportIssues)
+	q.Candidates = cloneCandidates(q.Candidates)
+	return q
 }
-func validRates(r Rates) bool {
-	for _, v := range []int64{r.Input, r.Output, r.CacheRead, r.CacheWrite} {
-		if v < 0 || v > maxSafe {
-			return false
-		}
-	}
-	return r.Reasoning == nil || (*r.Reasoning >= 0 && *r.Reasoning <= maxSafe)
-}
-func Validate(c Config) error {
-	if len(c.Prices) > 4096 || len(c.Rules) > 4096 || len(c.Mappings) > 4096 {
-		return errInvalid
-	}
-	models, ids, mapped := map[string]bool{}, map[string]bool{}, map[string]bool{}
-	for _, p := range c.Prices {
-		if !validIdentity(p.Model) || models[p.Model] || !validRates(p.Rates) || p.Provider != "" || (p.Source != "" && p.Source != "manual") {
-			return errInvalid
-		}
-		models[p.Model] = true
-	}
-	for _, r := range c.Rules {
-		if !validIdentity(r.Model) || !validIdentity(r.ID) || ids[r.ID] || !validRates(r.Rates) {
-			return errInvalid
-		}
-		ids[r.ID] = true
-		if r.InputTokensGT != nil && (*r.InputTokensGT < 0 || *r.InputTokensGT > maxSafe) {
-			return errInvalid
-		}
-		if r.TimeRange != "" {
-			if _, _, ok := parseRange(r.TimeRange); !ok {
-				return errInvalid
-			}
-		}
-	}
-	for _, m := range c.Mappings {
-		if !validIdentity(m.Model) || !validIdentity(m.Provider) || !validIdentity(m.CatalogModel) || mapped[m.Model] {
-			return errInvalid
-		}
-		mapped[m.Model] = true
-	}
-	return nil
-}
+
 func validIdentity(s string) bool { return len(s) > 0 && len(s) <= 1024 }
-func parseRange(s string) (int, int, bool) {
-	if len(s) != 11 || s[2] != ':' || s[5] != '-' || s[8] != ':' {
-		return 0, 0, false
-	}
-	for _, i := range []int{0, 1, 3, 4, 6, 7, 9, 10} {
-		if s[i] < '0' || s[i] > '9' {
-			return 0, 0, false
-		}
-	}
-	h1, m1, h2, m2 := int(s[0]-'0')*10+int(s[1]-'0'), int(s[3]-'0')*10+int(s[4]-'0'), int(s[6]-'0')*10+int(s[7]-'0'), int(s[9]-'0')*10+int(s[10]-'0')
-	return h1*60 + m1, h2*60 + m2, h1 < 24 && h2 < 24 && m1 < 60 && m2 < 60 && h1*60+m1 != h2*60+m2
-}

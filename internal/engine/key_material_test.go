@@ -68,8 +68,8 @@ func TestFeatureOneHashOnlyKeyUpgradeKeepsIdentityAndAuthentication(t *testing.T
 		t.Fatal("rotated credential or plaintext unavailable", e)
 	}
 	must(t, r.db.View(func(tx *bolt.Tx) error {
-		if string(tx.Bucket([]byte("meta")).Get([]byte("observer_features"))) != "2" {
-			t.Fatal("upgraded writer did not publish feature 2")
+		if string(tx.Bucket([]byte("meta")).Get([]byte("observer_features"))) != "3" {
+			t.Fatal("upgraded writer did not publish feature 3")
 		}
 		var stored storedKey
 		if e := get(tx.Bucket([]byte("keys")), k.ID, &stored); e != nil {

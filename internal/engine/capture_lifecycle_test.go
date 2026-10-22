@@ -581,7 +581,7 @@ func TestUnknownFeatureVersionReadOnlyRejected(t *testing.T) {
 	db, e := bolt.Open(path, 0600, nil)
 	must(t, e)
 	must(t, db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket([]byte("meta")).Put([]byte("observer_features"), []byte("3"))
+		return tx.Bucket([]byte("meta")).Put([]byte("observer_features"), []byte("4"))
 	}))
 	must(t, db.Close())
 	before, e := os.ReadFile(path)
@@ -596,100 +596,27 @@ func TestUnknownFeatureVersionReadOnlyRejected(t *testing.T) {
 	}
 }
 
-// Old schema2 settings inherit the former boolean and raw retention; the one-
-// time FIFO index rebuild is idempotent and legacy capture rows stay readable.
-func TestLegacySchemaSettingsIndexAndCapture(t *testing.T) {
-	s, now, p := fixture(t)
-	k, _ := key(t, s, KeySpec{Enabled: true})
-	capturedAt := *now
-	configureCapture(t, s, CaptureModeHeadersAndBody, nil)
-	must(t, s.RecordUsage(usageFor(k, "exec", "trace", *now)))
+// An older schema is rejected without migration or modification. The new
+// binary never guesses at old pricing or capture rows.
+func TestLegacySchemaRejectedWithoutModification(t *testing.T) {
+	s, _, p := fixture(t)
 	path := s.path
 	must(t, s.Close())
-
-	innerJSON, e := json.Marshal(map[string]any{"ok": true})
-	must(t, e)
-	var gz bytes.Buffer
-	zw := gzip.NewWriter(&gz)
-	_, e = zw.Write(innerJSON)
-	must(t, e)
-	must(t, zw.Close())
-	legacy := capture{RequestID: "admission", At: *now, Headers: http.Header{"Content-Type": {"application/json"}}, Gzip: gz.Bytes(), Status: captureStatusAvailable}
-	payload, e := encode(legacy)
-	must(t, e)
-
 	db, e := bolt.Open(path, 0600, nil)
 	must(t, e)
 	must(t, db.Update(func(tx *bolt.Tx) error {
-		var raw map[string]any
-		must(t, json.Unmarshal(tx.Bucket([]byte("meta")).Get([]byte("settings")), &raw))
-		delete(raw, "capture_mode")
-		delete(raw, "capture_retention_seconds")
-		raw["capture_enabled"] = true
-		raw["raw_retention_hours"] = 48
-		encoded, e := json.Marshal(raw)
-		if e != nil {
-			return e
-		}
-		if e := tx.Bucket([]byte("meta")).Put([]byte("settings"), encoded); e != nil {
-			return e
-		}
-		if e := tx.Bucket([]byte("meta")).Delete([]byte("capture_index_ready")); e != nil {
-			return e
-		}
-		return tx.Bucket([]byte("captures")).Put([]byte(captureID(k.ID, "trace")), payload)
+		return tx.Bucket([]byte("meta")).Put([]byte("schema"), []byte("2"))
 	}))
 	must(t, db.Close())
-
-	r, e := Open(Options{DataPath: path, Now: func() time.Time { return *now }, Pricer: p})
+	before, e := os.ReadFile(path)
 	must(t, e)
-	settings, e := r.Settings()
-	must(t, e)
-	if settings.CaptureMode != CaptureModeHeadersAndBody || settings.CaptureRetentionSeconds != 48*3600 || !settings.CaptureEnabled {
-		t.Fatal("legacy settings not inherited", settings)
+	if _, e = Open(Options{DataPath: path, Pricer: p}); !errors.Is(e, ErrUnsupported) {
+		t.Fatal("old schema accepted", e)
 	}
-	must(t, r.db.View(func(tx *bolt.Tx) error {
-		capb := tx.Bucket([]byte("captures"))
-		if capb.Stats().KeyN != 1 || tx.Bucket([]byte("capture_fifo")).Stats().KeyN != 1 {
-			t.Fatal("index not rebuilt")
-		}
-		if captureUsedBytes(tx) != int64(len(payload)) {
-			t.Fatal("byte counter not reconciled")
-		}
-		if string(tx.Bucket([]byte("meta")).Get([]byte("observer_features"))) != "2" {
-			t.Fatal("feature marker missing")
-		}
-		return nil
-	}))
-	d, e := r.Detail("exec")
+	after, e := os.ReadFile(path)
 	must(t, e)
-	if d.CaptureStatus != captureStatusAvailable || !bytes.Contains(d.Body, []byte(`"ok":true`)) {
-		t.Fatal("legacy capture unreadable", d)
-	}
-	must(t, r.Close())
-	r, e = Open(Options{DataPath: path, Now: func() time.Time { return *now }, Pricer: p})
-	must(t, e)
-	defer r.Close()
-	must(t, r.db.View(func(tx *bolt.Tx) error {
-		if tx.Bucket([]byte("captures")).Stats().KeyN != 1 || tx.Bucket([]byte("capture_fifo")).Stats().KeyN != 1 {
-			t.Fatal("migration not idempotent")
-		}
-		return nil
-	}))
-	// Legacy rows inherit the raw retention at migration. Extending the active
-	// capture policy later must not revive content past that inherited deadline.
-	*now = now.Add(49 * time.Hour)
-	v, e := r.Settings()
-	must(t, e)
-	v.RawRetentionHours = 168
-	v.CaptureRetentionSeconds = 72 * 3600
-	_, e = r.UpdateSettings(v)
-	must(t, e)
-	d, e = r.Detail("exec")
-	must(t, e)
-	wantExpiry := capturedAt.Add(48 * time.Hour)
-	if d.CaptureStatus != captureStatusExpired || r.Health().CaptureBytes != 0 || d.ExpiresAt == nil || !d.ExpiresAt.Equal(wantExpiry) {
-		t.Fatal("legacy inherited expiry revived", d, r.Health())
+	if !bytes.Equal(before, after) {
+		t.Fatal("rejected database was modified")
 	}
 }
 

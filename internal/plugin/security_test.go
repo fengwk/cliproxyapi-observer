@@ -255,7 +255,7 @@ func TestUsageOwnershipAndQuota(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	settings.Pricing = pricing.Config{Prices: []pricing.Price{{Model: "fixed", Rates: pricing.Rates{Input: 1_000_000}}}, Rules: []pricing.Rule{}}
+	settings.Pricing = pricing.Config{Prices: []pricing.ManualPrice{{Model: "fixed", Provider: "openai", Definition: pricing.PricingDefinition{Base: pricing.RateSet{Input: 1_000_000}}}}}
 	if _, err = m.store.UpdateSettings(settings); err != nil {
 		t.Fatal(err)
 	}

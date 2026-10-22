@@ -13,6 +13,8 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+const schemaVersion = "3"
+
 var buckets = []string{"meta", "keys", "hashes", "records", "dedup", "daily", "hourly", "captures", "capture_state", "capture_fifo", "capture_expiry", "timeline", "correlations"}
 
 type storedKey struct {
@@ -87,38 +89,23 @@ func validSettings(v Settings) bool {
 	return validMode(v.CaptureMode) && v.CaptureRetentionSeconds >= 60 && v.CaptureRetentionSeconds <= v.RawRetentionHours*3600 && v.MaxBodyBytes >= 1 && v.MaxBodyBytes <= maxCaptureBody && v.MaxBodyStorageBytes >= 1 && v.MaxBodyStorageBytes <= maxCaptureStorage && v.RawRetentionHours >= 1 && v.RawRetentionHours <= 168 && v.DailyRetentionDays >= 1 && v.DailyRetentionDays <= 3650
 }
 
-// storedSettings decodes old schema2 values without confusing an omitted mode
-// with the explicit "off" value. Old enabled values inherit headers_and_body;
-// omitted retention inherits the metadata retention.
+// storedSettings decodes the current schema without legacy fallbacks. A
+// database written by an older schema is rejected during Open instead.
 func storedSettings(raw []byte) (Settings, error) {
 	v := DefaultSettings()
 	if raw == nil {
 		return v, nil
 	}
-	var fields map[string]json.RawMessage
-	if e := json.Unmarshal(raw, &fields); e != nil {
-		return v, e
-	}
 	if e := json.Unmarshal(raw, &v); e != nil {
 		return v, e
 	}
-	if _, ok := fields["capture_mode"]; !ok {
-		v.CaptureMode = ""
-	}
-	if _, ok := fields["capture_retention_seconds"]; !ok {
-		v.CaptureRetentionSeconds = 0
-	}
 	if v.CaptureMode == "" {
-		if v.CaptureEnabled {
-			v.CaptureMode = CaptureModeHeadersAndBody
-		} else {
-			v.CaptureMode = CaptureModeOff
-		}
+		v.CaptureMode = CaptureModeOff
 	}
+	v.CaptureEnabled = v.CaptureMode != CaptureModeOff
 	if v.CaptureRetentionSeconds <= 0 {
 		v.CaptureRetentionSeconds = v.RawRetentionHours * 3600
 	}
-	v.CaptureEnabled = v.CaptureMode != CaptureModeOff
 	return v, nil
 }
 
@@ -187,13 +174,15 @@ func Open(o Options) (*Store, error) {
 		}
 		e = db.View(func(tx *bolt.Tx) error {
 			m := tx.Bucket([]byte("meta"))
-			if m != nil && string(m.Get([]byte("schema"))) == "2" {
+			if m != nil && string(m.Get([]byte("schema"))) == schemaVersion {
 				return checkFeatureVersion(m)
 			}
 			empty := true
 			tx.ForEach(func(_ []byte, _ *bolt.Bucket) error { empty = false; return nil })
 			if !empty {
-				return ErrInvalid
+				// Explicitly reject every older or foreign schema; there is no
+				// read/write migration path.
+				return ErrUnsupported
 			}
 			return nil
 		})
@@ -268,7 +257,7 @@ func Open(o Options) (*Store, error) {
 		if e := put(m, "settings", s.settings); e != nil {
 			return e
 		}
-		if e := m.Put([]byte("schema"), []byte("2")); e != nil {
+		if e := m.Put([]byte("schema"), []byte(schemaVersion)); e != nil {
 			return e
 		}
 		return m.Put([]byte("observer_features"), []byte(strconv.Itoa(supportedObserverFeature)))
@@ -348,12 +337,7 @@ func (s *Store) UpdateSettings(v Settings) (Settings, error) {
 	if e := pricing.Validate(v.Pricing); e != nil {
 		return Settings{}, ErrInvalid
 	}
-	if v.Pricing.Prices == nil {
-		v.Pricing.Prices = []pricing.Price{}
-	}
-	if v.Pricing.Rules == nil {
-		v.Pricing.Rules = []pricing.Rule{}
-	}
+	v.Pricing = pricing.NormalizeConfig(v.Pricing)
 	if e := s.pricer.Configure(v.Pricing); e != nil {
 		return Settings{}, e
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -11,20 +12,29 @@ import (
 const refreshInterval = 6 * time.Hour
 const maxObserved = 4096
 
+var errSourceChanged = errors.New("catalog source changed during refresh")
+
+type sourceState struct {
+	catalog   catalogIndex
+	lastSync  time.Time
+	lastError string
+	loaded    bool
+}
+
 type flight struct {
 	done chan struct{}
 	err  error
 }
+
 type Service struct {
 	mu          sync.Mutex
 	config      Config
 	client      *http.Client
 	cachePath   string
-	catalog     catalogIndex
+	sources     map[string]*sourceState
+	generation  uint64
 	observed    map[identity]struct{}
-	lastSync    time.Time
-	lastError   string
-	flight      *flight
+	flights     map[string]*flight
 	queue       chan struct{}
 	lastAttempt time.Time
 	running     bool
@@ -33,6 +43,7 @@ type Service struct {
 var _ Pricer = (*Service)(nil)
 
 func NewService(c Config, cachePath string, client *http.Client) (*Service, error) {
+	normalizeConfig(&c)
 	if err := Validate(c); err != nil {
 		return nil, err
 	}
@@ -48,55 +59,87 @@ func NewService(c Config, cachePath string, client *http.Client) (*Service, erro
 		}
 		return nil
 	}
-	s := &Service{config: cloneConfig(c), cachePath: cachePath, client: &h, observed: map[identity]struct{}{}, queue: make(chan struct{}, 1)}
-	s.loadCache()
+	s := &Service{
+		config: cloneConfig(c), cachePath: cachePath, client: &h,
+		sources: map[string]*sourceState{}, observed: map[identity]struct{}{},
+		flights: map[string]*flight{}, queue: make(chan struct{}, 1),
+	}
+	s.loadSourceCacheLocked(s.config.Source)
 	return s, nil
 }
+
+func normalizeConfig(c *Config) {
+	if c.Source == "" {
+		c.Source = SourceV2
+	}
+	if c.Prices == nil {
+		c.Prices = []ManualPrice{}
+	}
+	if c.Mappings == nil {
+		c.Mappings = []Mapping{}
+	}
+}
+
 func (s *Service) Configure(c Config) error {
+	normalizeConfig(&c)
 	if err := Validate(c); err != nil {
 		return err
 	}
 	c = cloneConfig(c)
 	s.mu.Lock()
-	was := s.config.Auto
+	wasAuto, wasSource := s.config.Auto, s.config.Source
 	s.config = c
+	if wasSource != c.Source {
+		s.generation++
+		s.lastAttempt = time.Time{}
+		s.loadSourceCacheLocked(c.Source)
+	}
 	s.mu.Unlock()
-	if c.Auto && !was {
+	if c.Auto && (!wasAuto || wasSource != c.Source) {
 		s.enqueue()
 	}
 	return nil
 }
+
 func (s *Service) enqueue() {
 	select {
 	case s.queue <- struct{}{}:
 	default:
 	}
 }
+
 func (s *Service) Observe(model, provider string) {
 	if !validIdentity(model) || len(provider) > 1024 {
 		return
 	}
 	s.mu.Lock()
-	k := identity{model, provider}
+	k := identity{Model: model, Provider: provider}
 	_, exists := s.observed[k]
 	admitted := !exists && len(s.observed) < maxObserved
 	if admitted {
 		s.observed[k] = struct{}{}
 	}
-	miss := s.config.Auto && s.resolveLocked(model, provider).source == "unpriced"
-	// One global cooldown also bounds storms from many different missing IDs.
+	miss := s.config.Auto && s.resolveLocked(model, provider).source == "zero"
+	// One global cooldown bounds storms from many different missing IDs.
 	queue := miss && admitted && time.Since(s.lastAttempt) >= time.Minute
 	s.mu.Unlock()
 	if queue {
 		s.enqueue()
 	}
 }
+
+func flightKey(source string, generation uint64) string {
+	return source + "#" + strconv.FormatUint(generation, 10)
+}
+
 func (s *Service) Refresh(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	s.mu.Lock()
-	if f := s.flight; f != nil {
+	source, generation := s.config.Source, s.generation
+	key := flightKey(source, generation)
+	if f := s.flights[key]; f != nil {
 		s.mu.Unlock()
 		select {
 		case <-ctx.Done():
@@ -106,37 +149,67 @@ func (s *Service) Refresh(ctx context.Context) error {
 		}
 	}
 	f := &flight{done: make(chan struct{})}
-	s.flight = f
+	s.flights[key] = f
 	s.lastAttempt = time.Now()
 	s.mu.Unlock()
-	entries, err := s.fetch(ctx)
-	// Expensive construction is outside the request-path mutex. Publish the
-	// immutable index atomically so every quote sees one complete generation.
+
+	entries, err := s.fetch(ctx, source)
 	var index catalogIndex
 	if entries != nil {
 		index = indexCatalog(entries)
 	}
 	now := time.Now().UTC()
-	if err == nil {
-		if e := s.saveCache(diskCache{LastSync: now, Entries: entries}); e != nil {
+
+	s.mu.Lock()
+	if generation != s.generation || s.config.Source != source {
+		if err == nil {
+			err = errSourceChanged
+		}
+		f.err = err
+		if s.flights[key] == f {
+			delete(s.flights, key)
+		}
+		close(f.done)
+		s.mu.Unlock()
+		return err
+	}
+	state := s.sourceStateLocked(source)
+	if entries != nil {
+		state.catalog = index
+		state.lastSync = now
+		if saveErr := s.saveCacheLocked(source, entries, now); saveErr != nil {
 			err = errors.New("catalog cache write failed")
 		}
 	}
-	s.mu.Lock()
-	if entries != nil {
-		s.catalog = index
-		s.lastSync = now
-	}
-	s.lastError = ""
 	if err != nil {
-		s.lastError = err.Error()
+		state.lastError = err.Error()
+	} else {
+		state.lastError = ""
 	}
 	f.err = err
-	s.flight = nil
+	if s.flights[key] == f {
+		delete(s.flights, key)
+	}
 	close(f.done)
 	s.mu.Unlock()
 	return err
 }
+
+func (s *Service) sourceStateLocked(source string) *sourceState {
+	state := s.sources[source]
+	if state == nil {
+		state = &sourceState{}
+		s.sources[source] = state
+		s.loadSourceCacheLocked(source)
+	}
+	return state
+}
+
+func (s *Service) refreshingLocked() bool {
+	key := flightKey(s.config.Source, s.generation)
+	return s.flights[key] != nil
+}
+
 func (s *Service) Run(ctx context.Context) {
 	s.mu.Lock()
 	if s.running {
@@ -144,7 +217,8 @@ func (s *Service) Run(ctx context.Context) {
 		return
 	}
 	s.running = true
-	delay := refreshInterval - time.Since(s.lastSync)
+	state := s.sourceStateLocked(s.config.Source)
+	delay := refreshInterval - time.Since(state.lastSync)
 	if delay < 0 {
 		delay = 0
 	}
@@ -162,7 +236,7 @@ func (s *Service) Run(ctx context.Context) {
 		case <-s.queue:
 			s.mu.Lock()
 			// Discard redundant queued misses after a refresh, including failures.
-			auto := s.config.Auto && s.flight == nil && time.Since(s.lastAttempt) >= time.Minute
+			auto := s.config.Auto && !s.refreshingLocked() && time.Since(s.lastAttempt) >= time.Minute
 			s.mu.Unlock()
 			if auto {
 				_ = s.Refresh(ctx)

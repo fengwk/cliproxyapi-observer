@@ -21,7 +21,7 @@ func add(a, b int64) (int64, error) {
 func normalize(u pluginapi.UsageRecord) Record {
 	d := u.Detail
 	b := canonicalTokenBreakdown(d, u.Provider, u.ExecutorType)
-	r := Record{ID: u.RequestID, TraceID: u.TraceID, KeyID: strings.TrimPrefix(u.APIKey, "observer:"), Time: u.RequestedAt.UTC(), Model: u.Model, Provider: u.Provider, AuthIndex: u.AuthIndex, Failed: u.Failed, StatusCode: u.Failure.StatusCode, Stream: u.Stream, LatencyMS: u.Latency.Milliseconds(), TTFTMS: u.TTFT.Milliseconds(), RawUsage: d, AccountingQuality: string(b.Quality)}
+	r := Record{ID: u.RequestID, TraceID: u.TraceID, KeyID: strings.TrimPrefix(u.APIKey, "observer:"), Time: u.RequestedAt.UTC(), Model: u.Model, Provider: u.Provider, AuthIndex: u.AuthIndex, Failed: u.Failed, StatusCode: u.Failure.StatusCode, Stream: u.Stream, LatencyMS: u.Latency.Milliseconds(), TTFTMS: u.TTFT.Milliseconds(), RawUsage: d, ResponseServiceTier: u.ResponseServiceTier, AccountingQuality: string(b.Quality)}
 	r.Tokens.Total = b.TotalTokens
 	if b.Quality == usage.TokenAccountingQualityComplete {
 		r.Tokens = pricing.Tokens{Input: b.Input.UncachedTokens, Output: b.Output.TotalTokens, CacheRead: b.Input.CacheReadTokens, CacheWrite: b.Input.CacheWriteTokens, Reasoning: b.Output.ReasoningTokens, Total: b.TotalTokens}
@@ -69,14 +69,15 @@ func (s *Store) RecordUsage(u pluginapi.UsageRecord) error {
 	r := normalize(u)
 	at := s.now().UTC()
 	s.pricer.Observe(r.Model, r.Provider)
-	q, e := s.pricer.Quote(r.Model, r.Provider, r.Tokens, at)
+	// Quote with the original request start and the final upstream tier, never
+	// the ingestion time or a requested-tier preference.
+	q, e := s.pricer.Quote(r.Model, r.Provider, r.Tokens, r.Time, r.ResponseServiceTier)
 	if e != nil || q.CostMicroUSD < 0 || q.CostMicroUSD > maxSafe {
 		s.fenceLocked(strings.TrimPrefix(u.APIKey, "observer:"))
 		return ErrAccounting
 	}
 	r.CostMicroUSD = q.CostMicroUSD
 	r.PriceSource = q.Source
-	r.RuleID = q.RuleID
 	if q.Rates.Reasoning != nil {
 		rate := *q.Rates.Reasoning
 		q.Rates.Reasoning = &rate
