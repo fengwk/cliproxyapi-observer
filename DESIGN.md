@@ -1,21 +1,21 @@
 # Observer: core implementation and integration contract
 
 The v0.6.0 baseline replaced the former observation-only backend. No migration
-from pre-v0.6 databases or credentials. Subsequent schema2 releases preserve
-their own databases, keys and fixed costs. Current additions and superseding
-auth/UI/API contracts: [reconstruction guide](docs/reconstruction.md) and
-[requirements](docs/REFACTOR-next.md). Code examples below describe the original
-core shape; additive fields are documented in the current guide. Default database:
-`data/cliproxyapi-observer-v2.db`. Reject nonempty databases without this schema
-marker without changing them. CPA core, upstream selection, routing, retries and
-session affinity remain untouched. SDK baseline v8.0.30, schema 6 minimum.
+The current clean-slate database schema is **3** with `observer_features=3`.
+Databases without that exact marker, including schema2 and earlier, are rejected
+before a writable open and are never migrated or rewritten. Current additions and
+superseding auth/UI/API contracts: [reconstruction guide](docs/reconstruction.md),
+[model policy](docs/model-policy.md) and the [v1.0.0 release notes](docs/release-notes-v1.0.0.md).
+Default database path: `data/cliproxyapi-observer-v2.db` (the filename is retained).
+CPA core, upstream selection, routing, retries and session affinity remain
+untouched. SDK baseline v8.0.30, schema 6 minimum.
 
 ## Ownership
 
 - `internal/engine/**`: storage/Key/auth/admission/accounting/capture/rollups/
   retention/physical compaction and their tests (core Coder).
-- `internal/pricing/**`: catalog matching, immutable quote calculation, rules,
-  cache/refresh and their tests (pricing Coder).
+- `internal/pricing/**`: models.dev v1/v2 adapters, definitions/conditions,
+  immutable quote calculation, source cache/refresh and their tests (pricing Coder).
 - `internal/plugin/**`, main.go: native lifecycle, authentication and RPC/HTTP
   wiring (plugin Coder).
 - `internal/web/**`: three-page UI, embedded assets, Node and automated actual
@@ -41,7 +41,8 @@ session affinity remain untouched. SDK baseline v8.0.30, schema 6 minimum.
 - Authentication principal = `observer:<key ID>`. SHA-256 hashes authenticate;
   the user-authorized current client secret also persists for repeated internal
   management display/copy. Revoke/delete clear both, disable retains them.
-  Stable IDs are not credentials. Feature marker 2 prevents feature-1 writers.
+  Stable IDs are not credentials. Feature marker 3 prevents older writers; old
+  schema2 databases are rejected without migration.
 - RequestInterceptRequest.RequestID is the admission ID; UsageRecord.RequestID
   is an execution ID (retries can have multiple IDs). TraceID correlates them.
   Charge every distinct execution once; replay never charges twice. Key cycles
@@ -75,72 +76,87 @@ session affinity remain untouched. SDK baseline v8.0.30, schema 6 minimum.
 
 ## Pricing public API (package pricing)
 
-Implement these exact names. Add private helpers freely; do not add dependencies.
+The authoritative field definitions are in `internal/pricing/types.go`. Current
+wire/API shape:
 
 ```go
-type Rates struct {
-    Input int64 `json:"input"`
-    Output int64 `json:"output"`
-    CacheRead int64 `json:"cache_read"`
-    CacheWrite int64 `json:"cache_write"`
-    Reasoning *int64 `json:"reasoning,omitempty"`
+const (
+    SourceV1 = "models_dev_v1" // https://models.dev/api.json
+    SourceV2 = "models_dev_v2" // https://models.dev/experimental/v2.0/api.json
+)
+
+type RateSet struct {
+    Input, Output, CacheRead, CacheWrite int64 // micro-USD per million tokens
+    CacheWriteByTTL map[int64]int64            // exact positive TTL seconds
+    Reasoning *int64                           // nil inherits Output; 0 is free
 }
-type Price struct {
-    Model string `json:"model"`
-    Rates Rates `json:"rates"`
-    Source string `json:"source"`
+
+type Condition struct {
+    Context *ContextCondition // gt/gte/lt/lte on full prompt context
+    ServiceTier []string      // final upstream-reported tier
+    Date *DateCondition       // UTC [gte,lt)
+    Time *TimeCondition       // IANA timezone, weekdays, cross-midnight
+    All, Any []Condition
+    Not *Condition
 }
-type Rule struct {
-    ID string `json:"id"`
-    Model string `json:"model"`
-    InputTokensGT *int64 `json:"input_tokens_gt,omitempty"`
-    TimeRange string `json:"time_range,omitempty"` // "HH:mm-HH:mm", UTC
-    Rates Rates `json:"rates"`
+
+type RatePatch struct { // omitted fields inherit; explicit zero overrides
+    Input, Output, CacheRead, CacheWrite, Reasoning *int64
+    CacheWriteByTTL map[int64]int64
 }
+type Override struct { ID string; When Condition; Rates RatePatch }
+type FactorSet struct { Input, Output, CacheRead, CacheWrite, Reasoning *string }
+type Multiplier struct { ID string; When Condition; Factors FactorSet }
+type PricingDefinition struct {
+    Base RateSet
+    Overrides []Override     // every matching entry applies in array order
+    Multipliers []Multiplier // every matching factor set composes
+}
+type ManualPrice struct { Model, Provider string; Definition PricingDefinition }
+type Mapping struct { Model, Provider, CatalogModel string }
 type Config struct {
-    Auto bool `json:"auto"`
-    Prices []Price `json:"prices"` // manual exact overrides only
-    Rules []Rule `json:"rules"`   // ordered first-match overrides
+    Auto bool
+    Source string
+    Prices []ManualPrice
+    Mappings []Mapping
 }
+
 type Tokens struct {
-    Input int64 `json:"input"` // uncached, canonical, disjoint from read/write
-    Output int64 `json:"output"` // includes reasoning
-    CacheRead int64 `json:"cache_read"`
-    CacheWrite int64 `json:"cache_write"`
-    Reasoning int64 `json:"reasoning"` // subset of Output
-    Total int64 `json:"total"`
+    Input int64 // uncached and disjoint from read/write
+    Output int64 // includes Reasoning
+    CacheWrite, CacheRead int64
+    CacheWriteByTTL map[int64]int64
+    Reasoning, Total int64
 }
 type Quote struct {
-    CostMicroUSD int64 `json:"cost_micro_usd"`
-    Source string `json:"source"` // rule/manual/auto/unpriced
-    RuleID string `json:"rule_id,omitempty"`
-    Rates Rates `json:"rates"`
-}
-type Snapshot struct {
-    Prices []Price `json:"prices"` // effective observed + manual entries
-    LastSync time.Time `json:"last_sync"`
-    Error string `json:"error,omitempty"` // sanitized, no response body
-    Refreshing bool `json:"refreshing"`
+    CostMicroUSD int64; Source string // manual/mapping/provider/.../zero
+    Rates Rates; Definition PricingDefinition
+    Reason, Match string; CatalogProvider, CatalogModel string
+    PricingSupported bool; SupportIssues []string
 }
 type Pricer interface {
-    Quote(model, provider string, t Tokens, at time.Time) (Quote,error)
+    Quote(model, provider string, t Tokens, requestedAt time.Time, serviceTier string) (Quote, error)
     Observe(model, provider string)
     Configure(Config) error
     Snapshot() Snapshot
+    Preview([]ModelIdentity) ([]Price, error)
     Refresh(context.Context) error
 }
-func DefaultConfig() Config // Auto true, nonnil empty arrays
+func DefaultConfig() Config // Auto true, SourceV2, nonnil empty arrays
 func Validate(Config) error
-func NewService(Config, string /* cache file */, *http.Client) (*Service,error)
+func NewService(Config, string /* cache file */, *http.Client) (*Service, error)
 func (*Service) Run(context.Context) // one worker, refresh <=6h, cancelable
-// Service implements Pricer. Quote never performs network.
 ```
 
-Catalog: trusted HTTPS models.dev whole catalog, provider-aware exact match,
-conservative explicit recognized prefix/suffix normalization, never merge
-ambiguous model identities. Atomic bounded public-data cache, last good cache
-on network errors. Avoid per-request retry storms for misses. Rules > manual >
-auto > zero; quote records rate/source at calculation time.
+Manual prices bind the complete `(model, provider)` identity; an empty provider
+matches only an actual empty provider and is never a wildcard. Missing catalog
+prices become `source=zero` with cost 0, never an unpriced state or a request
+failure. Quote uses the original `RequestedAt` and final `ResponseServiceTier`,
+applies all matching overrides and multipliers, and ceils once to whole
+micro-USD. Invalid configuration, arithmetic overflow and real storage failures
+are errors; missing facts needed by a condition produce cost 0. Catalog sources
+are independent, source-isolated, single-flight and retain their last successful
+snapshot on failure. Request-path quoting performs no network I/O.
 
 ## Engine public API (package engine)
 
@@ -222,8 +238,9 @@ type Record struct {
     AuthIndex string `json:"auth_index"`; Failed bool `json:"failed"`; StatusCode int `json:"status_code"`
     Stream bool `json:"stream"`; LatencyMS int64 `json:"latency_ms"`; TTFTMS int64 `json:"ttft_ms"`
     Tokens pricing.Tokens `json:"tokens"`; RawUsage pluginapi.UsageDetail `json:"raw_usage"`
+    ResponseServiceTier string `json:"response_service_tier,omitempty"`
     CostMicroUSD int64 `json:"cost_micro_usd"`; PriceSource string `json:"price_source"`
-    RuleID string `json:"rule_id,omitempty"`; AccountingQuality string `json:"accounting_quality"`
+    AccountingQuality string `json:"accounting_quality"`
 }
 type RequestPage struct {
     Items []Record `json:"items"`; Page int `json:"page"`; PageSize int `json:"page_size"`
@@ -258,7 +275,7 @@ Base `/v0/management/plugins/cliproxyapi-observer`, host management auth.
 Standard direct JSON response (not RPC envelope) and errors
 `{"error":{"code":"...","message":"..."}}`.
 
-- GET `/health` -> Health plus `version`, `schema_version:2`
+- GET `/health` -> Health plus `version`, `schema_version:3`
 - POST `/models/token` -> `{"token":"...","expires_at":"..."}` (single-use catalog-only capability)
 - GET `/keys` -> `{"items":[Key...]}`; POST `/keys` KeySpec ->201 `{"key":Key,"secret":"..."}`
 - PUT `/keys?id={id}` KeySpec -> Key; DELETE `/keys?id={id}` ->204 (revoke)
@@ -307,8 +324,8 @@ Avoid overlapping fetches; pause during reading/editing and on hidden pages;
 stop on 401. One explicit filter query button. Request/failure trend
 SVG plus readable table, currency `used/limit$`, expiry, concurrency, model limits,
 cycle reset timestamps. Safe text-only JSON/header rendering, native dialogs,
-fully formatted JSON. Rule/manual rates editors use USD per million display,
-persist integers; unknown rates show em-dash, known free rates show zero.
+fully formatted JSON. Definition/manual rate editors use USD per million display,
+persist integers; unknown data shows em-dash, known zero prices show zero.
 Settings: capture modes/independent TTL, explainable pricing and mappings,
 expired cleanup, confirmed content purge and physical compaction. No fourth page.
 

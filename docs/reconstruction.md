@@ -1,6 +1,6 @@
 # Observer 当前开发实现说明
 
-本文件描述 v0.9.3 当前实现；`REFACTOR-next.md` 是历史需求设计，
+本文件描述 v1.0.0 当前实现；`REFACTOR-next.md` 是历史需求设计，
 v0.6/v0.7/v0.8 发布说明保留各版本历史行为。当前采用最小非独占认证共存，
 详见 [认证与模型权限](model-policy.md)，不接管 CPA 的原生凭据或实时令牌。
 
@@ -93,7 +93,7 @@ coverage   {raw_from, daily_from, detailed_requests, requests, backfill_pending}
 
 ```text
 input_tokens/output_tokens/cache_read_tokens/cache_write_tokens/reasoning_tokens
-complete_requests/detailed_requests/unpriced_requests
+complete_requests/detailed_requests
 latency_ms/latency_samples/ttft_ms/ttft_samples
 ```
 
@@ -145,10 +145,14 @@ field 为 `model|key_id|provider|auth_index`，返回
 ### 可解释价格
 
 `pricing.mappings` 是 `{model,provider,catalog_model}` 数组，按完整公开 ID 生效，
-只影响未来计费，不改路由。规则 > 精确手动价 > 显式/可信自动来源 > 未定价 $0。
-preview、Snapshot、Quote 使用同一个 resolver；原因/候选/缺失费率/目录身份
-由服务端提供。未知显示 `—`，确实为免费才显示 0。目录故障保留最后有效缓存，
-入库报价固定，之后改映射/目录/手动价都不重算历史。
+只影响未来计费，不改路由。人工价按完整 `(model, provider)` 匹配；空 provider
+不是模型通配。价格定义统一为 `{base, overrides/multipliers}`：所有匹配的
+override 按数组顺序应用、later wins，所有匹配倍率依次复合；缺少计算事实返回 0，
+非法配置/溢出/真实存储故障报错。缺价统一为 `source=zero`、成本 0，不再存在
+“未定价”计数或补价流程。models.dev v1/v2 独立适配，默认 v2，不自动混合或回退。
+preview、Snapshot、Quote 使用同一个 resolver；完整定义、原因/候选、目录身份和
+支持问题由服务端提供。未知数据仍显示 `—`，确认的免费价才显示 0。目录故障保留
+最后有效快照，入库报价固定，之后改映射/目录/手动价都不重算历史。
 
 ## 升级、失败恢复与回退
 
@@ -156,22 +160,18 @@ preview、Snapshot、Quote 使用同一个 resolver；原因/候选/缺失费率
    当作用量回调已落盘。
 2. 备份**整个数据目录**与匹配旧插件二进制，并核实可读取；
    保留中断标记等关联文件。不要在线普通复制正在写入的 bbolt 文件。
-3. 确认采用认证共存策略，且 CPA/Observer 使用不同凭据。数据可继续使用原 schema2 库，也可按用户允许
-   在停流备份后显式换用全新空库、重新创建客户端 Key；不自动删除旧文件。
-4. 检查 Key 身份/累计、旧费用、内容模式和健康。旧 schema2 增量补建索引，
-   按 1000 条明细一批回填新增细分字段及小时汇总；事务 checkpoint 可续接，
-   不再次累加旧四项汇总、重计额度或重新报价。已不在库中的细分不可重建。
-5. 新写入功能标记为 `observer_features=2`；高于 2 的库会在
-   可写打开前拒绝；旧无 schema2 的非空异构库仍拒绝，不就地迁移。
-6. 如需回退，停止新版本，恢复第 2 步的一致备份及对应旧二进制。
-   **不能直接让旧版本写新库**：v0.8 支持 feature1，会拒绝 feature2；
-   v0.7 不认识功能/内容索引标记，也未保证拒绝。
-   恢复旧备份意味着放弃升级后数据，必须先导出/保全所需证据并明确接受该代价。
+3. 确认采用认证共存策略，且 CPA/Observer 使用不同凭据。
+4. v1.0.0 使用 **schema3 / `observer_features=3`**，明确拒绝 schema2 及更早数据库，
+   不迁移、不双读、不就地补价。需要保留历史时，请由用户安排新的数据库路径，
+   重新创建 Key 与价格配置；发布过程不自动删除、覆盖或修改生产数据库。
+5. 如需回退，停止新版本，恢复第 2 步的一致备份及对应旧二进制。
+   不能直接让旧版本写 schema3 新库；恢复旧备份意味着放弃升级后数据，
+   必须先导出/保全所需证据并明确接受该代价。
 
-`TestUpgradeFromActualV070PreservesLedgerAndCredentials` 从固定旧 commit
+`TestUpgradeRejectsActualV070DatabaseWithoutMutation` 从固定旧 commit
 `37a2468f055c698158e50cde9b1758a8417e487e` 构建旧插件，在隔离宿主用实际旧 writer
-生成 Key/付费记录/双层内容，再切换候选并重启。它验证旧密钥仍有效、原费用不变、
-新费率仅用于新请求、回填重启不双计。不是对生产库做演练。
+生成非空 schema2 数据库，再切换候选。它验证候选拒绝该库、Observer health 不注册，
+且数据库逐字节不变；不是升级迁移演练，也不接触生产数据。
 
 ## 验证命令与边界
 

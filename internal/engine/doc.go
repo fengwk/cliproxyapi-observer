@@ -51,11 +51,11 @@
 // 256MiB (max 1GiB) and is tracked by a transactional compressed-byte counter;
 // expired content is removed before the oldest capture is evicted by time.
 // Only allowlisted, redacted headers and recursively redacted JSON are stored.
-// New captures use one gzip envelope; old double-compressed schema2 rows remain
-// readable. Ambiguous same-Key traces hide content; expiration is enforced on
-// reads before cleanup, and PurgeCaptures advances a generation so already
-// queued writes cannot resurrect cleared content. Cleanup/Purge never touch
-// metadata, rollups, costs, quotas or the independent Key counters.
+// Captures use one gzip envelope. Ambiguous same-Key traces hide content;
+// expiration is enforced on reads before cleanup, and PurgeCaptures advances a
+// generation so already queued writes cannot resurrect cleared content.
+// Cleanup/Purge never touch metadata, rollups, costs, quotas or the independent
+// Key counters.
 //
 // DeleteKey writes a terminal tombstone, clears the authentication hash and
 // the stored plaintext credential, and disables the Key in one transaction.
@@ -66,14 +66,11 @@
 // Generated secrets are sk- plus 48 unbiased alphanumeric characters; internal
 // IDs remain 64 lowercase hex and are never substituted for a missing secret.
 //
-// Schema stays 2 and observer_features=2 marks additively persisted plaintext
-// Key material (feature 1 marked the capture/state buckets). A higher feature
-// version is rejected from a read-only preflight before opening a writable
-// handle, so older binaries that support only feature 1 cannot overwrite the
-// new field. Legacy feature-1/hash-only rows stay authenticatable with an empty
-// Secret and are not rewritten with a guessed credential. Other legacy settings
-// inherit the former boolean mode and raw retention; the FIFO index and TTL
-// state are rebuilt idempotently without rewriting or clearing old content.
+// Schema is 3 and observer_features=3 marks the current clean-slate database,
+// including persisted plaintext Key material and pricing/accounting records.
+// A nonempty database without these exact markers, including schema2 and
+// earlier, is rejected before a writable open. There is no migration, dual-read,
+// backfill or automatic repricing; old databases are never rewritten.
 //
 // Lists expose zero effective rolling usage for expired windows without changing
 // anchors. Existing reset timestamps remain in the past so the UI can explain

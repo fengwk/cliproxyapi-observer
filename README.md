@@ -1,10 +1,10 @@
-# Observer v0.9.3
+# Observer v1.0.0
 
 认证采用最小侵入的非独占共存：CPA 凭据保留原生行为，Observer 仅管理自己支持的
 调用，不是全路由安全网关。范围见 [认证与模型权限](docs/model-policy.md)。
 
 CLIProxyAPI（CPA）独立原生插件，稳定 ID `cliproxyapi-observer`。提供**专属客户端 Key
-认证、美元额度、固定成本记账与请求日志**，不修改 CPA 核心、请求正文/头、上游选择、
+认证、美元额度、可解释用量成本记账与请求日志**，不修改 CPA 核心、请求正文/头、上游选择、
 模型路由、重试或会话。最低 CPA **v8.0.30 / 插件 schema 6**，SDK 锁定 v8.0.30；
 更高 v8 稳定版由 CI 验证，不承诺未验证版本或 v9 兼容。
 
@@ -15,7 +15,8 @@ CLIProxyAPI（CPA）独立原生插件，稳定 ID `cliproxyapi-observer`。提�
 旧库只存哈希的密钥无法还原明文，重新生成后才可在列表查看；不会拿内部 ID 冒充。
 升级前请备份，安排停流维护；发布不会自动修改生产配置或删除旧数据库。
 当前能力、API、SDK 限制和安全升级/回退步骤见 [重构说明](docs/reconstruction.md)。
-本版搜索焦点修复见 [v0.9.3 发布说明](docs/release-notes-v0.9.3.md)；
+本版定价、账本与 schema 不兼容变更见 [v1.0.0 发布说明](docs/release-notes-v1.0.0.md)；
+此前搜索焦点修复见 [v0.9.3 发布说明](docs/release-notes-v0.9.3.md)；
 请求调试、显示与自定义 provider 用量修复见 [v0.9.2 发布说明](docs/release-notes-v0.9.2.md)；
 Key 名称样式修正见 [v0.9.1 发布说明](docs/release-notes-v0.9.1.md)；
 明文 Key 升级与认证边界见 [v0.9.0 发布说明](docs/release-notes-v0.9.0.md)。
@@ -241,8 +242,10 @@ CHROME_BIN=/usr/bin/google-chrome-stable make browser
 # 可指定 BROWSER_REPORT_DIR 保存 report.json / summary.txt / screenshots
 bash scripts/build-cpa-host.sh v8.0.30 /absolute/temp/cli-proxy-api
 CPA_BINARY=/absolute/path/to/cli-proxy-api make integration
-# 原生宿主浏览器验收
+# 原生宿主浏览器验收；官方 Management Center v1.26.5 shell 需从固定地址下载并核对
+# SHA-256 57558cd023475674634a114824b014d3e5ac161f6f3791e3d86b6adab962a700
 OBSERVER_BROWSER=1 CHROME_BIN=/usr/bin/google-chrome-stable \
+  CPA_MANAGEMENT_HTML=/absolute/temp/management.html \
   CPA_TEST_ARTIFACTS=/absolute/temp/native-report \
   CPA_BINARY=/absolute/path/to/cli-proxy-api make integration
 bash scripts/test-automerge.sh
@@ -261,7 +264,7 @@ python3 scripts/test_publish_release.py
 浏览器入口见 [现有说明](internal/web/browser/README.md)，使用本地假数据和实际 Chrome，
 CI 上传报告及截图。`make build` 验证本机 c-shared；发布矩阵仍构建三个平台。
 版本通过 `internal/plugin.Version` ldflags 注入，正式版本来自 tag，开发构建为
-`0.9.3-dev+<commit>`，不取 SDK 版本。
+`1.0.0-dev+<commit>`，不取 SDK 版本。
 
 现有依赖维护策略保留：仅白名单 Go/官方 Actions 纯版本升级可经完整 CI 后自动合并，
 普通功能合并不会触发自动发版；不可变发布器校验源码、三个平台归档与校验和，

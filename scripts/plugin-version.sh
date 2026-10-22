@@ -10,7 +10,7 @@
 # plugin version are independent contracts.
 set -euo pipefail
 
-default_version="0.9.3"
+default_version="1.0.0"
 
 version="${PLUGIN_VERSION:-}"
 if [[ -z "$version" ]]; then

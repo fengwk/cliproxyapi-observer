@@ -4,7 +4,7 @@
     {
       "id": "cliproxyapi-observer",
       "name": "Observer",
-      "description": "Exclusive client Key management, USD quotas, fixed usage pricing and private request logs for CLIProxyAPI.",
+      "description": "Nonexclusive client Key management, USD quotas, explainable usage pricing and private request logs for CLIProxyAPI.",
       "author": "fengwk",
       "repository": "https://github.com/fengwk/cliproxyapi-observer",
       "license": "MIT",
