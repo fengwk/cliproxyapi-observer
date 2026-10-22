@@ -306,7 +306,7 @@ func (m *Manager) dispatchManagementRoute(req managementRequest, route string) p
 		if !requireMethod(req.Method, http.MethodGet) {
 			return methodNotAllowedResponse()
 		}
-		return m.serveRequests(req.Query)
+		return m.serveRequests(req.Query, req.HostCallbackID)
 
 	case "/requests/detail":
 		if !requireMethod(req.Method, http.MethodGet) {
@@ -316,7 +316,7 @@ func (m *Manager) dispatchManagementRoute(req managementRequest, route string) p
 		if !ok {
 			return invalidQueryResponse()
 		}
-		return m.serveRequestDetail(id)
+		return m.serveRequestDetail(id, req.HostCallbackID)
 
 	case "/requests/view":
 		if !requireMethod(req.Method, http.MethodGet) {
@@ -646,7 +646,7 @@ func (m *Manager) serveRecoverKey(id string, body []byte) pluginapi.ManagementRe
 	return jsonResponse(http.StatusOK, key)
 }
 
-func (m *Manager) serveRequests(values url.Values) pluginapi.ManagementResponse {
+func (m *Manager) serveRequests(values url.Values, callbackID string) pluginapi.ManagementResponse {
 	query, err := m.parseQuery(values)
 	if err != nil {
 		return invalidQueryResponse()
@@ -656,16 +656,20 @@ func (m *Manager) serveRequests(values url.Values) pluginapi.ManagementResponse 
 		if err != nil {
 			return storeFailureResponse(err)
 		}
+		m.projectAccountLabels(page.Items, nil, callbackID)
 		return jsonResponse(http.StatusOK, page)
 	})
 }
 
-func (m *Manager) serveRequestDetail(id string) pluginapi.ManagementResponse {
+func (m *Manager) serveRequestDetail(id string, callbackID string) pluginapi.ManagementResponse {
 	return m.withStore(func(store *engine.Store) pluginapi.ManagementResponse {
 		detail, err := store.Detail(id)
 		if err != nil {
 			return storeFailureResponse(err)
 		}
+		records := []engine.Record{detail.Record}
+		m.projectAccountLabels(records, nil, callbackID)
+		detail.Record = records[0]
 		return jsonResponse(http.StatusOK, detail)
 	})
 }

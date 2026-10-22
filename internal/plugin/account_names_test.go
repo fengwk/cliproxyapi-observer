@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fengwk/cliproxyapi-observer/internal/engine"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -31,10 +33,14 @@ func accountMetadataPayload(t *testing.T, files ...map[string]any) []byte {
 }
 
 // The management projection consumes only the host's read-only metadata list,
-// applies it only to account groups/auth_index facets, and leaves aggregates,
+// applies it to response records/account groups/auth_index facets, and leaves aggregates,
 // record history, identities and pagination untouched.
 func TestAccountMetadataProjectionAndFacetSearch(t *testing.T) {
-	m := liveManager(t)
+	m := NewManager(nil)
+	now := time.Date(2026, time.October, 22, 12, 0, 0, 0, time.UTC)
+	m.now = func() time.Time { return now }
+	call(t, m, "plugin.register", lifecycleRequest{[]byte("db: " + filepath.Join(t.TempDir(), "observer.db")), 6})
+	t.Cleanup(func() { call(t, m, "plugin.shutdown", nil) })
 	key, _, err := m.store.CreateKey(engine.KeySpec{Enabled: true, Label: "Client"})
 	if err != nil {
 		t.Fatal(err)
@@ -49,6 +55,7 @@ func TestAccountMetadataProjectionAndFacetSearch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	now = now.Add(time.Second)
 	date := at.Format("2006-01-02")
 	baseQuery := url.Values{"from_date": {date}, "to_date": {date}, "view": {"account"}}
 
@@ -72,7 +79,7 @@ func TestAccountMetadataProjectionAndFacetSearch(t *testing.T) {
 		calls++
 		callbackIDs = append(callbackIDs, callbackID)
 		return accountMetadataPayload(t,
-			map[string]any{"auth_index": "auth-a", "name": "Alpha File", "label": "Alpha Label", "path": "/not-stored"},
+			map[string]any{"auth_index": "auth-a", "name": "Alpha File", "label": "Alpha Label", "path": "/not-stored", "token": "host-secret-not-returned"},
 			map[string]any{"auth_index": "auth-b", "name": "", "label": "Beta Label"},
 			map[string]any{"auth_index": "auth-missing", "name": "Unused Account"},
 		)
@@ -96,6 +103,80 @@ func TestAccountMetadataProjectionAndFacetSearch(t *testing.T) {
 		t.Fatalf("account groups = %+v", account.Groups)
 	}
 	wantLabels := map[string]string{"auth-a": "Alpha File", "auth-b": "Beta Label"}
+	// Each read surface must project names once, without changing any other
+	// response field or retaining host metadata in the accounting ledger.
+	for _, route := range []string{"/requests", "/requests/view", "/requests/detail"} {
+		query := url.Values{}
+		switch route {
+		case "/requests/view":
+			query = url.Values{"from_date": {date}, "to_date": {date}, "view": {"records"}}
+		case "/requests/detail":
+			query.Set("id", "request-auth-a")
+		}
+		before := dispatchCallbackForTest(t, m, http.MethodGet, managementBasePath+route, query, "")
+		calls = 0
+		after := dispatchCallbackForTest(t, m, http.MethodGet, managementBasePath+route, query, "records-callback")
+		if before.StatusCode != http.StatusOK || after.StatusCode != http.StatusOK || calls != 1 {
+			t.Fatalf("%s projection status/calls: %d %d %d: %s", route, before.StatusCode, after.StatusCode, calls, after.Body)
+		}
+		var original, projected map[string]any
+		if json.Unmarshal(before.Body, &original) != nil || json.Unmarshal(after.Body, &projected) != nil {
+			t.Fatal("invalid response JSON")
+		}
+		var rows []any
+		switch route {
+		case "/requests":
+			rows = projected["items"].([]any)
+		case "/requests/view":
+			rows = projected["records"].([]any)
+		default:
+			rows = []any{projected["record"]}
+		}
+		if len(rows) == 0 {
+			t.Fatalf("%s returned no records", route)
+		}
+		for _, row := range rows {
+			record := row.(map[string]any)
+			if record["account_name"] != wantLabels[record["auth_index"].(string)] {
+				t.Fatalf("%s name = %v", route, record)
+			}
+			delete(record, "account_name")
+		}
+		if !reflect.DeepEqual(original, projected) || strings.Contains(string(after.Body), "/not-stored") || strings.Contains(string(after.Body), "host-secret-not-returned") {
+			t.Fatalf("%s changed non-name fields or leaked metadata", route)
+		}
+	}
+	ledger, err := m.store.Requests(engine.Query{From: at.Add(-time.Second), To: now})
+	if err != nil || len(ledger.Items) != 2 {
+		t.Fatalf("ledger read: %+v %v", ledger, err)
+	}
+	for _, record := range ledger.Items {
+		if record.AccountName != "" {
+			t.Fatalf("ledger retained account name: %+v", record)
+		}
+	}
+	// Unavailable metadata omits the optional name rather than returning an ID
+	// or host error; empty pages must not invoke the host at all.
+	lookup := m.accountMetadata
+	m.SetAccountMetadataLookup(func(string) []byte { return []byte(`{"ok":false}`) })
+	for _, route := range []string{"/requests", "/requests/view", "/requests/detail"} {
+		query := url.Values{}
+		if route == "/requests/detail" {
+			query.Set("id", "request-auth-a")
+		}
+		before := dispatchCallbackForTest(t, m, http.MethodGet, managementBasePath+route, query, "")
+		after := dispatchCallbackForTest(t, m, http.MethodGet, managementBasePath+route, query, "bad-metadata")
+		if after.StatusCode != http.StatusOK || string(before.Body) != string(after.Body) || strings.Contains(string(after.Body), "account_name") {
+			t.Fatalf("%s failed metadata fallback: %s", route, after.Body)
+		}
+	}
+	m.SetAccountMetadataLookup(lookup)
+	calls = 0
+	empty := dispatchCallbackForTest(t, m, http.MethodGet, managementBasePath+"/requests/view",
+		url.Values{"view": {"records"}, "auth_index": {"absent"}}, "empty-page")
+	if empty.StatusCode != http.StatusOK || calls != 0 {
+		t.Fatalf("empty page lookup: %d calls=%d", empty.StatusCode, calls)
+	}
 	for _, group := range account.Groups {
 		if group.Key != group.AuthIndex || wantLabels[group.AuthIndex] != group.Label {
 			t.Fatalf("account group identity/label = %+v", group)
@@ -150,11 +231,15 @@ func TestAccountMetadataProjectionAndFacetSearch(t *testing.T) {
 		)
 	})
 
-	// Other views and dimensions must not consult the host metadata bridge.
+	// Non-account groups and dimensions must not consult the metadata bridge.
 	calls = 0
-	providerQuery := url.Values{"from_date": {date}, "to_date": {date}, "view": {"provider"}}
-	if got := dispatchCallbackForTest(t, m, http.MethodGet, managementBasePath+"/requests/view", providerQuery, "callback-2"); got.StatusCode != http.StatusOK {
-		t.Fatalf("provider view: %d %s", got.StatusCode, got.Body)
+	for _, dimension := range []string{"provider", "model", "key_model"} {
+		groupQuery := url.Values{"from_date": {date}, "to_date": {date}, "view": {dimension}}
+		before := dispatchCallbackForTest(t, m, http.MethodGet, managementBasePath+"/requests/view", groupQuery, "")
+		got := dispatchCallbackForTest(t, m, http.MethodGet, managementBasePath+"/requests/view", groupQuery, "callback-2")
+		if got.StatusCode != http.StatusOK || string(got.Body) != string(before.Body) {
+			t.Fatalf("%s view changed: %d %s", dimension, got.StatusCode, got.Body)
+		}
 	}
 	if got := dispatchCallbackForTest(t, m, http.MethodGet, managementBasePath+"/requests/facets", url.Values{"field": {"model"}}, "callback-3"); got.StatusCode != http.StatusOK {
 		t.Fatalf("model facet: %d %s", got.StatusCode, got.Body)

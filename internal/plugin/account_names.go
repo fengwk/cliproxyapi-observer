@@ -107,16 +107,24 @@ func (m *Manager) accountLabelsLocked(callbackID string) map[string]string {
 	return parseAccountLabels(m.accountMetadata(callbackID))
 }
 
-// projectAccountLabels changes only display labels for account groups. Group
-// key, AuthIndex, aggregates, ordering and pagination remain engine-owned and
-// are never rewritten from host metadata.
-func projectAccountLabels(view *engine.RequestView, labels map[string]string) {
-	if view == nil || len(labels) == 0 {
+// projectAccountLabels enriches returned record copies and only account groups.
+// Callers hold the lifecycle read lock and must not pass other group dimensions.
+// Identity, accounting, ordering and pagination remain engine-owned.
+func (m *Manager) projectAccountLabels(records []engine.Record, accountGroups []engine.Group, callbackID string) {
+	needsNames := len(accountGroups) > 0
+	for _, record := range records {
+		needsNames = needsNames || record.AuthIndex != ""
+	}
+	if !needsNames {
 		return
 	}
-	for i := range view.Groups {
-		if name := labels[view.Groups[i].AuthIndex]; name != "" {
-			view.Groups[i].Label = name
+	labels := m.accountLabelsLocked(callbackID)
+	for i := range records {
+		records[i].AccountName = labels[records[i].AuthIndex]
+	}
+	for i := range accountGroups {
+		if name := labels[accountGroups[i].AuthIndex]; name != "" {
+			accountGroups[i].Label = name
 		}
 	}
 }

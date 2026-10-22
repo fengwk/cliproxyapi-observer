@@ -30,15 +30,18 @@ func (m *Manager) serveRequestView(values url.Values, callbackID string) plugina
 	}
 	return m.withStore(func(store *engine.Store) pluginapi.ManagementResponse {
 		viewName := values.Get("view")
+		if viewName == "records" {
+			viewName = "requests"
+		}
 		view, err := store.RequestView(engine.ViewQuery{Query: query, FromDate: values.Get("from_date"), ToDate: values.Get("to_date"), Timezone: values.Get("timezone"), View: viewName})
 		if err != nil {
 			return storeFailureResponse(err)
 		}
+		var accountGroups []engine.Group
 		if viewName == "account" {
-			// The read lock is already held by withStore for the complete query
-			// and optional host metadata lookup.
-			projectAccountLabels(&view, m.accountLabelsLocked(callbackID))
+			accountGroups = view.Groups
 		}
+		m.projectAccountLabels(view.Records, accountGroups, callbackID)
 		return jsonResponse(http.StatusOK, view)
 	})
 }

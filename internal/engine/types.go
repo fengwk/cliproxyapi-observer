@@ -191,6 +191,8 @@ type Record struct {
 	CostMicroUSD        int64                 `json:"cost_micro_usd"`
 	PriceSource         string                `json:"price_source"`
 	AccountingQuality   string                `json:"accounting_quality"`
+	// AccountName is a response-only management projection; accounting never persists it.
+	AccountName string `json:"account_name,omitempty"`
 }
 type RequestPage struct {
 	Items    []Record `json:"items"`
