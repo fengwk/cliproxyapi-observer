@@ -109,7 +109,7 @@ func TestAccountMetadataProjectionAndFacetSearch(t *testing.T) {
 		query := url.Values{}
 		switch route {
 		case "/requests/view":
-			query = url.Values{"from_date": {date}, "to_date": {date}, "view": {"records"}}
+			query = url.Values{"from_date": {date}, "to_date": {date}, "view": {"requests"}}
 		case "/requests/detail":
 			query.Set("id", "request-auth-a")
 		}
@@ -173,9 +173,16 @@ func TestAccountMetadataProjectionAndFacetSearch(t *testing.T) {
 	m.SetAccountMetadataLookup(lookup)
 	calls = 0
 	empty := dispatchCallbackForTest(t, m, http.MethodGet, managementBasePath+"/requests/view",
-		url.Values{"view": {"records"}, "auth_index": {"absent"}}, "empty-page")
+		url.Values{"view": {"requests"}, "auth_index": {"absent"}}, "empty-page")
 	if empty.StatusCode != http.StatusOK || calls != 0 {
 		t.Fatalf("empty page lookup: %d calls=%d", empty.StatusCode, calls)
+	}
+	// Records is a response field, not a wire view value; reject the alias
+	// without consulting host metadata to preserve the existing API surface.
+	invalid := dispatchCallbackForTest(t, m, http.MethodGet, managementBasePath+"/requests/view",
+		url.Values{"view": {"records"}}, "invalid-view")
+	if invalid.StatusCode != http.StatusBadRequest || calls != 0 {
+		t.Fatalf("records alias accepted: %d calls=%d", invalid.StatusCode, calls)
 	}
 	for _, group := range account.Groups {
 		if group.Key != group.AuthIndex || wantLabels[group.AuthIndex] != group.Label {
