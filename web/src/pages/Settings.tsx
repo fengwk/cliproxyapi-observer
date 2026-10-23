@@ -32,6 +32,7 @@ import {
   formatReasoningDisplay,
   sourceLabel,
   pricingSourceLabel,
+  pricingIssuesLabel,
   validateGeneralSettings,
   definitionToDraft,
   emptyDefinitionDraft,
@@ -677,10 +678,12 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
       const matchesStatus =
         previewStatus === 'all' ||
         (previewStatus === 'matched'
-          ? item.source === 'manual' || item.source === 'auto'
+          ? item.pricing_supported !== false && (item.source === 'manual' || item.source === 'auto')
           : previewStatus === 'ambiguous'
             ? ambiguous
-            : item.source === 'zero');
+            : previewStatus === 'unsupported'
+              ? item.pricing_supported === false
+              : item.source === 'zero' && item.pricing_supported !== false);
       return (
         matchesStatus &&
         (item.model.toLowerCase().includes(lower) ||
@@ -1095,7 +1098,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
 
           <div className="settings-table-filter-bar">
             <Select aria-label="价格匹配状态" value={previewStatus}
-              options={[{ value: 'all', label: '全部状态' }, { value: 'matched', label: '已匹配' }, { value: 'ambiguous', label: '存在候选 / 歧义' }, { value: 'zero', label: '零价格' }]}
+              options={[{ value: 'all', label: '全部状态' }, { value: 'matched', label: '已匹配' }, { value: 'ambiguous', label: '存在候选 / 歧义' }, { value: 'zero', label: '零价格' }, { value: 'unsupported', label: '价格不受支持' }]}
               onChange={value => { setPreviewStatus(value); setPreviewPage(1); }} />
             <div className="settings-search-input">
               <Input
@@ -1151,26 +1154,27 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
                             </span>
                           )}
                         </td>
-                        <td>{formatRateDisplay(item.rates.input)}</td>
-                        <td>{formatRateDisplay(item.rates.output)}</td>
+                        <td>{item.pricing_supported === false ? '—' : formatRateDisplay(item.rates.input)}</td>
+                        <td>{item.pricing_supported === false ? '—' : formatRateDisplay(item.rates.output)}</td>
                         <td>
-                          {formatRateDisplay(item.rates.cache_read)} / {formatRateDisplay(item.rates.cache_write)}
+                          {item.pricing_supported === false ? '—' :
+                            `${formatRateDisplay(item.rates.cache_read)} / ${formatRateDisplay(item.rates.cache_write)}`}
                         </td>
-                        <td>{formatReasoningDisplay(item.rates.reasoning)}</td>
+                        <td>{item.pricing_supported === false ? '—' : formatReasoningDisplay(item.rates.reasoning)}</td>
                         <td>
                           <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                            <Badge tone="neutral">{sourceLabel(item.source)}</Badge>
+                            <Badge tone={item.pricing_supported === false ? 'warning' : 'neutral'}>
+                              {item.pricing_supported === false ? '价格无法解析' : sourceLabel(item.source)}
+                            </Badge>
                             {ruleCount > 0 && <Badge tone="neutral">{ruleCount} 条条件规则</Badge>}
-                            {item.pricing_supported === false && (
-                              <Badge tone="warning">价格规则不受支持</Badge>
-                            )}
                             {(item.candidates?.length ?? 0) > 1 && (
                               <Badge tone="warning">候选 {item.candidates?.length}</Badge>
                             )}
                           </div>
-                          <div className="settings-note">{item.reason || item.match || '—'}</div>
+                          <div className="settings-note">{item.pricing_supported === false
+                            ? '目录价格未应用；请手工配置适用价格' : item.reason || item.match || '—'}</div>
                           {item.support_issues?.length ? (
-                            <div className="settings-note">适配问题：{item.support_issues.join('；')}</div>
+                            <div className="settings-note">{pricingIssuesLabel(item.support_issues)}</div>
                           ) : null}
                           {item.catalog_provider && <div className="settings-note">{item.catalog_provider} / {item.catalog_model}</div>}
                         </td>
@@ -1232,12 +1236,16 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
           {(mappingItem.candidates ?? []).map(candidate => <div className="settings-row" key={`${candidate.provider}/${candidate.model}`}>
             <div>
               <strong>{candidate.provider} / {candidate.model}</strong>
-              <div className="settings-note">
-                输入 {formatRateDisplay(candidate.definition.base.input)} · 输出 {formatRateDisplay(candidate.definition.base.output)} · 思考 {formatReasoningDisplay(candidate.definition.base.reasoning)}
-              </div>
-              {candidate.pricing_supported === false && (
-                <div className="settings-note">不可导入：{candidate.support_issues?.join('；') || '价格规则不受支持'}</div>
+              {candidate.pricing_supported === false ? (
+                <div className="settings-note">价格无法解析，不能导入此候选报价；请手工配置适用价格。</div>
+              ) : (
+                <div className="settings-note">
+                  输入 {formatRateDisplay(candidate.definition.base.input)} · 输出 {formatRateDisplay(candidate.definition.base.output)} · 思考 {formatReasoningDisplay(candidate.definition.base.reasoning)}
+                </div>
               )}
+              {candidate.support_issues?.length ? (
+                <div className="settings-note">{pricingIssuesLabel(candidate.support_issues)}</div>
+              ) : null}
             </div>
             <Button disabled={isMutationBusy || candidate.pricing_supported === false} onClick={() => {
               setMappingDrafts(prev => [...prev.filter(v => v.model !== mappingItem.model), { model: mappingItem.model, provider: candidate.provider, catalog_model: candidate.model }]);

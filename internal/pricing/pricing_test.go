@@ -440,17 +440,17 @@ func TestV2ConditionParseBounds(t *testing.T) {
 	for i := 0; i < maxConditionDepth; i++ {
 		valid = `{"not":` + valid + `}`
 	}
-	if _, ok := parseV2Condition([]byte(valid)); !ok {
+	if _, _, ok := parseV2Condition([]byte(valid)); !ok {
 		t.Fatal("condition at depth limit rejected")
 	}
 	tooDeep := `{"not":` + valid + `}`
-	if _, ok := parseV2Condition([]byte(tooDeep)); ok {
+	if _, _, ok := parseV2Condition([]byte(tooDeep)); ok {
 		t.Fatal("condition beyond depth limit accepted")
 	}
 
 	branch := `{"all":[` + strings.Repeat(`{"context":{"gt":1}},`, 15) + `{"context":{"gt":1}}]}`
 	nodeHeavy := `{"all":[` + strings.Repeat(branch+`,`, 3) + branch + `]}`
-	if _, ok := parseV2Condition([]byte(nodeHeavy)); ok {
+	if _, _, ok := parseV2Condition([]byte(nodeHeavy)); ok {
 		t.Fatal("condition beyond node limit accepted")
 	}
 }

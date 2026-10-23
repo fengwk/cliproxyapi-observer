@@ -23,6 +23,7 @@ import {
   parseManualPrices,
   parseTtlSeconds,
   pricingSourceLabel,
+  pricingIssuesLabel,
   rateSetToDraft,
   roundTripDefinition,
   sourceLabel,
@@ -92,6 +93,15 @@ describe('Settings.helpers', () => {
       expect(validTimeRange('00:00-24:00')).toBe(true);
       expect(validTimeRange('08:00-24:00')).toBe(true);
       expect(validTimeRange('8:00-18:00')).toBe(false);
+    });
+
+    // Excluded fees remain visible on usable prices; rejected regional rules
+    // explain the missing fact rather than leaking a generic machine code.
+    it('explains catalog exclusions and regional pricing failures', () => {
+      expect(pricingIssuesLabel(['web_search_cost_not_included'])).toBe('网页搜索附加费用未计入 Token 价格');
+      expect(pricingIssuesLabel(['unsupported_condition', 'unsupported_condition_field:region']))
+        .toBe('缺少上游实际地区，无法判定地区价格规则；请手工配置适用价格');
+      expect(pricingIssuesLabel(['future_issue'])).toBe('目录适配诊断：future_issue');
     });
   });
 

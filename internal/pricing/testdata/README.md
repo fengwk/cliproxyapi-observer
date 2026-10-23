@@ -22,3 +22,10 @@ needed by the adapter regression tests: `cost.text.input/output`, field-wise
 and a `unit: "character"` price that must be rejected rather than treated as a
 per-token price. Provider/model names are retained only for this small local
 fixture; tests never contact the network.
+
+`models.dev.v2.gemini.json` retains the complete `cost` objects and canonical IDs
+of `google/gemini-3.8-flash` and `google-vertex/gemini-3.8-flash` from the v2
+catalog inspected on 2026-10-23 (catalog SHA-256
+`ed982576921d90863842ff0fda7f611a6a792d6cc21b596b926d7b38f7dc9bff`).
+It covers excluded `web_search` fees, scalar `factor.text`, tier/date multipliers,
+and the Vertex region condition that cannot safely be evaluated.

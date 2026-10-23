@@ -10,7 +10,7 @@ const GitHubRepository = "https://github.com/fengwk/cliproxyapi-observer"
 const AuthIdentifier = "observer"
 const AccessProvider = "plugin:" + PluginID + ":" + AuthIdentifier
 
-var Version = "1.0.1"
+var Version = "1.0.2"
 
 func Metadata() pluginapi.Metadata {
 	return pluginapi.Metadata{Name: PluginName, Version: Version, Author: "fengwk", GitHubRepository: GitHubRepository, ConfigFields: []pluginapi.ConfigField{

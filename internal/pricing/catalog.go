@@ -366,7 +366,7 @@ func parseV1Catalog(body []byte) ([]entry, error) {
 // V2 adapter
 
 var (
-	v2CostKeys       = map[string]bool{"text": true, "audio": true, "image": true, "video": true, "multipliers": true}
+	v2CostKeys       = map[string]bool{"text": true, "audio": true, "image": true, "video": true, "web_search": true, "multipliers": true}
 	v2TextKeys       = map[string]bool{"input": true, "output": true}
 	v2InputKeys      = map[string]bool{"price": true, "cache": true, "overrides": true, "unit": true}
 	v2OutputKeys     = map[string]bool{"price": true, "reasoning": true, "overrides": true}
@@ -390,6 +390,11 @@ func parseV2Definition(raw json.RawMessage) (PricingDefinition, []string, bool) 
 		if value, present := fields[key]; present && !jsonNull(value) {
 			issues = append(issues, "non_text_cost_ignored")
 		}
+	}
+	// Search calls are not token usage. Keep the complete token price while
+	// making the excluded ancillary fee explicit to management clients.
+	if value, present := fields["web_search"]; present && !jsonNull(value) {
+		issues = append(issues, "web_search_cost_not_included")
 	}
 	textRaw, hasText := fields["text"]
 	if !hasText || jsonNull(textRaw) {
@@ -612,9 +617,10 @@ func parseV2InputOverrides(raw json.RawMessage) ([]Override, []string, bool) {
 		when := Condition{}
 		if rawWhen, exists := fields["when"]; exists {
 			var supported bool
-			when, supported = parseV2Condition(rawWhen)
+			var conditionIssues []string
+			when, conditionIssues, supported = parseV2Condition(rawWhen)
 			if !supported {
-				return nil, []string{"unsupported_condition"}, false
+				return nil, conditionIssues, false
 			}
 		}
 		patch := RatePatch{}
@@ -696,9 +702,10 @@ func parseV2OutputOverrides(raw json.RawMessage) ([]Override, []string, bool) {
 		when := Condition{}
 		if rawWhen, exists := fields["when"]; exists {
 			var supported bool
-			when, supported = parseV2Condition(rawWhen)
+			var conditionIssues []string
+			when, conditionIssues, supported = parseV2Condition(rawWhen)
 			if !supported {
-				return nil, []string{"unsupported_condition"}, false
+				return nil, conditionIssues, false
 			}
 		}
 		patch := RatePatch{}
@@ -739,9 +746,10 @@ func parseV2Multipliers(raw json.RawMessage) ([]Multiplier, []string, bool) {
 		when := Condition{}
 		if rawWhen, exists := fields["when"]; exists {
 			var supported bool
-			when, supported = parseV2Condition(rawWhen)
+			var conditionIssues []string
+			when, conditionIssues, supported = parseV2Condition(rawWhen)
 			if !supported {
-				return nil, []string{"unsupported_condition"}, false
+				return nil, append(issues, conditionIssues...), false
 			}
 		}
 		factors, factorIssues, supported := parseV2Factor(fields["factor"])
@@ -772,6 +780,10 @@ func parseV2Factor(raw json.RawMessage) (FactorSet, []string, bool) {
 	textRaw, ok := fields["text"]
 	if !ok || jsonNull(textRaw) {
 		return FactorSet{}, issues, true
+	}
+	if textRaw[0] != '{' {
+		factors, factorIssues, supported := scalarFactor(textRaw)
+		return factors, append(issues, factorIssues...), supported
 	}
 	textFields, ok := strictKeys(textRaw, map[string]bool{"input": true, "output": true})
 	if !ok {
@@ -879,13 +891,22 @@ func factorString(raw json.RawMessage) (string, bool) {
 	return s, true
 }
 
-func parseV2Condition(raw json.RawMessage) (Condition, bool) {
-	return parseV2ConditionDepth(raw, 0, new(int))
+func parseV2Condition(raw json.RawMessage) (Condition, []string, bool) {
+	var unsupportedField string
+	cond, supported := parseV2ConditionDepth(raw, 0, new(int), &unsupportedField)
+	if supported {
+		return cond, nil, true
+	}
+	issues := []string{"unsupported_condition"}
+	if unsupportedField != "" {
+		issues = append(issues, "unsupported_condition_field:"+unsupportedField)
+	}
+	return Condition{}, issues, false
 }
 
 // parseV2ConditionDepth bounds recursion before decoding a condition so a
 // hostile 32 MiB catalog cannot exhaust the stack before validCondition runs.
-func parseV2ConditionDepth(raw json.RawMessage, depth int, nodes *int) (Condition, bool) {
+func parseV2ConditionDepth(raw json.RawMessage, depth int, nodes *int, unsupportedField *string) (Condition, bool) {
 	*nodes++
 	if depth > maxConditionDepth || *nodes > maxConditionNodes {
 		return Condition{}, false
@@ -999,21 +1020,21 @@ func parseV2ConditionDepth(raw json.RawMessage, depth int, nodes *int) (Conditio
 		cond.Time = &TimeCondition{Start: start, End: end, Timezone: "UTC", Weekdays: weekdays}
 	}
 	if rawAll, ok := fields["all"]; ok {
-		children, ok := parseConditionList(rawAll, depth+1, nodes)
+		children, ok := parseConditionList(rawAll, depth+1, nodes, unsupportedField)
 		if !ok {
 			return Condition{}, false
 		}
 		cond.All = children
 	}
 	if rawAny, ok := fields["any"]; ok {
-		children, ok := parseConditionList(rawAny, depth+1, nodes)
+		children, ok := parseConditionList(rawAny, depth+1, nodes, unsupportedField)
 		if !ok {
 			return Condition{}, false
 		}
 		cond.Any = children
 	}
 	if rawNot, ok := fields["not"]; ok {
-		child, ok := parseV2ConditionDepth(rawNot, depth+1, nodes)
+		child, ok := parseV2ConditionDepth(rawNot, depth+1, nodes, unsupportedField)
 		if !ok {
 			return Condition{}, false
 		}
@@ -1023,6 +1044,7 @@ func parseV2ConditionDepth(raw json.RawMessage, depth int, nodes *int) (Conditio
 	// fact set. Treating them as always-true would silently change the price.
 	for _, key := range []string{"thinking", "region", "holiday", "utc_dates"} {
 		if _, present := fields[key]; present {
+			*unsupportedField = key
 			return Condition{}, false
 		}
 	}
@@ -1051,14 +1073,14 @@ func stringListCondition(fields map[string]json.RawMessage) ([]string, bool) {
 	return uniqueStrings(out), true
 }
 
-func parseConditionList(raw json.RawMessage, depth int, nodes *int) ([]Condition, bool) {
+func parseConditionList(raw json.RawMessage, depth int, nodes *int, unsupportedField *string) ([]Condition, bool) {
 	var elements []json.RawMessage
 	if json.Unmarshal(raw, &elements) != nil || len(elements) > maxConditionList {
 		return nil, false
 	}
 	out := make([]Condition, 0, len(elements))
 	for _, element := range elements {
-		cond, ok := parseV2ConditionDepth(element, depth, nodes)
+		cond, ok := parseV2ConditionDepth(element, depth, nodes, unsupportedField)
 		if !ok {
 			return nil, false
 		}

@@ -262,6 +262,27 @@ export function pricingSourceLabel(source: PricingSource | string | undefined): 
   return source || '—';
 }
 
+export function pricingIssuesLabel(issues: string[] = []): string {
+  const labels: Record<string, string> = {
+    web_search_cost_not_included: '网页搜索附加费用未计入 Token 价格',
+    non_text_cost_ignored: '音频、图片或视频费用未计入文本 Token 价格',
+    non_text_multiplier_ignored: '非文本费用倍率未计入文本 Token 价格',
+    cache_storage_cost_not_supported: '缓存存储费用未计入 Token 价格',
+    explicit_cache_pricing_not_supported: '显式缓存费用未计入 Token 价格',
+    unsupported_cost_field: '目录包含尚不支持的费用字段，无法完整解析价格',
+    unsupported_condition: '目录包含无法判定的价格条件，不能自动导入',
+    'unsupported_condition_field:region': '缺少上游实际地区，无法判定地区价格规则；请手工配置适用价格',
+    'unsupported_condition_field:thinking': '尚不支持此思考状态价格条件；请手工配置适用价格',
+    'unsupported_condition_field:holiday': '尚不支持此节假日价格条件；请手工配置适用价格',
+    'unsupported_condition_field:utc_dates': '尚不支持此日期列表价格条件；请手工配置适用价格',
+  };
+  return issues
+    .filter(issue => issue !== 'unsupported_condition' ||
+      !issues.some(detail => detail.startsWith('unsupported_condition_field:')))
+    .map(issue => labels[issue] || `目录适配诊断：${issue}`)
+    .join('；');
+}
+
 /**
  * Return user-friendly source label. Zero pricing is a normal amount, not a
  * pending/unpriced state.
