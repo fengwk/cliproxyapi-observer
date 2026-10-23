@@ -37,13 +37,13 @@ const pollOptions: SelectOption[] = [
   { value: '30', label: '每 30 秒刷新' },
 ];
 
-export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: RequestsPageProps) {
+export function RequestsPage({ api, refreshInterval = 5 }: RequestsPageProps) {
   // Preset range selection
   const [preset, setPreset] = useState<PresetRange>('today');
   const [appliedPreset, setAppliedPreset] = useState<PresetRange>('today');
   const appliedPresetRef = useRef(appliedPreset);
   appliedPresetRef.current = appliedPreset;
-  const dirtyRef = useRef(false);
+  const pendingFiltersRef = useRef(false);
 
   // Filter states: draft vs applied
   const [draftFilters, setDraftFilters] = useState<FilterState>(() => {
@@ -163,8 +163,8 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
     };
   }, []);
 
-  // Dirty state tracking (draft vs applied)
-  const isDirty = useMemo(() => {
+  // Filter draft tracking: this is temporary query state, not unsaved configuration.
+  const hasPendingFilters = useMemo(() => {
     return (
       preset !== appliedPreset ||
       draftFilters.from !== appliedFilters.from ||
@@ -176,11 +176,7 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
       draftFilters.status !== appliedFilters.status
     );
   }, [draftFilters, appliedFilters, preset, appliedPreset]);
-  dirtyRef.current = isDirty;
-
-  useEffect(() => {
-    onDirtyChange(isDirty);
-  }, [isDirty, onDirtyChange]);
+  pendingFiltersRef.current = hasPendingFilters;
 
   // Keys Map for fast ID resolution
   const keysMap = useMemo(() => {
@@ -271,7 +267,7 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
           : { ...targetFilters, ...getPresetRange(targetPreset) };
         if (filters.from !== targetFilters.from || filters.to !== targetFilters.to) {
           setAppliedFilters(filters);
-          if (!dirtyRef.current) setDraftFilters(filters);
+          if (!pendingFiltersRef.current) setDraftFilters(filters);
         }
         const queryStr = buildRequestViewParams(
           filters,
@@ -316,11 +312,11 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
 
   // 3. One page-local, nonoverlapping timer
   // Dedicated poll interval (0 disables polling repeats, not initial load)
-  // Auto-refresh is paused when: page > 1, filters dirty, modal open, historical range, or text selected
+  // Auto-refresh is paused when: page > 1, filter drafts are pending, modal open, historical range, or text selected
   const isDynamic = appliedPreset !== 'custom' || isDynamicRange(appliedFilters.to);
   const isPollingPaused =
     page !== 1 ||
-    isDirty ||
+    hasPendingFilters ||
     activeDetailId !== null ||
     !isDynamic ||
     isSelecting || isInteracting;
@@ -598,8 +594,6 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
             <span className="requests-paused-hint">
               {page !== 1
                 ? '分页浏览中，已暂停自动刷新'
-                : isDirty
-                ? '筛选未应用，已暂停自动刷新'
                 : activeDetailId !== null
                 ? '详情查看中，已暂停自动刷新'
                 : !isDynamic
@@ -668,7 +662,6 @@ export function RequestsPage({ api, refreshInterval = 5, onDirtyChange }: Reques
         onDraftChange={setDraftFilters}
         onApply={handleApplyFilters}
         onReset={handleResetFilters}
-        isDirty={isDirty}
         loading={loading && !viewData}
         keyOptions={keyOptions}
         modelOptions={modelOptions}

@@ -9,7 +9,6 @@ export interface RequestsFiltersProps {
   onDraftChange: (next: FilterState) => void;
   onApply: () => void;
   onReset: () => void;
-  isDirty: boolean;
   loading?: boolean;
   keyOptions: SelectOption[];
   modelOptions: SelectOption[];
@@ -31,7 +30,6 @@ export function RequestsFilters({
   onDraftChange,
   onApply,
   onReset,
-  isDirty,
   loading = false,
   keyOptions,
   modelOptions,
@@ -96,11 +94,6 @@ export function RequestsFilters({
           >
             本地时区：{getBrowserTimeZone()}
           </div>
-          {isDirty && (
-            <div className="requests-dirty-badge" role="status">
-              筛选未应用（点击查询或按 Enter 应用）
-            </div>
-          )}
         </div>
 
         {/* Flat inputs row */}

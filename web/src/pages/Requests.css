@@ -121,15 +121,6 @@
   margin-left: auto;
 }
 
-.requests-dirty-badge {
-  font-size: 12px;
-  color: var(--warning-color, #c65746);
-  background: var(--warning-bg, rgba(198, 87, 70, 0.12));
-  border: 1px solid var(--warning-border, rgba(198, 87, 70, 0.35));
-  padding: 2px 8px;
-  border-radius: var(--radius-sm);
-}
-
 .requests-flat-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));

@@ -645,10 +645,11 @@ describe('RequestsPage and RequestsHelpers', () => {
 
   /**
    * Why covered:
-   * Proves that filter edits only update draft, report onDirtyChange(true),
-   * and clicking "查询" applies the draft and queries page 1.
+   * Proves that filter edits only update the draft without reporting unsaved
+   * configuration or showing an apply banner, while Query and the form submit
+   * path used by Enter both apply the conditions and query page 1.
    */
-  it('filter draft vs applied: edits only update draft, submit applies & queries page 1', async () => {
+  it('filter draft vs applied: edits stay local, submit applies & queries page 1', async () => {
     const api = createMockApiClient();
     const onDirtyChange = vi.fn();
 
@@ -664,23 +665,19 @@ describe('RequestsPage and RequestsHelpers', () => {
     const fromInput = screen.getByLabelText('开始日期');
     fireEvent.change(fromInput, { target: { value: '2026-10-01' } });
 
-    // onDirtyChange called with true
-    expect(onDirtyChange).toHaveBeenCalledWith(true);
+    // Pending filters are temporary query state, not an unsaved configuration.
+    expect(onDirtyChange).not.toHaveBeenCalled();
+    expect(screen.queryByText(/筛选未应用/)).not.toBeInTheDocument();
 
     // Did NOT immediately fire query
     expect((api.request as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsBefore);
-
-    // Shows "筛选未应用" banner
-    expect(screen.getByText(/筛选未应用/)).toBeInTheDocument();
 
     // Click "查询" button
     const submitBtn = screen.getByRole('button', { name: '查询' });
     fireEvent.click(submitBtn);
 
-    // After apply, dirty becomes false
-    await waitFor(() => {
-      expect(onDirtyChange).toHaveBeenLastCalledWith(false);
-    });
+    // The filter draft never reports global unsaved state.
+    expect(onDirtyChange).not.toHaveBeenCalled();
 
     // Query was sent with from_date=2026-10-01 and page=1
     await waitFor(() => {
@@ -689,6 +686,23 @@ describe('RequestsPage and RequestsHelpers', () => {
       );
       expect(callsWithFrom.length).toBeGreaterThan(0);
     });
+
+    // Editing again stays local; submitting the form (the Enter path) applies
+    // both dates and still starts at page 1 without marking the page dirty.
+    fireEvent.change(screen.getByLabelText('结束日期'), { target: { value: '2026-10-02' } });
+    expect(onDirtyChange).not.toHaveBeenCalled();
+    expect(screen.queryByText(/筛选未应用/)).not.toBeInTheDocument();
+    fireEvent.submit(within(screen.getByTestId('requests-filters')).getByRole('button', { name: '查询' }).closest('form')!);
+
+    await waitFor(() => {
+      const callsWithRange = (api.request as ReturnType<typeof vi.fn>).mock.calls.filter((call) =>
+        call[0].includes('from_date=2026-10-01')
+        && call[0].includes('to_date=2026-10-02')
+        && call[0].includes('page=1')
+      );
+      expect(callsWithRange.length).toBeGreaterThan(0);
+    });
+    expect(onDirtyChange).not.toHaveBeenCalled();
   });
 
   /**
@@ -1178,10 +1192,14 @@ describe('RequestsPage and RequestsHelpers', () => {
       expect(reads()).toBe(2);
       fireEvent.blur(screen.getByLabelText('开始日期'));
       fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2026-10-01' } });
+      // Pending filters pause polling with a neutral reason, not an apply warning.
+      expect(screen.getByText('自动刷新已暂停')).toBeInTheDocument();
+      expect(screen.queryByText(/筛选未应用/)).not.toBeInTheDocument();
       await advance(10000);
       expect(reads()).toBe(2);
       await act(async () => { fireEvent.click(screen.getByRole('button', { name: '查询' })); });
       expect(reads()).toBe(3);
+      expect(screen.queryByText('自动刷新已暂停')).not.toBeInTheDocument();
       await advance(5000);
       expect(reads()).toBe(4); // resuming did not start a duplicate immediate fetch
       await act(async () => { fireEvent.click(within(screen.getByTestId('record-row-req-001')).getByRole('button', { name: '查看请求详情' })); });
