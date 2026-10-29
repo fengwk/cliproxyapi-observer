@@ -6,6 +6,7 @@
 // directly (no simplified parent shell) and drives it with fake mock data.
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { chromium } = require('../../../web/node_modules/playwright');
@@ -129,12 +130,18 @@ async function main() {
       ];
       if (zone === 'America/New_York') {
         // Stored instant for the second 01:30 on the fall-back day (EST).
-        server.state.keys.push(mock.createKey('key-dst-overlap', 'DST 重复时刻 Key', {
+        const overlapKey = mock.createKey('key-dst-overlap', 'DST 重复时刻 Key', {
           allowed_models: ['gpt-5-codex'],
           max_concurrent: 1,
           active: 0,
           expires_at: DST_SECOND_OCCURRENCE,
-        }));
+        });
+        server.state.keys.push(overlapKey);
+        // A directly inserted enabled fixture needs the same credential state
+        // as other live Keys; a missing hash correctly requires rotation.
+        const secret = mock.SECRET_PREFIX + overlapKey.id;
+        server.state.secrets.set(overlapKey.id, crypto.createHash('sha256').update(secret).digest('hex'));
+        server.state.secretValues.set(overlapKey.id, secret);
       }
 
       const context = await browser.newContext({
@@ -287,7 +294,9 @@ async function main() {
           const overlapPutPromise = page.waitForResponse(res =>
             res.url().includes('/keys?id=key-dst-overlap') && res.request().method() === 'PUT');
           await dialog.getByRole('button', { name: '保存修改', exact: true }).click();
-          await overlapPutPromise;
+          const overlapResponse = await overlapPutPromise;
+          check('America/New_York: enabled second-occurrence Key saves successfully',
+            overlapResponse.status() === 200, `HTTP ${overlapResponse.status()}`);
           await dialog.waitFor({ state: 'detached' });
           const overlapPut = server.calls.filter(call =>
             call.method === 'PUT' && call.path === mock.MANAGEMENT_BASE + '/keys' &&
