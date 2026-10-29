@@ -32,6 +32,9 @@ func denyInference(t *testing.T, h *harness, secret string) {
 func TestKeyAuthenticationCoexistenceAndInvalidation(t *testing.T) {
 	h := newHarness(t)
 	created := h.createKey(t, validSpec())
+	// An execution without a price is an accounting error that stores no row,
+	// so the accounted Observer transports must name the identity they price.
+	acceptancePriceFixture(t, h, 1_000_000)
 
 	// Native host keys stay usable with the plugin enabled and never enter the
 	// Observer ledger or create Observer Keys.
@@ -228,6 +231,9 @@ func TestQuotaWindowsResetAndModelAuthorization(t *testing.T) {
 	}
 	t.Run("exact models and principal", func(t *testing.T) {
 		h := newHarness(t)
+		// An execution without a price is an accounting error that stores no
+		// row, so the accounted execution must name the identity it prices.
+		acceptancePriceFixture(t, h, 1_000_000)
 		spec := validSpec()
 		spec.AllowedModels = []string{"not-" + modelName}
 		a := h.createKey(t, spec)
@@ -248,6 +254,9 @@ func TestQuotaWindowsResetAndModelAuthorization(t *testing.T) {
 func TestFilteredLogsCaptureRedactionAndBounds(t *testing.T) {
 	h := newHarness(t)
 	created := h.createKey(t, validSpec())
+	// An execution without a price is an accounting error that stores no row,
+	// so the accounted executions must name the identity they price.
+	acceptancePriceFixture(t, h, 1_000_000)
 	settings := acceptanceGetSettings(t, h)
 	settings["capture_enabled"] = false
 	h.api(t, "PUT", "/settings", settings, 200, nil)
@@ -396,6 +405,9 @@ func TestManagementStrictInputs(t *testing.T) {
 func TestHalfOpenQueryBounds(t *testing.T) {
 	h := newHarness(t)
 	key := h.createKey(t, validSpec())
+	// An execution without a price is an accounting error that stores no row,
+	// so the accounted execution must name the identity it prices.
+	acceptancePriceFixture(t, h, 1_000_000)
 	r := acceptanceInferAndAwait(t, h, key.Secret, map[string]struct{}{})
 	if r.Time.IsZero() {
 		t.Fatal("missing requested-at timestamp")

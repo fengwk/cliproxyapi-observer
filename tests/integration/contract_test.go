@@ -5,6 +5,7 @@ package integration
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -26,10 +27,9 @@ type keySpec struct {
 }
 type keyView struct {
 	keySpec
-	ID            string     `json:"id"`
-	Used          limitsView `json:"used"`
-	Active        int        `json:"active"`
-	BlockedReason string     `json:"blocked_reason,omitempty"`
+	ID     string     `json:"id"`
+	Used   limitsView `json:"used"`
+	Active int        `json:"active"`
 }
 type createdKey struct {
 	Key    keyView `json:"key"`
@@ -144,5 +144,63 @@ func (h *harness) await(t *testing.T, description string, fn func() bool) {
 			t.Fatalf("deadline: %s", description)
 		case <-tick.C:
 		}
+	}
+}
+
+// TestRemovedAccountingFencesAreAbsentFromTheWire proves that the removed
+// accounting fences are gone from the public management contract: the health
+// payload no longer advertises a pending usage queue, a Key no longer carries
+// a blocked reason and the removed recovery route answers with a normal
+// missing-route response instead of an alias or a silent no-op.
+func TestRemovedAccountingFencesAreAbsentFromTheWire(t *testing.T) {
+	h := newHarness(t)
+	created := h.createKey(t, validSpec())
+
+	health := h.api(t, http.MethodGet, "/health", nil, http.StatusOK, nil)
+	var healthFields map[string]any
+	if err := json.Unmarshal(health, &healthFields); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	if _, ok := healthFields["pending_usage"]; ok {
+		t.Errorf("health still advertises pending_usage: %s", truncate(health, 300))
+	}
+
+	keys := h.api(t, http.MethodGet, "/keys", nil, http.StatusOK, nil)
+	var listed struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(keys, &listed); err != nil {
+		t.Fatalf("decode keys: %v", err)
+	}
+	if len(listed.Items) != 1 {
+		t.Fatalf("keys = %d, want exactly the created key", len(listed.Items))
+	}
+	if _, ok := listed.Items[0]["blocked_reason"]; ok {
+		t.Errorf("key still carries blocked_reason: %s", truncate(keys, 300))
+	}
+
+	// The removed route must not be aliased to another handler and must not
+	// silently succeed: an unregistered management path is a normal missing
+	// route.
+	for _, path := range []string{
+		"/v0/management/plugins/" + pluginID + "/keys/recover",
+		"/v0/management/plugins/" + pluginID + "/keys/recover?id=" + url.QueryEscape(created.Key.ID),
+	} {
+		status, body, err := h.rawRequest(http.MethodPost, path, []byte(`{"acknowledge":true}`),
+			map[string]string{"Authorization": "Bearer " + mgmtKey, "Content-Type": "application/json"})
+		if err != nil {
+			t.Fatalf("removed recovery route %s: %v", path, err)
+		}
+		if status != http.StatusNotFound {
+			t.Fatalf("removed recovery route %s status %d body %s, want 404", path, status, truncate(body, 300))
+		}
+	}
+
+	// The rejected calls must not have touched the Key or its history.
+	if after := h.keys(t); len(after) != 1 || after[0].ID != created.Key.ID || after[0].Used != (limitsView{}) {
+		t.Fatalf("keys after the removed route = %+v, want the untouched created key", after)
+	}
+	if page := h.page(t, "page_size=100"); len(page.Items) != 0 {
+		t.Fatalf("ledger after the removed route = %+v, want no records", page.Items)
 	}
 }

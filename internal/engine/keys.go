@@ -11,6 +11,8 @@ import (
 )
 
 const maxSafe int64 = 9_000_000_000_000_000
+const completedTTL = 24 * time.Hour
+const maxCompleted = 4096
 
 func random() string {
 	b := make([]byte, 32)
@@ -102,7 +104,6 @@ func (s *Store) decorateStored(k storedKey) Key {
 	return view
 }
 func (s *Store) decorate(k Key) Key {
-	s.observeInterruption(k.ID)
 	// Effective display only: leave anchors untouched until actual admission.
 	now := s.now()
 	if !now.Before(k.Resets.FiveHour) {
@@ -119,11 +120,6 @@ func (s *Store) decorate(k Key) Key {
 		if a.KeyID == k.ID {
 			k.Active++
 		}
-	}
-	if s.unknown[k.ID] {
-		k.BlockedReason = unknownReason
-	} else if s.blocked[k.ID] {
-		k.BlockedReason = "pending accounting"
 	}
 	return k
 }
@@ -348,7 +344,7 @@ func (s *Store) keys(includeDeleted bool) ([]Key, error) {
 
 // DeleteKey writes a terminal tombstone, clears the authentication hash and
 // disables the key in one transaction. It is idempotent, but never discards a
-// live request or unsettled accounting event.
+// live request.
 func (s *Store) DeleteKey(id string) error {
 	if s.maintenanceActive.Load() {
 		return ErrBusy
@@ -360,11 +356,6 @@ func (s *Store) DeleteKey(id string) error {
 	}
 	for _, a := range s.active {
 		if a.KeyID == id {
-			return ErrBusy
-		}
-	}
-	for _, p := range s.pending {
-		if p.Record.KeyID == id {
 			return ErrBusy
 		}
 	}
@@ -455,9 +446,6 @@ func (s *Store) Admit(a Admission) error {
 	if a.RequestID == "" {
 		return ErrInvalid
 	}
-	if s.observeInterruption(a.KeyID) {
-		return ErrAccounting
-	}
 	if old, ok := s.active[a.RequestID]; ok {
 		if old.KeyID != a.KeyID || old.Model != a.Model || old.TraceID != a.TraceID {
 			return ErrInvalid
@@ -470,9 +458,6 @@ func (s *Store) Admit(a Admission) error {
 			return ErrInvalid
 		}
 		return nil
-	}
-	if s.unknown[a.KeyID] || s.blocked[a.KeyID] {
-		return ErrAccounting
 	}
 	e := s.db.Update(func(tx *bolt.Tx) error {
 		var k storedKey
@@ -516,4 +501,24 @@ func (s *Store) Complete(id string, _ time.Time) error {
 		s.pruneCompletedLocked()
 	}
 	return nil
+}
+
+func (s *Store) pruneCompletedLocked() {
+	cutoff := s.now().Add(-completedTTL)
+	for id, a := range s.completed {
+		if a.At.Before(cutoff) {
+			delete(s.completed, id)
+		}
+	}
+	for len(s.completed) > maxCompleted {
+		var oldest string
+		var at time.Time
+		for id, a := range s.completed {
+			if oldest == "" || a.At.Before(at) {
+				oldest = id
+				at = a.At
+			}
+		}
+		delete(s.completed, oldest)
+	}
 }

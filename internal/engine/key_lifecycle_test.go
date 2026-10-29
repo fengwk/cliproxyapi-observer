@@ -41,7 +41,7 @@ func TestGeneratedKeySecretFormat(t *testing.T) {
 	}
 }
 
-// Active and pending work makes delete busy; a completed key becomes a tombstone
+// An active request makes delete busy; a completed key becomes a tombstone
 // that rejects every mutation while preserving history and counters.
 func TestDeleteKeyLifecycleBusyAuthAndHistory(t *testing.T) {
 	s, now, p := fixture(t)
@@ -99,9 +99,6 @@ func TestDeleteKeyLifecycleBusyAuthAndHistory(t *testing.T) {
 	if _, e = s.ResetKey(k.ID, []string{"total"}); !errors.Is(e, ErrDeleted) {
 		t.Fatal("reset accepted", e)
 	}
-	if _, e = s.RecoverKey(k.ID, true); !errors.Is(e, ErrDeleted) {
-		t.Fatal("recovery accepted", e)
-	}
 	d, e := s.Detail("bill")
 	must(t, e)
 	if d.Record.CostMicroUSD != 7 {
@@ -134,22 +131,33 @@ func TestDeleteKeyLifecycleBusyAuthAndHistory(t *testing.T) {
 	}
 }
 
-// A retained accounting failure blocks delete until the debt is settled; the
-// pending event itself is never discarded.
-func TestDeleteKeyPendingBusy(t *testing.T) {
+// A failed accounting write does not bar deletion: the Key is tombstoned and
+// keeps its history, while an active request still keeps the Key alive.
+func TestDeleteKeyIgnoresFailedAccountingButKeepsActiveGuard(t *testing.T) {
 	s, now, _ := fixture(t)
 	k, _ := key(t, s, KeySpec{Enabled: true})
 	s.writeFault = func() error { return ErrBusy }
 	if e := s.RecordUsage(event(k, "debt", *now)); !errors.Is(e, ErrAccounting) {
 		t.Fatal(e)
 	}
-	if e := s.DeleteKey(k.ID); !errors.Is(e, ErrBusy) {
-		t.Fatal("pending key deleted", e)
+	// The failed write left neither a record nor a charge behind.
+	if _, e := s.Detail("debt"); !errors.Is(e, ErrNotFound) {
+		t.Fatal("failed write left a record", e)
 	}
-	s.writeFault = nil
-	must(t, s.Maintenance())
+	// An active request still blocks the delete.
+	must(t, s.Admit(Admission{RequestID: "active", KeyID: k.ID}))
+	if e := s.DeleteKey(k.ID); !errors.Is(e, ErrBusy) {
+		t.Fatal("deleted an active key", e)
+	}
+	must(t, s.Complete("active", *now))
+	// The accounting failure does not bar the delete.
 	if e := s.DeleteKey(k.ID); e != nil {
 		t.Fatal(e)
+	}
+	all, e := s.KeysIncludingDeleted()
+	must(t, e)
+	if len(all) != 1 || all[0].DeletedAt == nil || all[0].Used.Total != 0 || all[0].Secret != "" {
+		t.Fatal("tombstone/history lost", all)
 	}
 }
 

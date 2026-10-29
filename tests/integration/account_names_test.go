@@ -18,7 +18,10 @@ import (
 const (
 	kimiAccountFile = "observer-friendly-account.json"
 	kimiModel       = "kimi-k2"
-	kimiFakeToken   = "fake-upstream-key"
+	// kimiProvider is the native provider identity the host reports for the
+	// kimi auth file: the executor identifier, not the account name.
+	kimiProvider  = "kimi"
+	kimiFakeToken = "fake-upstream-key"
 )
 
 // kimiAccountUpstream is a local OpenAI-compatible fixture used by the fake
@@ -117,6 +120,13 @@ func TestAccountNamesNativeMetadata(t *testing.T) {
 	}
 
 	created := h.createKey(t, validSpec())
+	// An execution without a price is an accounting error that stores no row,
+	// so the accounted execution must name the identity it prices.
+	acceptancePutPricing(t, h, acceptancePricing{
+		Auto:   false,
+		Source: "models_dev_v2",
+		Prices: []acceptancePrice{acceptanceManual(kimiModel, kimiProvider, 1_000_000)},
+	})
 	payload := []byte(`{"model":"` + kimiModel + `","messages":[{"role":"user","content":"hi"}],"stream":false}`)
 	status, _, body, err = h.rawRequestWithHeaders(http.MethodPost, "/v1/chat/completions", payload,
 		map[string]string{"Authorization": "Bearer " + created.Secret})

@@ -165,13 +165,12 @@ func TestNativeAuthenticationScopeCoexistence(t *testing.T) {
 		})
 	}
 
-	// Native traffic must not create Observer Keys, executions, active slots or
-	// pending accounting events.
+	// Native traffic must not create Observer Keys, executions or active slots.
 	h.await(t, "native traffic creates no Observer accounting", func() bool {
 		var health acceptanceHealth
 		h.api(t, http.MethodGet, "/health", nil, http.StatusOK, &health)
 		return len(h.keys(t)) == 0 && len(h.page(t, "page_size=100").Items) == 0 &&
-			health.ActiveRequests == 0 && health.PendingUsage == 0
+			health.ActiveRequests == 0
 	})
 
 	// Only the native generation reaches an upstream. Its bytes and headers must

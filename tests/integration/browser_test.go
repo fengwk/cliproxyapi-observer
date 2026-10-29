@@ -73,6 +73,9 @@ func TestBrowserAgainstRealHost(t *testing.T) {
 
 	h := newHarness(t)
 	created := h.createKey(t, validSpec())
+	// An execution without a price is an accounting error that stores no row,
+	// so the accounted execution must name the identity it prices.
+	acceptancePriceFixture(t, h, 1_000_000)
 
 	settings := acceptanceGetSettings(t, h)
 	settings["capture_enabled"] = true
@@ -95,7 +98,7 @@ func TestBrowserAgainstRealHost(t *testing.T) {
 	h.await(t, "accounting settled before browser smoke", func() bool {
 		var health acceptanceHealth
 		h.api(t, http.MethodGet, "/health", nil, http.StatusOK, &health)
-		return health.ActiveRequests == 0 && health.PendingUsage == 0
+		return health.ActiveRequests == 0
 	})
 
 	// These are the only host writes in this test. Everything the browser does

@@ -50,9 +50,9 @@ func TestDefaultModelAccessAndSelectedModels(t *testing.T) {
 	}
 }
 
-// Engine Close releases its handle even when reporting unsettled accounting.
-// Manager must detach that closed object and stopped pricing workers.
-func TestCloseErrorDetachesStore(t *testing.T) {
+// Closing detaches the store and stops pricing workers; even an active request
+// cannot leave an accounting gate when the unchanged configuration reopens.
+func TestCloseDetachesStoreAndReopens(t *testing.T) {
 	m := liveManager(t)
 	k, _, err := m.store.CreateKey(engine.KeySpec{Enabled: true})
 	if err != nil {
@@ -63,11 +63,18 @@ func TestCloseErrorDetachesStore(t *testing.T) {
 	}
 	m.mu.Lock()
 	err = m.closeLocked()
-	if err == nil || m.store != nil || m.prices != nil || m.cancel != nil {
-		m.mu.Unlock()
-		t.Fatal("closed store advertised as live")
-	}
+	detached := m.store == nil && m.prices == nil && m.cancel == nil
 	m.mu.Unlock()
-	// Unchanged config can reopen; persisted engine debt remains fenced.
+	if err != nil || !detached {
+		t.Fatal("close failed or store advertised as live", err)
+	}
+	// Unchanged config can reopen; no accounting state may survive as a
+	// permanent admission restriction.
 	call(t, m, "plugin.reconfigure", lifecycleRequest{[]byte("db: " + m.cfg.DB), 6})
+	if err = m.store.Admit(engine.Admission{RequestID: "after-reopen", KeyID: k.ID}); err != nil {
+		t.Fatal("reopened key unavailable", err)
+	}
+	if err = m.store.Complete("after-reopen", time.Now()); err != nil {
+		t.Fatal(err)
+	}
 }

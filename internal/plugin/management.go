@@ -33,7 +33,6 @@ const (
 	routeKeyDelete       = routeKeys + "/delete"
 	routeKeyRotate       = routeKeys + "/rotate"
 	routeKeyReset        = routeKeys + "/reset"
-	routeKeyRecover      = routeKeys + "/recover"
 	routeCapturesCleanup = routesPrefix + "/captures/cleanup"
 	routeCapturesPurge   = routesPrefix + "/captures/purge"
 	routeRequests        = routesPrefix + "/requests"
@@ -93,7 +92,6 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPost, Path: routeKeyDelete, Description: "Permanently delete a client key selected by the id query parameter."},
 			{Method: http.MethodPost, Path: routeKeyRotate, Description: "Rotate a client key selected by the id query parameter."},
 			{Method: http.MethodPost, Path: routeKeyReset, Description: "Reset selected usage windows for a client key."},
-			{Method: http.MethodPost, Path: routeKeyRecover, Description: "Acknowledge unknown accounting for a client key."},
 			{Method: http.MethodGet, Path: routeRequests, Description: "Paginated request records."},
 			{Method: http.MethodGet, Path: routeRequestView, Description: "Consistent timezone-local summary, series and records or groups."},
 			{Method: http.MethodGet, Path: routeRequestFacets, Description: "Searchable historical request dimensions."},
@@ -171,6 +169,9 @@ func parseManagementRequest(raw []byte) (managementRequest, error) {
 
 func (m *Manager) dispatchManagement(req managementRequest) pluginapi.ManagementResponse {
 	if !acceptsManagementBody(req) && len(bytes.TrimSpace(req.Body)) != 0 {
+		if !registeredManagementPath(req.Path) {
+			return errorResponse(http.StatusNotFound, "not_found", "not found")
+		}
 		return bodyFailureResponse(errJSONInvalid)
 	}
 	// URL.Path is already decoded by the host. Never unescape it a second time.
@@ -192,6 +193,22 @@ func (m *Manager) dispatchManagement(req managementRequest) pluginapi.Management
 	}
 }
 
+// Reject bodies on known routes without making unknown paths look like routes.
+func registeredManagementPath(path string) bool {
+	registration := managementRegistration()
+	for _, route := range registration.Routes {
+		if path == "/v0/management"+route.Path {
+			return true
+		}
+	}
+	for _, route := range registration.Resources {
+		if path == resourceBasePath+route.Path {
+			return true
+		}
+	}
+	return false
+}
+
 // acceptsManagementBody lists the exact static routes that take a JSON body.
 // Everything else rejects a nonempty body, including methods that share a path.
 func acceptsManagementBody(req managementRequest) bool {
@@ -201,7 +218,6 @@ func acceptsManagementBody(req managementRequest) bool {
 			req.Path == managementBasePath+"/keys/rotate" ||
 			req.Path == managementBasePath+"/prices/preview" ||
 			req.Path == managementBasePath+"/keys/reset" ||
-			req.Path == managementBasePath+"/keys/recover" ||
 			req.Path == managementBasePath+"/captures/purge"
 	case http.MethodPut:
 		return req.Path == managementBasePath+"/keys" ||
@@ -291,16 +307,6 @@ func (m *Manager) dispatchManagementRoute(req managementRequest, route string) p
 			return invalidQueryResponse()
 		}
 		return m.serveResetKey(id, req.Body)
-
-	case "/keys/recover":
-		if !requireMethod(req.Method, http.MethodPost) {
-			return methodNotAllowedResponse()
-		}
-		id, ok := parseIDQuery(req.Query)
-		if !ok {
-			return invalidQueryResponse()
-		}
-		return m.serveRecoverKey(id, req.Body)
 
 	case "/requests":
 		if !requireMethod(req.Method, http.MethodGet) {
@@ -439,10 +445,6 @@ func requireMethod(got, want string) bool {
 func (m *Manager) serveHealth() pluginapi.ManagementResponse {
 	return m.withStore(func(store *engine.Store) pluginapi.ManagementResponse {
 		health := store.Health()
-		m.billingFaults.Range(func(_, _ any) bool {
-			health.LastError = "accounting callback failed; explicit Key recovery required"
-			return false
-		})
 		return jsonResponse(http.StatusOK, healthResponse{
 			Health:        health,
 			Version:       Version,
@@ -471,11 +473,6 @@ func (m *Manager) serveKeys(includeDeleted bool) pluginapi.ManagementResponse {
 		}
 		if keys == nil {
 			keys = []engine.Key{}
-		}
-		for i := range keys {
-			if _, fault := m.billingFaults.Load(keys[i].ID); fault {
-				keys[i].BlockedReason = "accounting callback failed; explicit recovery required"
-			}
 		}
 		return jsonResponse(http.StatusOK, keysResponse{Items: keys})
 	})
@@ -617,33 +614,6 @@ func (m *Manager) serveResetKey(id string, body []byte) pluginapi.ManagementResp
 		}
 		return jsonResponse(http.StatusOK, key)
 	})
-}
-
-type recoverRequest struct {
-	Acknowledge bool `json:"acknowledge"`
-}
-
-// serveRecoverKey only acknowledges unknown/missing usage after an explicit
-// confirmation; it never changes counters, limits or historical costs.
-func (m *Manager) serveRecoverKey(id string, body []byte) pluginapi.ManagementResponse {
-	var request recoverRequest
-	if err := decodeRequestBody(body, &request); err != nil {
-		return bodyFailureResponse(err)
-	}
-	if !request.Acknowledge {
-		return errorResponse(http.StatusBadRequest, "invalid_request", "acknowledge must be true")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.store == nil {
-		return unavailableResponse()
-	}
-	key, err := m.store.RecoverKey(id, true)
-	if err != nil {
-		return storeFailureResponse(err)
-	}
-	m.billingFaults.Delete(id)
-	return jsonResponse(http.StatusOK, key)
 }
 
 func (m *Manager) serveRequests(values url.Values, callbackID string) pluginapi.ManagementResponse {

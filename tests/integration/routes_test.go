@@ -9,6 +9,7 @@ import (
 
 // Query IDs must be present exactly once, nonblank and accompanied by no
 // unrecognized parameters. Invalid mutations must not rotate/revoke the Key.
+// The removed recovery route is gone and therefore owns no ID contract.
 func TestStaticRouteIDValidation(t *testing.T) {
 	h := newHarness(t)
 	created := h.createKey(t, validSpec())
@@ -20,7 +21,6 @@ func TestStaticRouteIDValidation(t *testing.T) {
 		{"DELETE", "/keys", nil},
 		{"POST", "/keys/rotate", nil},
 		{"POST", "/keys/reset", map[string]any{"windows": []string{"total"}}},
-		{"POST", "/keys/recover", map[string]any{"acknowledge": true}},
 		{"GET", "/requests/detail", nil},
 	} {
 		for _, query := range []string{"", "?id=", "?id=%20", "?id=" + url.QueryEscape(created.Key.ID) + "&id=" + url.QueryEscape(created.Key.ID), "?id=" + url.QueryEscape(created.Key.ID) + "&extra=1"} {

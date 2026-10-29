@@ -2,7 +2,7 @@ package engine
 
 import (
 	"encoding/json"
-	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -11,6 +11,39 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	bolt "go.etcd.io/bbolt"
 )
+
+const replayHorizon = 7 * 24 * time.Hour
+
+type dedupEntry struct {
+	Time  time.Time
+	KeyID string
+}
+
+func (s *Store) loadCutoff(tx *bolt.Tx) error {
+	m := tx.Bucket([]byte("meta"))
+	var cutoff time.Time
+	if b := m.Get([]byte("replay_cutoff")); b != nil {
+		if e := decode(b, &cutoff); e != nil {
+			return e
+		}
+	}
+	candidate := s.now().UTC().Add(-replayHorizon)
+	if candidate.After(cutoff) {
+		cutoff = candidate
+	}
+	if s.cutoff.After(cutoff) {
+		cutoff = s.cutoff
+	}
+	s.cutoff = cutoff
+	return nil
+}
+
+func (s *Store) advanceCutoff(tx *bolt.Tx) error {
+	if e := s.loadCutoff(tx); e != nil {
+		return e
+	}
+	return put(tx.Bucket([]byte("meta")), "replay_cutoff", s.cutoff)
+}
 
 func add(a, b int64) (int64, error) {
 	if a < 0 || b < 0 || b > maxSafe || a > maxSafe-b {
@@ -49,21 +82,24 @@ func (s *Store) RecordUsage(u pluginapi.UsageRecord) error {
 		if e == ErrNotFound {
 			return e
 		}
-		s.fenceLocked(strings.TrimPrefix(u.APIKey, "observer:"))
-		return ErrAccounting
+		s.lastError = "usage lookup failed"
+		return fmt.Errorf("%w: %w", ErrAccounting, e)
 	}
 	if u.RequestID == "" {
-		s.fenceLocked(key.ID)
+		s.lastError = "invalid usage"
 		return ErrAccounting
 	}
 	if seen {
 		return nil
 	}
-	if _, ok := s.pending[u.RequestID]; ok {
-		return ErrAccounting
+	for _, n := range []int64{u.Detail.InputTokens, u.Detail.OutputTokens, u.Detail.ReasoningTokens, u.Detail.CachedTokens, u.Detail.CacheReadTokens, u.Detail.CacheCreationTokens, u.Detail.TotalTokens} {
+		if n < 0 || n > maxSafe {
+			s.lastError = "invalid usage"
+			return ErrAccounting
+		}
 	}
 	if u.RequestedAt.IsZero() || u.RequestedAt.Before(s.cutoff) || u.RequestedAt.After(s.now()) {
-		s.fenceLocked(key.ID)
+		s.lastError = "invalid usage"
 		return ErrAccounting
 	}
 	r := normalize(u)
@@ -72,8 +108,14 @@ func (s *Store) RecordUsage(u pluginapi.UsageRecord) error {
 	// Quote with the original request start and the final upstream tier, never
 	// the ingestion time or a requested-tier preference.
 	q, e := s.pricer.Quote(r.Model, r.Provider, r.Tokens, r.Time, r.ResponseServiceTier)
-	if e != nil || q.CostMicroUSD < 0 || q.CostMicroUSD > maxSafe {
-		s.fenceLocked(strings.TrimPrefix(u.APIKey, "observer:"))
+	if e != nil {
+		s.lastError = "usage pricing failed"
+		return fmt.Errorf("%w: %w", ErrAccounting, e)
+	}
+	// The pricing service represents an unavailable price or missing facts as
+	// a zero quote for preview. It is not a calculable accounting result.
+	if q.Source == "zero" || q.Reason == "missing_facts" || q.CostMicroUSD < 0 || q.CostMicroUSD > maxSafe {
+		s.lastError = "usage pricing failed"
 		return ErrAccounting
 	}
 	r.CostMicroUSD = q.CostMicroUSD
@@ -82,22 +124,12 @@ func (s *Store) RecordUsage(u pluginapi.UsageRecord) error {
 		rate := *q.Rates.Reasoning
 		q.Rates.Reasoning = &rate
 	}
-	p := pending{Record: r, At: at, Quote: q, CaptureEnabled: s.settings.CaptureEnabled, CaptureMode: s.settings.CaptureMode, Epoch: key.Epoch}
+	p := usageTransaction{Record: r, At: at, Quote: q, CaptureEnabled: s.settings.CaptureEnabled, CaptureMode: s.settings.CaptureMode, Epoch: key.Epoch}
 	if e = s.persistLocked(p); e == nil {
 		return nil
 	}
-	if errors.Is(e, ErrAccounting) {
-		s.fenceLocked(r.KeyID)
-		return ErrAccounting
-	}
-	s.blocked[r.KeyID] = true
 	s.lastError = "usage persistence failed"
-	if len(s.pending) >= 1024 {
-		s.fenceLocked(strings.TrimPrefix(u.APIKey, "observer:"))
-		return ErrAccounting
-	}
-	s.pending[r.ID] = p
-	return ErrAccounting
+	return fmt.Errorf("%w: %w", ErrAccounting, e)
 }
 
 // Daily dimensions are explicit JSON values; no delimiter collision can merge
@@ -119,12 +151,7 @@ func dailyID(d daily) string {
 func accumulate(b *Bucket, r Record) error {
 	return addAggregate(&b.Aggregate, recordAggregate(r))
 }
-func (s *Store) persistLocked(p pending) error {
-	if s.usageFault != nil {
-		if e := s.usageFault(p); e != nil {
-			return e
-		}
-	}
+func (s *Store) persistLocked(p usageTransaction) error {
 	if s.writeFault != nil {
 		if e := s.writeFault(); e != nil {
 			return e
@@ -143,8 +170,7 @@ func (s *Store) persistLocked(p pending) error {
 		if e := get(kb, r.KeyID, &k); e != nil {
 			return e
 		}
-		// Retries retain their original ingestion timestamp. Events older than an
-		// explicit reset never refill that reset window.
+		// A reset window is charged according to the ingestion timestamp.
 		roll(&k.Key, p.At)
 		for _, v := range []struct {
 			used          *int64
@@ -195,30 +221,4 @@ func (s *Store) persistLocked(p pending) error {
 		}
 		return put(tx.Bucket([]byte("dedup")), r.ID, dedupEntry{Time: r.Time, KeyID: r.KeyID})
 	})
-}
-func (s *Store) retryLocked() error {
-	var result error
-	for id, p := range s.pending {
-		if e := s.persistLocked(p); e != nil {
-			result = ErrAccounting
-			if errors.Is(e, ErrAccounting) {
-				s.fenceLocked(p.Record.KeyID)
-				delete(s.pending, id)
-			}
-			continue
-		}
-		delete(s.pending, id)
-	}
-	clear(s.blocked)
-	for _, p := range s.pending {
-		s.blocked[p.Record.KeyID] = true
-	}
-	if result != nil {
-		s.lastError = "usage persistence failed"
-	} else if len(s.unknown) == 0 {
-		s.lastError = ""
-	} else {
-		s.lastError = unknownReason
-	}
-	return result
 }

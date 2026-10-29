@@ -222,49 +222,76 @@ func TestExecutionsAndQueries(t *testing.T) {
 	}
 }
 
-// Failed writes block admission; reset cannot clear the gate, and retry keeps
-// the original quote even when manual prices change before recovery.
-func TestFailedWriteRetry(t *testing.T) {
+// Obsolete schema-3 flags and sidecars are ignored, without a startup rewrite
+// of any Key; authentication, committed history and configured limits survive.
+func TestLegacyAccountingMarkersAreIgnored(t *testing.T) {
 	s, now, p := fixture(t)
-	k, _ := key(t, s, KeySpec{Enabled: true})
-	s.writeFault = func() error { return errors.New("injected write failure") }
-	if !errors.Is(s.RecordUsage(event(k, "debt", *now)), ErrAccounting) {
-		t.Fatal("failure hidden")
-	}
-	if !errors.Is(s.Admit(Admission{RequestID: "x", KeyID: k.ID}), ErrAccounting) {
-		t.Fatal("unblocked")
-	}
-	s.writeFault = nil
-	var e error
-	_, e = s.ResetKey(k.ID, []string{"five_hour"})
-	must(t, e)
-	if !errors.Is(s.Admit(Admission{RequestID: "x", KeyID: k.ID}), ErrAccounting) {
-		t.Fatal("reset removed gate")
-	}
-	p.cost = 99
-	must(t, s.Maintenance())
-	if total(t, s).Used.Total != 7 || total(t, s).Used.FiveHour != 0 || p.calls != 1 {
-		t.Fatal(total(t, s), p.calls)
-	}
-}
-
-// Simulated abrupt termination leaves a durable running marker. On restart a
-// reset/rotate cannot authorize new inference against unknown unsettled debt.
-func TestUncleanRestart(t *testing.T) {
-	s, _, p := fixture(t)
-	k, _ := key(t, s, KeySpec{Enabled: true})
+	k, secret := key(t, s, KeySpec{Enabled: true, Limits: Limits{Total: 14}})
+	must(t, s.RecordUsage(event(k, "committed", *now)))
+	must(t, s.Admit(Admission{RequestID: "lost", KeyID: k.ID}))
+	var legacy []byte
+	must(t, s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("keys"))
+		var row map[string]any
+		if e := json.Unmarshal(b.Get([]byte(k.ID)), &row); e != nil {
+			return e
+		}
+		row["blocked_reason"] = "unknown accounting"
+		var e error
+		legacy, e = json.Marshal(row)
+		if e != nil {
+			return e
+		}
+		if e = b.Put([]byte(k.ID), legacy); e != nil {
+			return e
+		}
+		return tx.Bucket([]byte("meta")).Put([]byte("running"), []byte("1"))
+	}))
+	markerDir := s.path + ".interrupted"
+	must(t, os.Mkdir(markerDir, 0700))
+	marker := filepath.Join(markerDir, k.ID)
+	must(t, os.WriteFile(marker, []byte("old marker"), 0600))
+	must(t, os.WriteFile(s.path+".interrupted.lock", []byte("old lock"), 0600))
+	// Close only the underlying database to simulate loss of an active process.
 	close(s.captures)
 	s.worker.Wait()
 	must(t, s.db.Close())
 	s.closed = true
-	reopened, e := Open(Options{DataPath: s.path, Pricer: p})
+	reopened, e := Open(Options{DataPath: s.path, Now: func() time.Time { return *now }, Pricer: p})
 	must(t, e)
-	_, e = reopened.ResetKey(k.ID, []string{"total"})
-	must(t, e)
-	if !errors.Is(reopened.Admit(Admission{RequestID: "new", KeyID: k.ID}), ErrAccounting) {
-		t.Fatal("unsafe restart")
+	defer reopened.Close()
+	must(t, reopened.db.View(func(tx *bolt.Tx) error {
+		if !bytes.Equal(tx.Bucket([]byte("keys")).Get([]byte(k.ID)), legacy) ||
+			string(tx.Bucket([]byte("meta")).Get([]byte("running"))) != "1" {
+			t.Fatal("legacy records rewritten during open")
+		}
+		return nil
+	}))
+	if content, err := os.ReadFile(marker); err != nil || string(content) != "old marker" {
+		t.Fatal("legacy marker changed", err)
 	}
-	must(t, reopened.Close())
+	if content, err := os.ReadFile(s.path + ".interrupted.lock"); err != nil || string(content) != "old lock" {
+		t.Fatal("legacy lock changed", err)
+	}
+	got, e := reopened.Authenticate(secret)
+	must(t, e)
+	if got.ID != k.ID || got.Secret != secret || got.Used.Total != 7 || got.Limits.Total != 14 {
+		t.Fatal("key changed", got)
+	}
+	d, e := reopened.Detail("committed")
+	must(t, e)
+	if d.Record.CostMicroUSD != 7 {
+		t.Fatal("history changed", d)
+	}
+	if _, e = reopened.Detail("lost"); !errors.Is(e, ErrNotFound) {
+		t.Fatal("lost execution fabricated", e)
+	}
+	must(t, reopened.Admit(Admission{RequestID: "new", KeyID: k.ID}))
+	must(t, reopened.Complete("new", *now))
+	must(t, reopened.RecordUsage(event(k, "next", *now)))
+	if e = reopened.Admit(Admission{RequestID: "over-limit", KeyID: k.ID}); !errors.Is(e, ErrQuota) {
+		t.Fatal("quota not preserved", e)
+	}
 }
 
 // Concurrent admissions serialize the limit check, idempotent completion frees
@@ -452,8 +479,8 @@ func TestQuotaBoundaries(t *testing.T) {
 	}
 }
 
-// A retained old quote does not refill an explicitly reset window; the new
-// execution still charges using current receipt time, not RequestedAt.
+// A failed write is not replayed after reset; a new late execution charges
+// using receipt time, while events beyond the replay horizon are rejected.
 func TestResetDoesNotRefillOldWindow(t *testing.T) {
 	s, now, _ := fixture(t)
 	k, _ := key(t, s, KeySpec{Enabled: true})
@@ -481,29 +508,9 @@ func TestResetDoesNotRefillOldWindow(t *testing.T) {
 	}
 }
 
-// The failure queue has a hard bound. Losing the ability to retain another
-// event must create an irreversible fence rather than silently unblocking.
-func TestPendingBoundAndCloseDebt(t *testing.T) {
-	s, now, _ := fixture(t)
-	k, _ := key(t, s, KeySpec{Enabled: true})
-	s.writeFault = func() error { return ErrBusy }
-	for i := 0; i < 1025; i++ {
-		if !errors.Is(s.RecordUsage(event(k, fmt.Sprint(i), *now)), ErrAccounting) {
-			t.Fatal(i)
-		}
-	}
-	if s.Health().PendingUsage != 1024 || !s.unknown[k.ID] {
-		t.Fatal(s.Health())
-	}
-	if !errors.Is(s.Close(), ErrAccounting) {
-		t.Fatal("close discarded debt")
-	}
-}
-
-// Unknown pricing is a valid zero-cost quote, not an inference gate. Explicit,
-// conservative raw counters can recover canonical buckets, but billing still
-// stays zero when no price exists.
-func TestUnknownPricingAndTokens(t *testing.T) {
+// A configured free price is still a valid quote; raw counters can recover
+// canonical buckets without inventing a nonzero charge.
+func TestFreePricingAndTokens(t *testing.T) {
 	s, now, p := fixture(t)
 	p.cost = 0
 	k, _ := key(t, s, KeySpec{Enabled: true})
@@ -519,6 +526,80 @@ func TestUnknownPricingAndTokens(t *testing.T) {
 	}
 	must(t, s.Admit(Admission{RequestID: "allowed", KeyID: k.ID}))
 	must(t, s.Complete("allowed", *now))
+}
+
+// The real pricing service uses zero-valued preview quotes for missing prices
+// and facts; neither is an accounting success, but a later real quote works.
+func TestUnpricedAndMissingFactsReturnErrorsWithoutBlocking(t *testing.T) {
+	s, now, _ := fixture(t)
+	k, _ := key(t, s, KeySpec{Enabled: true})
+	pricer, e := pricing.NewService(pricing.Config{}, "", nil)
+	must(t, e)
+	s.pricer = pricer
+	if e = s.RecordUsage(event(k, "unpriced", *now)); !errors.Is(e, ErrAccounting) {
+		t.Fatal("unpriced usage accepted", e)
+	}
+	rate := int64(2_000_000)
+	must(t, pricer.Configure(pricing.Config{Prices: []pricing.ManualPrice{{
+		Model: "gpt-exact", Provider: "openai",
+		Definition: pricing.PricingDefinition{
+			Base: pricing.RateSet{Input: 1_000_000},
+			Overrides: []pricing.Override{{
+				ID: "priority", When: pricing.Condition{ServiceTier: []string{"priority"}},
+				Rates: pricing.RatePatch{Input: &rate},
+			}},
+		},
+	}}}))
+	u := event(k, "missing-facts", *now)
+	if e = s.RecordUsage(u); !errors.Is(e, ErrAccounting) {
+		t.Fatal("uncalculable quote accepted", e)
+	}
+	if total(t, s).Used.Total != 0 || s.Health().LastError == "" {
+		t.Fatal("failed quote changed counters or lost diagnostic")
+	}
+	for _, id := range []string{"unpriced", "missing-facts"} {
+		if _, e = s.Detail(id); !errors.Is(e, ErrNotFound) {
+			t.Fatal("failed quote produced a row", id, e)
+		}
+	}
+	must(t, s.Admit(Admission{RequestID: "still-available", KeyID: k.ID}))
+	must(t, s.Complete("still-available", *now))
+	u.RequestID = "priced"
+	u.ResponseServiceTier = "priority"
+	must(t, s.RecordUsage(u))
+	must(t, s.Maintenance())
+	if got := total(t, s).Used.Total; got != 16 {
+		t.Fatal("valid quote not charged, or failed quote replayed", got)
+	}
+}
+
+// Malformed raw counters cannot be normalized into a fabricated successful
+// quote, even if the pricer itself would accept the normalized values.
+func TestInvalidUsageCountersDoNotChargeOrBlock(t *testing.T) {
+	s, now, _ := fixture(t)
+	k, _ := key(t, s, KeySpec{Enabled: true})
+	for _, tc := range []struct {
+		id    string
+		value int64
+	}{{"negative", -1}, {"overflow", maxSafe + 1}} {
+		u := event(k, tc.id, *now)
+		u.Detail.CacheReadTokens = tc.value
+		if err := s.RecordUsage(u); !errors.Is(err, ErrAccounting) {
+			t.Fatal("invalid counter accepted", tc.id, err)
+		}
+		if _, err := s.Detail(tc.id); !errors.Is(err, ErrNotFound) {
+			t.Fatal("invalid counter stored", tc.id, err)
+		}
+	}
+	if total(t, s).Used.Total != 0 || s.Health().LastError == "" {
+		t.Fatal("invalid usage charged or lost diagnostic")
+	}
+	must(t, s.Admit(Admission{RequestID: "after-invalid", KeyID: k.ID}))
+	must(t, s.Complete("after-invalid", *now))
+	must(t, s.RecordUsage(event(k, "valid", *now)))
+	if total(t, s).Used.Total != 7 {
+		t.Fatal("valid usage not charged")
+	}
 }
 
 // Bounded capture fails immediately under lock contention, keeps headers for an

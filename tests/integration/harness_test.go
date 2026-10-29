@@ -593,9 +593,9 @@ func truncate(data []byte, limit int) string {
 }
 
 // awaitGracefulRestartReady is an explicit precondition for a planned graceful
-// restart, never generic cleanup or crash recovery. Flushed HTTP response bytes
-// do not prove handler completion or async usage delivery. Wait for the known
-// ledger count AND released lifecycle/billing state; never resend or recover.
+// restart, never generic cleanup. Flushed HTTP response bytes do not prove
+// handler completion or async usage delivery. Wait for the known ledger count
+// AND released lifecycle state; never resend or recover.
 func (h *harness) awaitGracefulRestartReady(t *testing.T, expectedExecutions int) []recordView {
 	t.Helper()
 	var records []recordView
@@ -606,7 +606,7 @@ func (h *harness) awaitGracefulRestartReady(t *testing.T, expectedExecutions int
 		}
 		var health acceptanceHealth
 		h.api(t, http.MethodGet, "/health", nil, http.StatusOK, &health)
-		if health.ActiveRequests != 0 || health.PendingUsage != 0 {
+		if health.ActiveRequests != 0 {
 			return false
 		}
 		for _, key := range h.keys(t) {
@@ -623,7 +623,8 @@ func (h *harness) awaitGracefulRestartReady(t *testing.T, expectedExecutions int
 // restartPreservingConfig stops the current host, updates the port in the
 // existing config.yaml to avoid collisions, and restarts a fresh host process
 // against the preserved config file and database. Planned graceful callers must
-// explicitly awaitGracefulRestartReady first; crash recovery deliberately must not.
+// explicitly awaitGracefulRestartReady first; an unclean restart deliberately
+// does not.
 func (h *harness) restartPreservingConfig(t *testing.T) (*harness, error) {
 	t.Helper()
 	h.Stop()

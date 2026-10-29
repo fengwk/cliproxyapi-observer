@@ -39,16 +39,15 @@ type Key struct {
 	ID string `json:"id"`
 	// Secret is the current plaintext credential, persisted additively for
 	// authenticated management display. Legacy hash-only rows leave it empty.
-	Secret        string     `json:"secret,omitempty"`
-	KeySpec                  // embedded flat JSON
-	Used          Limits     `json:"used"`
-	Starts        Windows    `json:"starts"`
-	Resets        Windows    `json:"resets"`
-	Active        int        `json:"active"`
-	BlockedReason string     `json:"blocked_reason,omitempty"`
-	DeletedAt     *time.Time `json:"deleted_at,omitempty"`
-	Revoked       bool       `json:"revoked,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
+	Secret    string     `json:"secret,omitempty"`
+	KeySpec              // embedded flat JSON
+	Used      Limits     `json:"used"`
+	Starts    Windows    `json:"starts"`
+	Resets    Windows    `json:"resets"`
+	Active    int        `json:"active"`
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+	Revoked   bool       `json:"revoked,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
 }
 type Admission struct {
 	RequestID, TraceID, KeyID, Model string
@@ -113,6 +112,8 @@ const (
 	captureHeaderLimit        = 16 << 10
 	captureEnvelopeVersion    = 1
 	supportedObserverFeature  = 3
+	maxCaptureBody            = 8 << 20
+	maxCaptureStorage         = 1 << 30
 )
 
 type Health struct {
@@ -123,7 +124,6 @@ type Health struct {
 	CaptureBytes           int64            `json:"capture_bytes"`
 	CaptureLimitBytes      int64            `json:"capture_limit_bytes"`
 	ReclaimableBytes       int64            `json:"reclaimable_bytes"`
-	PendingUsage           int              `json:"pending_usage"`
 	ActiveRequests         int              `json:"active_requests"`
 	LastError              string           `json:"last_error,omitempty"`
 	MaintenanceError       string           `json:"maintenance_error,omitempty"`

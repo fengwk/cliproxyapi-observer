@@ -40,7 +40,6 @@ func TestManagementRegistrationHasOnlyStaticExactRoutes(t *testing.T) {
 		"POST " + routeKeyDelete:       true,
 		"POST " + routeKeyRotate:       true,
 		"POST " + routeKeyReset:        true,
-		"POST " + routeKeyRecover:      true,
 		"GET " + routeRequests:         true,
 		"GET " + routeRequestView:      true,
 		"GET " + routeRequestFacets:    true,
@@ -150,13 +149,6 @@ func TestRegisteredManagementRoutesDispatch(t *testing.T) {
 	if r.StatusCode != http.StatusOK || json.Unmarshal(r.Body, &updated) != nil || updated.ID != id ||
 		updated.Secret != rotated.Secret {
 		t.Fatalf("reset key: %d %s", r.StatusCode, r.Body)
-	}
-
-	r = dispatchForTest(t, m, http.MethodPost, managementBasePath+"/keys/recover", url.Values{"id": {id}},
-		`{"acknowledge":true}`)
-	if r.StatusCode != http.StatusOK || json.Unmarshal(r.Body, &updated) != nil || updated.ID != id ||
-		updated.Secret != rotated.Secret {
-		t.Fatalf("recover key: %d %s", r.StatusCode, r.Body)
 	}
 
 	rangeQuery := url.Values{
@@ -291,8 +283,6 @@ func TestManagementIDQueryValidation(t *testing.T) {
 		{"reset duplicate id", http.MethodPost, managementBasePath + "/keys/reset", url.Values{"id": {"a", "b"}}, `{"windows":["week"]}`},
 		{"reset missing id", http.MethodPost, managementBasePath + "/keys/reset", nil, `{"windows":["week"]}`},
 		{"reset unknown parameter", http.MethodPost, managementBasePath + "/keys/reset", url.Values{"id": {"a"}, "x": {"1"}}, `{"windows":["week"]}`},
-		{"recover duplicate id", http.MethodPost, managementBasePath + "/keys/recover", url.Values{"id": {"a", "b"}}, `{"acknowledge":true}`},
-		{"recover missing id", http.MethodPost, managementBasePath + "/keys/recover", nil, `{"acknowledge":true}`},
 		{"detail duplicate id", http.MethodGet, managementBasePath + "/requests/detail", url.Values{"id": {"a", "b"}}, ""},
 		{"detail unknown parameter", http.MethodGet, managementBasePath + "/requests/detail", url.Values{"id": {"a"}, "x": {"1"}}, ""},
 		{"detail missing id", http.MethodGet, managementBasePath + "/requests/detail", nil, ""},

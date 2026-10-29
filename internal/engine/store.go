@@ -22,7 +22,7 @@ type storedKey struct {
 	Hash  string
 	Epoch Limits
 }
-type pending struct {
+type usageTransaction struct {
 	Quote          pricing.Quote
 	Record         Record
 	At             time.Time
@@ -39,7 +39,6 @@ type recordData struct {
 }
 type Store struct {
 	cutoff       time.Time
-	usageFault   func(pending) error
 	writeFault   func() error // fault injection for transaction failure tests
 	cleanFault   func() error // fault injection for maintenance visibility tests
 	captureFault func() error // fault injection for capture transaction rollback tests
@@ -54,9 +53,6 @@ type Store struct {
 	closed            bool
 	active            map[string]Admission
 	completed         map[string]Admission
-	pending           map[string]pending
-	blocked           map[string]bool
-	unknown           map[string]bool
 	lastError         string
 	maintenanceError  string
 	captures          chan CaptureInput
@@ -200,7 +196,7 @@ func Open(o Options) (*Store, error) {
 	if e != nil {
 		return nil, e
 	}
-	s := &Store{db: db, path: o.DataPath, now: o.Now, pricer: o.Pricer, settings: DefaultSettings(), active: map[string]Admission{}, completed: map[string]Admission{}, pending: map[string]pending{}, blocked: map[string]bool{}, unknown: map[string]bool{}, captures: make(chan CaptureInput, 64), capturePending: map[string]int{}, openedAt: o.Now().UTC(), drops: map[string]int64{}}
+	s := &Store{db: db, path: o.DataPath, now: o.Now, pricer: o.Pricer, settings: DefaultSettings(), active: map[string]Admission{}, completed: map[string]Admission{}, captures: make(chan CaptureInput, 64), capturePending: map[string]int{}, openedAt: o.Now().UTC(), drops: map[string]int64{}}
 	s.closeDone = make(chan struct{})
 	e = db.Update(func(tx *bolt.Tx) error {
 		for _, n := range buckets {
@@ -217,30 +213,6 @@ func Open(o Options) (*Store, error) {
 			return e
 		}
 		s.settings = loaded
-		unclean := string(m.Get([]byte("running"))) == "1"
-		var keys []storedKey
-		kb := tx.Bucket([]byte("keys"))
-		if e := kb.ForEach(func(_, v []byte) error {
-			var k storedKey
-			if e := decode(v, &k); e != nil {
-				return e
-			}
-			keys = append(keys, k)
-			return nil
-		}); e != nil {
-			return e
-		}
-		for _, k := range keys {
-			if s.observeInterruption(k.ID) || unclean {
-				k.BlockedReason = unknownReason
-				if e := put(kb, k.ID, k); e != nil {
-					return e
-				}
-			}
-			if k.BlockedReason != "" {
-				s.unknown[k.ID] = true
-			}
-		}
 		if !validSettings(s.settings) {
 			return ErrInvalid
 		}
@@ -270,20 +242,9 @@ func Open(o Options) (*Store, error) {
 		db.Close()
 		return nil, e
 	}
-	// Backfill before marking the process as running so a crash during the
-	// checkpointed pass does not look like an unclean live-store shutdown.
 	if e = s.backfillStatistics(); e != nil {
 		db.Close()
 		return nil, e
-	}
-	if e = s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket([]byte("meta")).Put([]byte("running"), []byte("1"))
-	}); e != nil {
-		db.Close()
-		return nil, e
-	}
-	if len(s.unknown) > 0 {
-		s.lastError = unknownReason
 	}
 	s.worker.Add(1)
 	go s.captureWorker()
@@ -349,7 +310,7 @@ func (s *Store) UpdateSettings(v Settings) (Settings, error) {
 		return put(tx.Bucket([]byte("meta")), "settings", v)
 	}); e != nil {
 		if rollback := s.pricer.Configure(s.settings.Pricing); rollback != nil {
-			s.fenceAllLocked()
+			s.lastError = "pricing configuration rollback failed"
 		}
 		return Settings{}, e
 	}
@@ -386,13 +347,8 @@ func (s *Store) Health() Health {
 	maintenanceActive := s.maintenanceActive.Load()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.closed {
-		s.db.View(func(tx *bolt.Tx) error {
-			return tx.Bucket([]byte("keys")).ForEach(func(id, _ []byte) error { s.observeInterruption(string(id)); return nil })
-		})
-	}
 	drops, total := s.dropSnapshot()
-	h := Health{DroppedCaptures: total, CaptureDrops: drops, CountersSince: s.openedAt, PendingUsage: len(s.pending), ActiveRequests: len(s.active), LastError: s.lastError, MaintenanceError: s.maintenanceError, LastCleanupRecords: s.lastCleanupRecord, LastCleanupBytes: s.lastCleanupBytes, LastCompactBeforeBytes: s.lastCompactBefore, LastCompactAfterBytes: s.lastCompactAfter, MaintenanceActive: maintenanceActive || s.maintenanceActive.Load(), CaptureLimitBytes: s.settings.MaxBodyStorageBytes}
+	h := Health{DroppedCaptures: total, CaptureDrops: drops, CountersSince: s.openedAt, ActiveRequests: len(s.active), LastError: s.lastError, MaintenanceError: s.maintenanceError, LastCleanupRecords: s.lastCleanupRecord, LastCleanupBytes: s.lastCleanupBytes, LastCompactBeforeBytes: s.lastCompactBefore, LastCompactAfterBytes: s.lastCompactAfter, MaintenanceActive: maintenanceActive || s.maintenanceActive.Load(), CaptureLimitBytes: s.settings.MaxBodyStorageBytes}
 	if !s.lastCleanupAt.IsZero() {
 		t := s.lastCleanupAt
 		h.LastCleanupAt = &t
@@ -427,37 +383,8 @@ func (s *Store) Close() (result error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	defer func() { s.closeErr = result; close(s.closeDone) }()
-	e := s.retryLocked()
-	for _, a := range s.active {
-		s.unknown[a.KeyID] = true
-	}
-	for _, p := range s.pending {
-		s.unknown[p.Record.KeyID] = true
-	}
-	durable := s.db.Update(func(tx *bolt.Tx) error {
-		for id := range s.unknown {
-			var k storedKey
-			b := tx.Bucket([]byte("keys"))
-			if err := get(b, id, &k); err != nil {
-				return err
-			}
-			k.BlockedReason = unknownReason
-			if err := put(b, id, k); err != nil {
-				return err
-			}
-		}
-		return tx.Bucket([]byte("meta")).Put([]byte("running"), []byte("0"))
-	})
-	if durable != nil {
-		e = durable
-	} else if len(s.active) > 0 || len(s.pending) > 0 {
-		e = ErrAccounting
-	}
 	s.dbMu.Lock()
 	ce := s.db.Close()
 	s.dbMu.Unlock()
-	if e != nil {
-		return e
-	}
 	return ce
 }

@@ -14,12 +14,11 @@ import (
 
 // Every non-idle snapshot must cause another poll, not a successful return.
 // Channel gates on that next poll prove this deterministically for missing
-// usage, active completion, pending billing and the per-Key slot independently.
+// usage, active completion and the per-Key slot independently.
 func TestGracefulRestartWaitsForLedgerAndCallbacks(t *testing.T) {
-	states := []struct{ ledger, active, pending, keyActive int }{
+	states := []struct{ ledger, active, keyActive int }{
 		{ledger: 3},
 		{ledger: 4, active: 1},
-		{ledger: 4, pending: 1},
 		{ledger: 4, keyActive: 1},
 		{ledger: 4},
 	}
@@ -56,7 +55,7 @@ func TestGracefulRestartWaitsForLedgerAndCallbacks(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(requestPage{Items: make([]recordView, states[index].ledger)})
 		case "/v0/management/plugins/" + pluginID + "/health":
 			s := states[phase.Load()]
-			_ = json.NewEncoder(w).Encode(acceptanceHealth{ActiveRequests: s.active, PendingUsage: s.pending})
+			_ = json.NewEncoder(w).Encode(acceptanceHealth{ActiveRequests: s.active})
 		case "/v0/management/plugins/" + pluginID + "/keys":
 			s := states[phase.Load()]
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []keyView{{ID: "fixture", Active: s.keyActive}}})

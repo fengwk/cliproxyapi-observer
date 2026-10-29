@@ -8,13 +8,29 @@ import (
 	"time"
 
 	"github.com/fengwk/cliproxyapi-observer/internal/engine"
+	"github.com/fengwk/cliproxyapi-observer/internal/pricing"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
+
+func setTestPrice(t *testing.T, m *Manager, model, provider string) {
+	t.Helper()
+	settings, err := m.store.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.Pricing = pricing.Config{Prices: []pricing.ManualPrice{{
+		Model: model, Provider: provider, Definition: pricing.PricingDefinition{Base: pricing.RateSet{Input: 1_000_000}},
+	}}}
+	if _, err = m.store.UpdateSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // The dispatcher, not a UI mock, must connect the view/facet contracts to the
 // real ledger and reject unknown/repeated/mixed-range inputs before querying.
 func TestManagementRequestViewAndFacets(t *testing.T) {
 	m := liveManager(t)
+	setTestPrice(t, m, "exact/model:v1", "openai")
 	key, _, err := m.store.CreateKey(engine.KeySpec{Enabled: true, Label: "Historical"})
 	if err != nil {
 		t.Fatal(err)

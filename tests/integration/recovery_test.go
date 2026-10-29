@@ -4,147 +4,51 @@ package integration
 
 import (
 	"net/http"
-	"net/url"
-	"reflect"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
 
-// This file covers the crash-recovery contract from DESIGN.md: an unclean
-// native-host exit fences only the Keys that existed at crash time, the fence
-// is visible through the public management API, RecoverKey requires an explicit
-// acknowledgment, and recovery never rewrites counters, limits or history.
+// This file covers the availability-first crash contract: an unclean native
+// host exit must never fence a Key, must never require an explicit recovery
+// call and must never fabricate the usage of an execution that never
+// committed.
+//
+// The expectation is deliberately the opposite of the historical
+// fence-and-recover behavior:
+//
+//   - the pre-crash Key is usable again on the very first request after the
+//     restart, without any acknowledgment and without any recovery call;
+//   - the committed history and the durable totals survive the crash;
+//   - the execution that was admitted but never committed stays missing: it is
+//     never fabricated and never charged;
+//   - the next real execution is accounted normally and accumulates on top of
+//     the durable totals.
 //
 // Graceful restart (SIGTERM through harness.Stop) preserving counters and the
 // original client secret is already covered by
 // TestSettingsHealthCompactRestartPreserveKeysAndCosts in acceptance_test.go;
 // this file deliberately does not duplicate that scenario.
 
-// recoveryKeyState mirrors the public Key wire shape. It is local to this file
-// because the acceptance suite must not import engine internals.
-type recoveryKeyState struct {
-	ID            string         `json:"id"`
-	Label         string         `json:"label"`
-	Enabled       bool           `json:"enabled"`
-	ExpiresAt     *time.Time     `json:"expires_at,omitempty"`
-	MaxConcurrent int            `json:"max_concurrent"`
-	AllowedModels []string       `json:"allowed_models"`
-	Limits        limitsView     `json:"limits"`
-	Used          limitsView     `json:"used"`
-	Starts        recoveryWindow `json:"starts"`
-	Resets        recoveryWindow `json:"resets"`
-	Active        int            `json:"active"`
-	BlockedReason string         `json:"blocked_reason"`
-	CreatedAt     time.Time      `json:"created_at"`
-}
-
-type recoveryWindow struct {
-	FiveHour time.Time `json:"five_hour"`
-	Week     time.Time `json:"week"`
-	Month    time.Time `json:"month"`
-	Total    time.Time `json:"total"`
-}
-
-type recoveryErrorResponse struct {
-	Error struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
-
-func recoveryKeys(t *testing.T, h *harness) []recoveryKeyState {
+// crashKey returns the public state of one Key.
+func crashKey(t *testing.T, h *harness, id string) keyView {
 	t.Helper()
-	var out struct {
-		Items []recoveryKeyState `json:"items"`
-	}
-	h.api(t, http.MethodGet, "/keys", nil, http.StatusOK, &out)
-	return out.Items
-}
-
-func recoveryKeyByID(t *testing.T, h *harness, id string) recoveryKeyState {
-	t.Helper()
-	for _, key := range recoveryKeys(t, h) {
+	for _, key := range h.keys(t) {
 		if key.ID == id {
 			return key
 		}
 	}
 	t.Fatalf("key %q is missing from the public key list", id)
-	return recoveryKeyState{}
+	return keyView{}
 }
 
-// recoveryAssertStableKey proves recovery and rejection do not touch the
-// identity, limits, cycle starts or counters of the affected Key.
-func recoveryAssertStableKey(t *testing.T, label string, before, after recoveryKeyState) {
-	t.Helper()
-	if after.ID != before.ID || after.Label != before.Label || after.Enabled != before.Enabled ||
-		after.MaxConcurrent != before.MaxConcurrent {
-		t.Errorf("%s identity/spec changed: before=%+v after=%+v", label, before, after)
-	}
-	if !reflect.DeepEqual(after.ExpiresAt, before.ExpiresAt) {
-		t.Errorf("%s expires_at changed: before=%v after=%v", label, before.ExpiresAt, after.ExpiresAt)
-	}
-	if !reflect.DeepEqual(after.AllowedModels, before.AllowedModels) {
-		t.Errorf("%s allowed_models changed: before=%v after=%v", label, before.AllowedModels, after.AllowedModels)
-	}
-	if after.Limits != before.Limits {
-		t.Errorf("%s limits changed: before=%+v after=%+v", label, before.Limits, after.Limits)
-	}
-	if after.Used != before.Used {
-		t.Errorf("%s counters changed: before=%+v after=%+v", label, before.Used, after.Used)
-	}
-	if after.Starts != before.Starts || after.Resets != before.Resets {
-		t.Errorf("%s cycle windows changed: starts %+v/%+v resets %+v/%+v",
-			label, before.Starts, after.Starts, before.Resets, after.Resets)
-	}
-	if !after.CreatedAt.Equal(before.CreatedAt) {
-		t.Errorf("%s created_at changed: before=%s after=%s", label, before.CreatedAt, after.CreatedAt)
-	}
-}
-
-type recoveryHistory struct {
-	Summary acceptanceSummary
-	Records map[string]recordView
-}
-
-func recoveryTakeHistory(t *testing.T, h *harness) recoveryHistory {
-	t.Helper()
-	history := recoveryHistory{Records: make(map[string]recordView)}
-	h.api(t, http.MethodGet, "/summary", nil, http.StatusOK, &history.Summary)
-	for _, record := range h.page(t, "page_size=100").Items {
-		history.Records[record.ID] = record
-	}
-	return history
-}
-
-// recoveryAssertHistoryUnchanged proves recovery neither inserts a synthetic
-// usage record nor rewrites an existing quote or rollup.
-func recoveryAssertHistoryUnchanged(t *testing.T, label string, before, after recoveryHistory) {
-	t.Helper()
-	if after.Summary != before.Summary {
-		t.Errorf("%s summary changed: before=%+v after=%+v", label, before.Summary, after.Summary)
-	}
-	if len(after.Records) != len(before.Records) {
-		t.Errorf("%s record count changed: before=%d after=%d", label, len(before.Records), len(after.Records))
-	}
-	for id, want := range before.Records {
-		got, ok := after.Records[id]
-		if !ok {
-			t.Errorf("%s record %s disappeared", label, id)
-			continue
-		}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("%s record %s changed: before=%+v after=%+v", label, id, want, got)
-		}
-	}
-}
-
-// TestCrashRecoveryIsKeyScopedAndRequiresAcknowledgment kills the real native
-// host while an admitted request is blocked upstream, then restarts against the
-// same database. The crash must block the pre-crash Key (with its 15 micro-USD
-// counter intact), must not poison a newly created Key, must reject recovery
-// without acknowledgment, and must preserve counters, limits and history when
-// the acknowledged recovery is applied.
-func TestCrashRecoveryIsKeyScopedAndRequiresAcknowledgment(t *testing.T) {
+// TestCrashRestartKeepsKeysUsableAndCommitsOnlyRealUsage kills the real
+// native host while an admitted request is blocked upstream, then restarts
+// against the same database. The crash must not fence the pre-crash Key, the
+// committed history and totals must survive, the missing execution must stay
+// missing and the next real execution must accumulate on the durable totals.
+func TestCrashRestartKeepsKeysUsableAndCommitsOnlyRealUsage(t *testing.T) {
 	h := newHarness(t)
 	created := h.createKey(t, validSpec())
 
@@ -163,17 +67,16 @@ func TestCrashRecoveryIsKeyScopedAndRequiresAcknowledgment(t *testing.T) {
 	}
 
 	known := make(map[string]struct{})
-	first := acceptanceInferAndAwait(t, h, created.Secret, known)
-	acceptanceAssertTokens(t, first)
-	acceptanceAssertCost(t, first, 15, "manual")
-	if first.KeyID != created.Key.ID {
-		t.Fatalf("first record key_id = %q, want %q", first.KeyID, created.Key.ID)
+	committed := acceptanceInferAndAwait(t, h, created.Secret, known)
+	acceptanceAssertTokens(t, committed)
+	acceptanceAssertCost(t, committed, 15, "manual")
+	if committed.KeyID != created.Key.ID {
+		t.Fatalf("committed record key_id = %q, want %q", committed.KeyID, created.Key.ID)
 	}
 
 	wantUsed := limitsView{FiveHour: 15, Week: 15, Month: 15, Total: 15}
-	beforeCrash := recoveryKeyByID(t, h, created.Key.ID)
-	if beforeCrash.Used != wantUsed {
-		t.Fatalf("pre-crash counters = %+v, want %+v", beforeCrash.Used, wantUsed)
+	if before := crashKey(t, h, created.Key.ID); before.Used != wantUsed {
+		t.Fatalf("pre-crash counters = %+v, want %+v", before.Used, wantUsed)
 	}
 
 	// The barrier is consumed after observer admission but before the upstream
@@ -205,96 +108,132 @@ func TestCrashRecoveryIsKeyScopedAndRequiresAcknowledgment(t *testing.T) {
 		t.Fatalf("restart after crash: %v", err)
 	}
 
-	crashed := recoveryKeyByID(t, restarted, created.Key.ID)
-	if crashed.BlockedReason == "" {
-		t.Fatal("pre-crash key is not blocked after an unclean shutdown")
+	// The crash must not fabricate the missing execution: the ledger still
+	// holds exactly the one committed record and the totals still describe
+	// exactly that record.
+	page := restarted.page(t, "page_size=100")
+	if page.HasMore || len(page.Items) != 1 {
+		t.Fatalf("ledger after the crash = %+v, want exactly the 1 committed execution", page.Items)
 	}
-	if crashed.Used != wantUsed {
-		t.Fatalf("post-crash counters = %+v, want the durable %+v", crashed.Used, wantUsed)
+	if page.Items[0].ID != committed.ID {
+		t.Fatalf("ledger record after the crash = %q, want the committed %q", page.Items[0].ID, committed.ID)
 	}
-	calls := h.mock.callCount()
-	if status, _ := restarted.infer(t, created.Secret, false); status != http.StatusServiceUnavailable {
-		t.Fatalf("crash-blocked key admission status %d, want 503", status)
+	var summary acceptanceSummary
+	restarted.api(t, http.MethodGet, "/summary", nil, http.StatusOK, &summary)
+	if summary.Requests != 1 || summary.CostMicroUSD != 15 {
+		t.Fatalf("summary after the crash = %+v, want requests=1 cost=15", summary)
 	}
-	if h.mock.callCount() != calls {
-		t.Fatal("crash-blocked key dispatched upstream")
-	}
-
-	// A Key created after the crash must not inherit the pre-crash fence.
-	fresh := restarted.createKey(t, validSpec())
-	freshState := recoveryKeyByID(t, restarted, fresh.Key.ID)
-	if freshState.BlockedReason != "" {
-		t.Fatalf("new key blocked_reason = %q, want empty (the crash fence must be key-scoped)", freshState.BlockedReason)
-	}
-	freshRecord := acceptanceInferAndAwait(t, restarted, fresh.Secret, known)
-	acceptanceAssertTokens(t, freshRecord)
-	acceptanceAssertCost(t, freshRecord, 15, "manual")
-	if freshRecord.KeyID != fresh.Key.ID {
-		t.Fatalf("fresh record key_id = %q, want %q", freshRecord.KeyID, fresh.Key.ID)
-	}
-	if got := recoveryKeyByID(t, restarted, fresh.Key.ID).Used.Total; got != 15 {
-		t.Errorf("new key total counter = %d, want 15", got)
-	}
-	if still := recoveryKeyByID(t, restarted, created.Key.ID); still.Used != wantUsed || still.BlockedReason == "" {
-		t.Fatalf("old key changed while a new key was used: %+v", still)
+	if after := crashKey(t, restarted, created.Key.ID); after.Used != wantUsed {
+		t.Fatalf("counters after the crash = %+v, want the durable %+v", after.Used, wantUsed)
 	}
 
-	// Query IDs are URL-escaped exactly as required by the management API.
-	recoverPath := "/keys/recover?id=" + url.QueryEscape(created.Key.ID)
+	// The pre-crash Key must work again immediately: no fence, no
+	// acknowledgment and no recovery request may stand between the client and
+	// the upstream.
+	calls := restarted.mock.callCount()
+	status, body := restarted.infer(t, created.Secret, false)
+	if status != http.StatusOK {
+		t.Fatalf("post-crash inference status %d body %s, want 200", status, truncate(body, 400))
+	}
+	if got := jsonContent(body); got != fixtureText {
+		t.Errorf("post-crash content = %q, want %q", got, fixtureText)
+	}
+	if restarted.mock.callCount() != calls+1 {
+		t.Fatal("the old key did not reach the upstream after the crash")
+	}
 
-	// DESIGN.md does not publish an authoritative error code for a missing
-	// acknowledgment; the binding behavior is the 400 rejection. Assert the
-	// sanitized error object without pinning an unpublished code string.
-	var rejected recoveryErrorResponse
-	restarted.api(t, http.MethodPost, recoverPath, map[string]any{"acknowledge": false}, http.StatusBadRequest, &rejected)
-	if rejected.Error.Code == "" || rejected.Error.Message == "" {
-		t.Errorf("recovery rejection = %+v, want a sanitized error code and message", rejected)
-	}
-	if still := recoveryKeyByID(t, restarted, created.Key.ID); still.BlockedReason == "" || still.Used != wantUsed {
-		t.Fatalf("rejected recovery changed the blocked key: %+v", still)
-	}
-
-	beforeRecovery := recoveryKeyByID(t, restarted, created.Key.ID)
-	beforeHistory := recoveryTakeHistory(t, restarted)
-
-	var recovered recoveryKeyState
-	restarted.api(t, http.MethodPost, recoverPath, map[string]any{"acknowledge": true}, http.StatusOK, &recovered)
-	if recovered.ID != created.Key.ID {
-		t.Fatalf("recovered key id = %q, want %q", recovered.ID, created.Key.ID)
-	}
-	if recovered.BlockedReason != "" {
-		t.Errorf("recovered key blocked_reason = %q, want empty", recovered.BlockedReason)
-	}
-	afterRecovery := recoveryKeyByID(t, restarted, created.Key.ID)
-	if afterRecovery.BlockedReason != "" {
-		t.Errorf("blocked_reason after acknowledged recovery = %q, want empty", afterRecovery.BlockedReason)
-	}
-	recoveryAssertStableKey(t, "acknowledged recovery", beforeRecovery, afterRecovery)
-	recoveryAssertHistoryUnchanged(t, "acknowledged recovery", beforeHistory, recoveryTakeHistory(t, restarted))
-
-	// Recovery only unblocks admission; the next real execution must be
-	// accounted normally and increment the existing counters.
-	after := acceptanceInferAndAwait(t, restarted, created.Secret, known)
+	// The new usage is accounted normally and accumulates on the durable
+	// totals instead of replacing them.
+	after := acceptanceAwaitNewRecord(t, restarted, known)
 	acceptanceAssertTokens(t, after)
 	acceptanceAssertCost(t, after, 15, "manual")
 	if after.KeyID != created.Key.ID {
-		t.Fatalf("post-recovery record key_id = %q, want %q", after.KeyID, created.Key.ID)
+		t.Fatalf("post-crash record key_id = %q, want %q", after.KeyID, created.Key.ID)
 	}
-	finalKey := recoveryKeyByID(t, restarted, created.Key.ID)
-	if finalKey.Used.Total != 30 {
-		t.Errorf("post-recovery total counter = %d, want 30 (15 durable + 15 new)", finalKey.Used.Total)
+	wantTotal := limitsView{FiveHour: 30, Week: 30, Month: 30, Total: 30}
+	if final := crashKey(t, restarted, created.Key.ID); final.Used != wantTotal {
+		t.Errorf("counters after the new execution = %+v, want %+v", final.Used, wantTotal)
 	}
-	if finalKey.BlockedReason != "" {
-		t.Errorf("post-recovery key blocked_reason = %q, want empty", finalKey.BlockedReason)
-	}
-
 	var finalSummary acceptanceSummary
 	restarted.api(t, http.MethodGet, "/summary", nil, http.StatusOK, &finalSummary)
-	if finalSummary.Requests != beforeHistory.Summary.Requests+1 {
-		t.Errorf("summary requests = %d, want %d", finalSummary.Requests, beforeHistory.Summary.Requests+1)
+	if finalSummary.Requests != 2 || finalSummary.CostMicroUSD != 30 {
+		t.Errorf("summary after the new execution = %+v, want requests=2 cost=30", finalSummary)
 	}
-	if finalSummary.CostMicroUSD != beforeHistory.Summary.CostMicroUSD+15 {
-		t.Errorf("summary cost = %d, want %d", finalSummary.CostMicroUSD, beforeHistory.Summary.CostMicroUSD+15)
+	if finalPage := restarted.page(t, "page_size=100"); finalPage.HasMore || len(finalPage.Items) != 2 {
+		t.Errorf("ledger after the new execution = %+v, want the committed and the new execution", finalPage.Items)
+	}
+
+	// The committed history keeps its identity, quote and amount across the
+	// crash.
+	kept := acceptanceRecordByID(t, restarted, committed.ID)
+	if kept.CostMicroUSD != committed.CostMicroUSD || kept.PriceSource != committed.PriceSource ||
+		kept.KeyID != committed.KeyID || !kept.Time.Equal(committed.Time) {
+		t.Errorf("committed record changed after the crash: before=%+v after=%+v", committed, kept)
+	}
+	h.mock.requireClean(t)
+}
+
+// TestLegacyInterruptionArtifactsDoNotFenceKeys proves that the obsolete
+// sidecar artifacts of the removed fence mechanism have no effect: a Key left
+// next to the database by an older release stays usable, its durable counters
+// and history are untouched and the next execution is accounted normally.
+func TestLegacyInterruptionArtifactsDoNotFenceKeys(t *testing.T) {
+	h := newHarness(t)
+	created := h.createKey(t, validSpec())
+	acceptancePutPricing(t, h, acceptancePricing{
+		Auto:   false,
+		Source: "models_dev_v2",
+		Prices: []acceptancePrice{
+			acceptanceManual(modelName, acceptanceProvider, 1_000_000),
+			acceptanceManual(upstreamModel, acceptanceProvider, 1_000_000),
+		},
+	})
+
+	known := make(map[string]struct{})
+	committed := acceptanceInferAndAwait(t, h, created.Secret, known)
+	acceptanceAssertCost(t, committed, 15, "manual")
+
+	// Stop the host first: the obsolete artifacts are exactly what an older
+	// release left behind next to the database of a crashed session.
+	h.awaitGracefulRestartReady(t, 1)
+	h.Stop()
+	markerDir := h.dbPath + ".interrupted"
+	if err := os.MkdirAll(markerDir, 0o700); err != nil {
+		t.Fatalf("create legacy marker directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(markerDir, created.Key.ID), []byte("unknown accounting\n"), 0o600); err != nil {
+		t.Fatalf("write legacy marker: %v", err)
+	}
+
+	restarted, err := h.restartPreservingConfig(t)
+	if err != nil {
+		t.Fatalf("restart with legacy artifacts: %v", err)
+	}
+
+	// The obsolete bytes must not fence the Key and must not rewrite its
+	// durable state.
+	wantUsed := limitsView{FiveHour: 15, Week: 15, Month: 15, Total: 15}
+	if key := crashKey(t, restarted, created.Key.ID); key.Used != wantUsed {
+		t.Fatalf("counters after legacy artifacts = %+v, want %+v", key.Used, wantUsed)
+	}
+	kept := acceptanceRecordByID(t, restarted, committed.ID)
+	if kept.CostMicroUSD != committed.CostMicroUSD || kept.PriceSource != committed.PriceSource ||
+		!kept.Time.Equal(committed.Time) {
+		t.Errorf("committed record changed after legacy artifacts: before=%+v after=%+v", committed, kept)
+	}
+
+	// The Key is usable immediately and the next execution is accounted.
+	status, body := restarted.infer(t, created.Secret, false)
+	if status != http.StatusOK {
+		t.Fatalf("post-legacy inference status %d body %s, want 200", status, truncate(body, 400))
+	}
+	after := acceptanceAwaitNewRecord(t, restarted, known)
+	acceptanceAssertCost(t, after, 15, "manual")
+	if after.KeyID != created.Key.ID {
+		t.Fatalf("post-legacy record key_id = %q, want %q", after.KeyID, created.Key.ID)
+	}
+	if got := crashKey(t, restarted, created.Key.ID).Used.Total; got != 30 {
+		t.Errorf("total counter after legacy artifacts = %d, want 30", got)
 	}
 	h.mock.requireClean(t)
 }

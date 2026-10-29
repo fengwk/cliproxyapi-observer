@@ -32,7 +32,7 @@ func (s *Store) Compact() error {
 }
 
 func (s *Store) maintenanceBusyLocked() bool {
-	return len(s.active) > 0 || len(s.pending) > 0 || s.captureQueued.Load() > 0
+	return len(s.active) > 0 || s.captureQueued.Load() > 0
 }
 
 func (s *Store) Maintenance() error {
@@ -41,7 +41,6 @@ func (s *Store) Maintenance() error {
 	if e := s.check(); e != nil {
 		return e
 	}
-	retryErr := s.retryLocked()
 	s.pruneCompletedLocked()
 	now := s.now().UTC()
 	cut := now.Add(-time.Duration(s.settings.RawRetentionHours) * time.Hour)
@@ -171,9 +170,6 @@ func (s *Store) Maintenance() error {
 				}
 			}
 		}
-	}
-	if retryErr != nil {
-		return retryErr
 	}
 	if maintenanceErr != "" {
 		return ErrMaintenance

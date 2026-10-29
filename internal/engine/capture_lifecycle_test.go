@@ -666,8 +666,10 @@ func TestCaptureTransactionRollbackAndWriteFailure(t *testing.T) {
 	}
 }
 
-// Physical maintenance refuses to start while a request or write is pending,
-// and the admission gate rejects work during the short maintenance window.
+// Physical maintenance refuses to start while a request or capture write is
+// pending, and the admission gate rejects work during the short maintenance
+// window. A failed accounting write is not a fence: it bars neither physical
+// compaction nor admission.
 func TestCompactBusyGuardsAndMaintenanceAdmission(t *testing.T) {
 	s, now, _ := fixture(t)
 	k, _ := key(t, s, KeySpec{Enabled: true})
@@ -685,11 +687,14 @@ func TestCompactBusyGuardsAndMaintenanceAdmission(t *testing.T) {
 	if e := s.RecordUsage(event(k, "debt", *now)); !errors.Is(e, ErrAccounting) {
 		t.Fatal(e)
 	}
-	if e := s.Compact(); !errors.Is(e, ErrBusy) {
-		t.Fatal("compacted with pending accounting", e)
+	// The failed accounting write neither blocks compaction nor maintenance.
+	if e := s.Compact(); e != nil {
+		t.Fatal("failed accounting barred compaction", e)
 	}
 	s.writeFault = nil
 	must(t, s.Maintenance())
+	must(t, s.Admit(Admission{RequestID: "after-failure", KeyID: k.ID, Model: "gpt-exact"}))
+	must(t, s.Complete("after-failure", *now))
 	s.maintenanceActive.Store(true)
 	if e := s.Admit(Admission{RequestID: "during", KeyID: k.ID, Model: "gpt-exact"}); !errors.Is(e, ErrMaintenance) {
 		t.Fatal("admission during maintenance", e)

@@ -57,6 +57,9 @@ func TestCountTokensDoesNotAdmitOrCharge(t *testing.T) {
 	spec := validSpec()
 	spec.MaxConcurrent = 1
 	created := h.createKey(t, spec)
+	// An execution without a price is an accounting error that stores no row,
+	// so the accounted generation must name the identity it prices.
+	acceptancePriceFixture(t, h, 1_000_000)
 	gate := h.mock.holdNextRequest()
 	t.Cleanup(gate.open)
 	first := startInference(context.Background(), h, created.Secret, false)
@@ -107,6 +110,9 @@ func TestCountTokensDoesNotAdmitOrCharge(t *testing.T) {
 func TestCleanNativeReplacementPreservesKeys(t *testing.T) {
 	h := newHarness(t)
 	created := h.createKey(t, validSpec())
+	// An execution without a price is an accounting error that stores no row,
+	// so the accounted execution must name the identity it prices.
+	acceptancePriceFixture(t, h, 1_000_000)
 	before := acceptanceInferAndAwait(t, h, created.Secret, map[string]struct{}{})
 	h.waitForLog(t, "file watcher started", 20*time.Second)
 	next := filepath.Join(h.dir, "replacement")

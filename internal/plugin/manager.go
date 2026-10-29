@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -89,7 +90,6 @@ type Manager struct {
 	workers            sync.WaitGroup
 	scopes             sync.Map // host caller_scope -> callerScope; never contains secrets
 	admitted           sync.Map // our request ID -> our Key ID; completion ownership gate
-	billingFaults      sync.Map // marker-write failure fallback; explicit recovery or durable handoff only
 	capsMu             sync.Mutex
 	catalogCaps        map[[32]byte]time.Time
 	// accountMetadata returns the raw host.auth.list envelope for one
@@ -162,7 +162,7 @@ func (m *Manager) HandleCall(method string, raw []byte) (out []byte, err error) 
 		}
 		if m.store != nil {
 			h := m.store.Health()
-			if h.ActiveRequests != 0 || h.PendingUsage != 0 {
+			if h.ActiveRequests != 0 {
 				return fail("busy", 409)
 			}
 		}
@@ -189,14 +189,9 @@ func (m *Manager) HandleCall(method string, raw []byte) (out []byte, err error) 
 		defer m.lifeMu.Unlock()
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		callbackFault := false
-		m.billingFaults.Range(func(_, _ any) bool { callbackFault = true; return false })
-		if callbackFault {
-			return fail("accounting_unsettled", 409)
-		}
 		if m.store != nil {
 			h := m.store.Health()
-			if h.ActiveRequests != 0 || h.PendingUsage != 0 {
+			if h.ActiveRequests != 0 {
 				return fail("busy", 409)
 			}
 		}
@@ -234,8 +229,7 @@ func (m *Manager) HandleCall(method string, raw []byte) (out []byte, err error) 
 		}
 		return okEnvelope(struct{}{})
 	case pluginabi.MethodUsageHandle:
-		m.handleUsage(raw)
-		return okEnvelope(struct{}{})
+		return m.handleUsage(raw)
 	case pluginabi.MethodManagementRegister:
 		return okEnvelope(managementRegistration())
 	case pluginabi.MethodManagementHandle:
@@ -306,48 +300,50 @@ func (m *Manager) closeLocked() error {
 	return nil
 }
 
-// Accounting errors never fail an already running response. Engine errors own
-// durable pending events. Unexpected callback panics and late deliveries persist
-// an interruption outside bbolt so even a different native instance fails closed.
-// This cannot reconstruct source events that the host never delivers.
-func (m *Manager) handleUsage(raw []byte) {
+// handleUsage ingests one usage record.
+//
+// Accounting failures are genuine errors: an invalid record, a pricing error
+// or a failed write is reported to the host instead of being swallowed. No Key
+// is ever latched, no marker is written and no later admission is restricted
+// because of accounting. A missing charge stays missing; Observer never
+// invents a $0 success and never repairs a cost it could not compute.
+func (m *Manager) handleUsage(raw []byte) ([]byte, error) {
 	var r pluginapi.UsageRecord
-	if json.Unmarshal(raw, &r) != nil || !r.Generate || r.AccessProvider != AccessProvider || !validPrincipal(r.APIKey) {
-		return
+	if json.Unmarshal(raw, &r) != nil {
+		return fail("invalid_usage", http.StatusBadRequest)
 	}
-	id := strings.TrimPrefix(r.APIKey, "observer:")
+	if !r.Generate || r.AccessProvider != AccessProvider || !strings.HasPrefix(r.APIKey, "observer:") {
+		return okEnvelope(struct{}{})
+	}
+	if !validPrincipal(r.APIKey) {
+		return fail("invalid_usage", http.StatusBadRequest)
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	m.accountUsage(id, func() error {
-		if m.store == nil {
-			return engine.ErrClosed
-		}
-		return m.store.RecordUsage(r)
-	})
+	if m.store == nil {
+		return fail("accounting_unavailable", http.StatusServiceUnavailable)
+	}
+	if err := m.store.RecordUsage(r); err != nil {
+		code, status := usageFailure(err)
+		return fail(code, status)
+	}
+	return okEnvelope(struct{}{})
 }
 
-// Caller holds the lifecycle read fence. Keep this panic boundary around the
-// engine call only, not around JSON parsing or credential extraction.
-func (m *Manager) accountUsage(id string, write func() error) {
-	defer func() {
-		if recover() != nil {
-			m.recordInterruption(id)
-		}
-	}()
-	if err := write(); errors.Is(err, engine.ErrClosed) {
-		m.recordInterruption(id)
+// usageFailure maps an engine accounting error to a sanitized code and status.
+// The engine message, database paths and request payloads never reach the
+// host log; only the operator-facing reason survives.
+func usageFailure(err error) (string, int) {
+	switch {
+	case errors.Is(err, engine.ErrNotFound):
+		return "unknown_key", http.StatusNotFound
+	case errors.Is(err, engine.ErrInvalid):
+		return "invalid_usage", http.StatusBadRequest
+	default:
+		return "accounting_unavailable", http.StatusServiceUnavailable
 	}
 }
 
-func (m *Manager) recordInterruption(id string) {
-	if err := engine.RecordInterruption(m.cfg.DB, id); err != nil {
-		// Only marker write failures need a second, in-memory safety gate.
-		// Never expose filesystem errors, callback panic text, or credentials.
-		m.billingFaults.Store(id, true)
-	} else {
-		m.billingFaults.Delete(id)
-	}
-}
 func validPrincipal(s string) bool {
 	if !strings.HasPrefix(s, "observer:") {
 		return false
@@ -484,9 +480,6 @@ func (m *Manager) before(raw []byte) (out []byte, err error) {
 	// admission. Count helpers were returned above. A misleading false flag on
 	// a real generation route must never bypass quotas or concurrency.
 	if e == nil {
-		if _, fault := m.billingFaults.Load(id); fault {
-			return okEnvelope(denied(503))
-		}
 		if r.RequestID == "" {
 			return okEnvelope(denied(400))
 		}
