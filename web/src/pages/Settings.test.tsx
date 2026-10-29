@@ -62,7 +62,6 @@ describe('SettingsPage', () => {
   const initialHealth: Health = {
     database_bytes: 15728640, // 15 MB
     dropped_captures: 0,
-    pending_usage: 0,
     active_requests: 2,
     last_error: '',
   };
@@ -156,6 +155,26 @@ describe('SettingsPage', () => {
     // Verify accounting normal state displayed
     expect(screen.getByText('计费与存储状态正常')).toBeDefined();
     expect(screen.getAllByText('15.0 MB').length).toBeGreaterThanOrEqual(1);
+  });
+
+  // Removing the queue counter must not hide actual system or maintenance errors.
+  it.each([
+    ['last_error', '最近系统错误：测试系统错误', '测试系统错误'],
+    ['maintenance_error', '最近维护错误：测试维护错误', '测试维护错误'],
+  ] as const)('reports health %s without a retry queue', async (field, message, value) => {
+    const request = mockApi.request;
+    mockApi = {
+      ...mockApi,
+      request: vi.fn((path: string, options?: Parameters<ApiClient['request']>[1]) =>
+        path === '/health'
+          ? Promise.resolve({ ...initialHealth, [field]: value })
+          : request(path, options)) as ApiClient['request'],
+    };
+
+    render(<SettingsPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(screen.getByText('存储或计费状态有异常')).toBeInTheDocument();
+    expect(screen.queryByText(/待重试计费/)).not.toBeInTheDocument();
   });
 
   it('omits the redundant page title and jump links, and exposes logout at the bottom', async () => {
@@ -827,7 +846,6 @@ describe('SettingsPage', () => {
     const compactHealth: Health = {
       database_bytes: 5242880, // 5.0 MB
       dropped_captures: 0,
-      pending_usage: 0,
       active_requests: 0,
     };
 

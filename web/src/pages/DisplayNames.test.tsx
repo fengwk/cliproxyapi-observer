@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { accountDisplay, resolveKeyDisplay, captureReasonLabel, accountingQualityLabel, blockedReasonLabel, formatPriceSource } from './RequestsHelpers';
+import { accountDisplay, resolveKeyDisplay, captureReasonLabel, accountingQualityLabel, formatPriceSource } from './RequestsHelpers';
 import { RequestsDetailModal } from './RequestsDetailModal';
 import { RequestsTable } from './RequestsTable';
 import type { Detail, Key, RequestRecord } from '../lib/types';
@@ -31,9 +31,6 @@ describe('friendly identities', () => {
     expect(accountingQualityLabel('future-code')).toBe('未知记账质量');
     expect(captureReasonLabel('trace_collision')).toBe('追踪关联冲突');
     expect(captureReasonLabel('future-code')).toBe('未知采集原因');
-    expect(blockedReasonLabel('pending accounting')).toBe('等待记账完成');
-    expect(blockedReasonLabel('accounting interruption: explicit acknowledgement required')).toBe('记账过程被中断，需要明确确认恢复');
-    expect(blockedReasonLabel('future-code')).toBe('未知阻断原因');
     expect(formatPriceSource('future-code').label).toBe('未知定价来源');
   });
 

@@ -87,9 +87,10 @@ test('management auth: bearer required and errors use the standard envelope', as
     assert.equal(ok.res.status, 200);
     assert.equal(ok.body.schema_version, 3);
     assert.equal(typeof ok.body.version, 'string');
-    for (const field of ['database_bytes', 'dropped_captures', 'pending_usage', 'active_requests']) {
+    for (const field of ['database_bytes', 'dropped_captures', 'active_requests']) {
       assert.equal(typeof ok.body[field], 'number', field);
     }
+    assert.equal('pending_usage' in ok.body, false);
     assert.equal(ok.res.headers.get('cache-control'), 'no-store');
     assert.equal(ok.res.headers.get('access-control-allow-origin'), null);
   });
@@ -347,7 +348,7 @@ test('summary: bucket granularity, totals and filters', async () => {
   });
 });
 
-test('keys: fixed query-ID create/update/rotate/reset/recover/revoke with persistent plaintext secrets', async () => {
+test('keys: fixed query-ID create/update/rotate/reset/revoke with persistent plaintext secrets', async () => {
   await withServer(async (server) => {
     const list = await json(server, '/keys');
     assert.equal(list.res.status, 200);
@@ -357,7 +358,7 @@ test('keys: fixed query-ID create/update/rotate/reset/recover/revoke with persis
     assert.equal(list.body.items.find((key) => key.id === 'key-alpha').secret, 'sk-key-alpha');
     assert.equal(list.body.items.find((key) => key.id === 'key-legacy').secret, undefined);
     assert.ok(list.body.items.some((key) => key.id === 'key-legacy' && key.allowed_models.includes('retired-model-v0')));
-    assert.ok(list.body.items.some((key) => key.id === 'key-blocked' && key.blocked_reason));
+    assert.ok(list.body.items.every((key) => !('blocked_reason' in key)));
 
     const created = await json(server, '/keys', {
       method: 'POST',
@@ -412,29 +413,6 @@ test('keys: fixed query-ID create/update/rotate/reset/recover/revoke with persis
     assert.equal(reset.body.used.total, 0);
     assert.equal(reset.body.secret, rotated.body.secret);
 
-    const blocked = server.state.keys.find((key) => key.id === 'key-blocked');
-    const beforeRecover = JSON.parse(JSON.stringify(blocked));
-    const missingAck = await json(server, '/keys/recover?id=key-blocked', {
-      method: 'POST',
-      body: { acknowledge: false }
-    });
-    assert.equal(missingAck.res.status, 400);
-    assert.ok(blocked.blocked_reason, '失败的 acknowledge 不得清除阻塞');
-    assert.equal(server.counters.keyRecovers, 0);
-
-    const recovered = await json(server, '/keys/recover?id=key-blocked', {
-      method: 'POST',
-      body: { acknowledge: true }
-    });
-    assert.equal(recovered.res.status, 200);
-    assert.equal(recovered.body.blocked_reason, '');
-    assert.equal(recovered.body.secret, 'sk-key-blocked');
-    assert.equal(server.counters.keyRecovers, 1);
-    assert.deepEqual(recovered.body.used, beforeRecover.used, '恢复不得重置 used');
-    assert.deepEqual(recovered.body.starts, beforeRecover.starts, '恢复不得重置 starts');
-    assert.deepEqual(recovered.body.resets, beforeRecover.resets, '恢复不得重置 resets');
-    assert.deepEqual(recovered.body.limits, beforeRecover.limits, '恢复不得改动 limits');
-
     const revoked = await fetch(server.origin + BASE + '/keys?id=' + encodeURIComponent(id), {
       method: 'DELETE',
       headers: AUTH
@@ -444,7 +422,32 @@ test('keys: fixed query-ID create/update/rotate/reset/recover/revoke with persis
     assert.equal(server.state.secrets.has(id), false);
     assert.equal(server.state.secretValues.has(id), false);
     const afterRevoke = await json(server, '/keys');
-    assert.equal(afterRevoke.body.items.find((key) => key.id === id).secret, undefined, '撤销后不得返回旧明文');
+    const revokedKey = afterRevoke.body.items.find((key) => key.id === id);
+    assert.equal(revokedKey.secret, undefined, '撤销后不得返回旧明文');
+    assert.equal(revokedKey.revoked, true);
+    assert.equal('blocked_reason' in revokedKey, false);
+
+    // Revocation is determined by the missing credential: rotation restores it,
+    // but does not enable the Key until an explicit update.
+    const enableSpec = {
+      label: revokedKey.label, enabled: true, expires_at: revokedKey.expires_at,
+      max_concurrent: revokedKey.max_concurrent, allowed_models: revokedKey.allowed_models,
+      limits: revokedKey.limits
+    };
+    const prematureEnable = await json(server, '/keys?id=' + encodeURIComponent(id), {
+      method: 'PUT', body: enableSpec
+    });
+    assert.equal(prematureEnable.res.status, 409);
+    const rotateRevoked = await json(server, '/keys/rotate?id=' + encodeURIComponent(id), { method: 'POST' });
+    assert.equal(rotateRevoked.res.status, 200);
+    assert.equal(rotateRevoked.body.key.revoked, false);
+    assert.equal(rotateRevoked.body.key.enabled, false);
+    const enabled = await json(server, '/keys?id=' + encodeURIComponent(id), {
+      method: 'PUT', body: enableSpec
+    });
+    assert.equal(enabled.res.status, 200);
+    assert.equal(enabled.body.enabled, true);
+    assert.equal(enabled.body.secret, rotateRevoked.body.secret);
 
     const deleted = await json(server, '/keys/delete?id=' + encodeURIComponent(id), { method: 'POST' });
     assert.equal(deleted.res.status, 204);
@@ -461,7 +464,7 @@ test('keys: fixed query-ID create/update/rotate/reset/recover/revoke with persis
     });
     assert.equal(invalid.res.status, 400);
 
-    // 旧动态路由必须是 404，且不能改变状态；只有负测试可以引用它们。
+    // 已移除的路由必须是 404，且不能改变状态；只有负测试可以引用它们。
     const snapshot = JSON.stringify(server.state.keys);
     const revokes = server.counters.keyRevokes;
     for (const legacy of [
@@ -469,9 +472,10 @@ test('keys: fixed query-ID create/update/rotate/reset/recover/revoke with persis
       { method: 'DELETE', path: '/keys/key-alpha' },
       { method: 'POST', path: '/keys/key-alpha/rotate' },
       { method: 'POST', path: '/keys/key-alpha/reset' },
-      { method: 'POST', path: '/keys/key-alpha/recover' }
+      { method: 'POST', path: '/keys/key-alpha/recover' },
+      { method: 'POST', path: '/keys/recover?id=key-alpha', body: { acknowledge: true } }
     ]) {
-      const old = await json(server, legacy.path, { method: legacy.method });
+      const old = await json(server, legacy.path, { method: legacy.method, body: legacy.body });
       assert.equal(old.res.status, 404, legacy.method + ' ' + legacy.path);
       assert.ok(errorShape(old.body), legacy.method + ' ' + legacy.path);
     }

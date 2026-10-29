@@ -35,16 +35,6 @@ export function captureReasonLabel(value: string): string {
   return labels[value] || '未知采集原因';
 }
 
-export function blockedReasonLabel(value: string): string {
-  const labels: Record<string, string> = {
-    'unknown accounting: explicit acknowledgement required': '记账状态不确定，需要明确确认恢复',
-    'pending accounting': '等待记账完成',
-    'accounting callback failed; explicit recovery required': '记账回调失败，需要手动恢复',
-    'accounting interruption: explicit acknowledgement required': '记账过程被中断，需要明确确认恢复',
-  };
-  return labels[value] || '未知阻断原因';
-}
-
 export interface FilterState {
   from: string;
   to: string;

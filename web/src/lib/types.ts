@@ -44,7 +44,6 @@ export interface Key {
   starts: Windows;
   resets: Windows;
   active: number;
-  blocked_reason?: string;
   created_at: string;
   deleted_at?: string | null;
   revoked?: boolean;
@@ -217,7 +216,6 @@ export interface PricePreview {
 export interface Health {
   database_bytes: number;
   dropped_captures: number;
-  pending_usage: number;
   active_requests: number;
   last_error?: string;
   capture_bytes?: number;

@@ -144,6 +144,25 @@ describe('KeysPage Foundation Features', () => {
     }
   });
 
+  // An obsolete field in a server response must not change status, filtering or available actions.
+  it('ignores legacy accounting block data on an otherwise enabled key', async () => {
+    Object.assign(mockKeys[0], { blocked_reason: 'pending accounting' });
+    render(<KeysPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
+
+    const row = (await screen.findByText('活跃服务 Key')).closest('tr')!;
+    expect(within(row).getByText('正常')).toBeInTheDocument();
+    expect(within(row).getByTitle('禁用此 Key')).toBeInTheDocument();
+    expect(within(row).getByTitle('重置额度周期')).toBeInTheDocument();
+    expect(within(row).queryByText('封锁')).not.toBeInTheDocument();
+    expect(within(row).queryByText('等待记账完成')).not.toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: '恢复' })).not.toBeInTheDocument();
+
+    fireEvent.keyDown(screen.getByLabelText('状态筛选'), { key: 'ArrowDown' });
+    expect(screen.queryByRole('option', { name: '封锁' })).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('option', { name: '正常 / 启用' }));
+    expect(screen.getByText('活跃服务 Key')).toBeInTheDocument();
+  });
+
   it('handles permanent delete flow POST /keys/delete and handles busy errors gracefully', async () => {
     render(<KeysPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
 

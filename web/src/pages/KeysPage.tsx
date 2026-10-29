@@ -1,5 +1,4 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import { blockedReasonLabel } from './RequestsHelpers';
 import type { PageProps } from '../lib/api';
 import type { Key } from '../lib/types';
 import { formatUSD, formatDateTime, errorMessage } from '../lib/format';
@@ -10,7 +9,6 @@ import {
   RotateKeyModal,
   ResetKeyModal,
   RevokeKeyModal,
-  RecoverKeyModal,
   DeleteKeyModal,
   DetailsModal,
   SecretRevealedModal,
@@ -24,7 +22,6 @@ type ActiveModal =
   | { type: 'rotate'; key: Key }
   | { type: 'reset'; key: Key }
   | { type: 'revoke'; key: Key }
-  | { type: 'recover'; key: Key }
   | { type: 'delete'; key: Key }
   | { type: 'details'; key: Key }
   | { type: 'revealed'; data: RevealedSecretState }
@@ -36,7 +33,6 @@ export type KeyStatusFilter =
   | 'disabled'
   | 'revoked'
   | 'deleted'
-  | 'blocked'
   | 'expired'
   | 'all';
 
@@ -181,11 +177,8 @@ export function KeysPage({ api, onDirtyChange }: KeysPageProps) {
           k.enabled &&
           !k.deleted_at &&
           !k.revoked &&
-          !k.blocked_reason &&
           !(k.expires_at && new Date(k.expires_at) < new Date())
       );
-    } else if (statusFilter === 'blocked') {
-      list = list.filter((k) => !!k.blocked_reason && !k.deleted_at);
     } else if (statusFilter === 'expired') {
       list = list.filter(
         (k) => k.expires_at && new Date(k.expires_at) < new Date() && !k.deleted_at
@@ -268,7 +261,6 @@ export function KeysPage({ api, onDirtyChange }: KeysPageProps) {
               { value: 'disabled', label: '已禁用' },
               { value: 'revoked', label: '已撤销' },
               { value: 'deleted', label: '已删除' },
-              { value: 'blocked', label: '封锁' },
               { value: 'expired', label: '已过期' },
               { value: 'all', label: '全部（含已删除）' },
             ]}
@@ -337,7 +329,6 @@ export function KeysPage({ api, onDirtyChange }: KeysPageProps) {
               {filteredKeys.map((k) => {
                 const isDeleted = !!k.deleted_at;
                 const isRevoked = !!k.revoked && !isDeleted;
-                const isBlocked = !!k.blocked_reason && !isDeleted;
                 const isExpired = k.expires_at ? new Date(k.expires_at) < new Date() : false;
 
                 return (
@@ -367,8 +358,6 @@ export function KeysPage({ api, onDirtyChange }: KeysPageProps) {
                             <Badge tone="danger">已删除</Badge>
                           ) : isRevoked ? (
                             <Badge tone="neutral">已撤销</Badge>
-                          ) : isBlocked ? (
-                            <Badge tone="danger">封锁</Badge>
                           ) : !k.enabled ? (
                             <Badge tone="neutral">已禁用</Badge>
                           ) : isExpired ? (
@@ -377,11 +366,6 @@ export function KeysPage({ api, onDirtyChange }: KeysPageProps) {
                             <Badge tone="success">正常</Badge>
                           )}
                         </div>
-                        {isBlocked && (
-                          <span style={{ fontSize: '0.78rem', color: 'var(--danger-color)' }}>
-                            {blockedReasonLabel(k.blocked_reason || '')}
-                          </span>
-                        )}
                         {isDeleted && (
                           <span style={{ fontSize: '0.78rem', color: 'var(--text-tertiary)' }}>
                             已于 {formatDateTime(k.deleted_at)} 已删除（历史账目已保留）
@@ -537,15 +521,7 @@ export function KeysPage({ api, onDirtyChange }: KeysPageProps) {
                             重置
                           </Button>
 
-                          {isBlocked ? (
-                            <Button
-                              variant="danger"
-                              onClick={() => setActiveModal({ type: 'recover', key: k })}
-                              title="核对并解除异常封锁"
-                            >
-                              恢复
-                            </Button>
-                          ) : isRevoked ? (
+                          {isRevoked ? (
                             <span
                               style={{ fontSize: '0.78rem', color: 'var(--text-tertiary)', padding: '0 0.3rem' }}
                               title="已撤销哈希，需先轮转新密钥再启用"
@@ -649,19 +625,6 @@ export function KeysPage({ api, onDirtyChange }: KeysPageProps) {
       {/* Revoke / Toggle Status Modal */}
       {activeModal?.type === 'revoke' && (
         <RevokeKeyModal
-          keyData={activeModal.key}
-          api={api}
-          onClose={() => setActiveModal(null)}
-          onSuccess={() => {
-            setActiveModal(null);
-            loadKeys(undefined, needIncludeDeleted);
-          }}
-        />
-      )}
-
-      {/* Recover / Unblock Modal */}
-      {activeModal?.type === 'recover' && (
-        <RecoverKeyModal
           keyData={activeModal.key}
           api={api}
           onClose={() => setActiveModal(null)}
