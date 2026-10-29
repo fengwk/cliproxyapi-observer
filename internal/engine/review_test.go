@@ -17,12 +17,13 @@ func drainCapture(s *Store) {
 	go s.captureWorker()
 }
 
-// An abrupt termination keeps every committed fact. The old Key works right
-// after the restart without any recovery step, prior totals, limits and
-// history survive and new usage increments the same counters.
+// An abrupt termination keeps every committed fact. Both used and never-used
+// Keys work right after restart, prior totals, limits and history survive,
+// and new usage increments the same counters.
 func TestCrashRestartKeepsKeysUsable(t *testing.T) {
 	s, now, p := fixture(t)
-	k, _ := key(t, s, KeySpec{Enabled: true, Limits: Limits{Total: 100}})
+	k, secret := key(t, s, KeySpec{Enabled: true, Limits: Limits{Total: 100}})
+	unused, unusedSecret := key(t, s, KeySpec{Enabled: true, Limits: Limits{Total: 21}, MaxConcurrent: 1, AllowedModels: []string{"gpt-exact"}})
 	must(t, s.RecordUsage(event(k, "bill", *now)))
 	close(s.captures)
 	s.worker.Wait()
@@ -35,11 +36,19 @@ func TestCrashRestartKeepsKeysUsable(t *testing.T) {
 	// again: an interrupted process never fences an existing principal.
 	must(t, r.Admit(Admission{RequestID: "old", KeyID: k.ID}))
 	must(t, r.Complete("old", *now))
-	ks, e := r.Keys()
+	view, e := r.Authenticate(secret)
 	must(t, e)
-	if len(ks) != 1 || ks[0].ID != k.ID || ks[0].Used.Total != 7 || ks[0].Limits.Total != 100 {
-		t.Fatal(ks)
+	if view.ID != k.ID || view.Used.Total != 7 || view.Limits.Total != 100 {
+		t.Fatal(view)
 	}
+	// A Key that never produced usage must not inherit another Key's loss.
+	untouched, e := r.Authenticate(unusedSecret)
+	must(t, e)
+	if untouched.ID != unused.ID || untouched.Used != (Limits{}) || untouched.Limits.Total != 21 {
+		t.Fatal(untouched)
+	}
+	must(t, r.Admit(Admission{RequestID: "first-use", KeyID: unused.ID, Model: "gpt-exact"}))
+	must(t, r.Complete("first-use", *now))
 	d, e := r.Detail("bill")
 	must(t, e)
 	if d.Record.CostMicroUSD != 7 {
@@ -47,10 +56,10 @@ func TestCrashRestartKeepsKeysUsable(t *testing.T) {
 	}
 	// New usage increments the retained counters.
 	must(t, r.RecordUsage(event(k, "after", *now)))
-	ks, e = r.Keys()
+	view, e = r.Authenticate(secret)
 	must(t, e)
-	if len(ks) != 1 || ks[0].Used.Total != 14 {
-		t.Fatal(ks)
+	if view.Used.Total != 14 {
+		t.Fatal(view)
 	}
 }
 

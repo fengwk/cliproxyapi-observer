@@ -500,7 +500,7 @@ func denialStatus(e error) int {
 	if errors.Is(e, engine.ErrQuota) || errors.Is(e, engine.ErrConcurrency) {
 		status = 429
 	}
-	if errors.Is(e, engine.ErrAccounting) || errors.Is(e, engine.ErrClosed) || errors.Is(e, engine.ErrMaintenance) {
+	if errors.Is(e, engine.ErrClosed) || errors.Is(e, engine.ErrMaintenance) {
 		status = 503
 	}
 	return status

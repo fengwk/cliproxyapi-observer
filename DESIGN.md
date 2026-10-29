@@ -34,9 +34,8 @@ untouched. SDK baseline v8.0.30, schema 6 minimum.
 - A Key starts 5h/week/month cycles at creation; on admission expired windows
   restart at current time, week = 7*24h, month = UTC AddDate(0,1,0) calendar month
   with last-day clamping, not 30 days. Total has no automatic reset.
-- Reset selected windows to now/zero; it must never clear an accounting failure
-  unless all pending events are durably stored. Usage may overshoot after an
-  admitted concurrent request; no speculative reservation/precharge.
+- Reset selected windows to now/zero without rewriting history. Usage may
+  overshoot after an admitted concurrent request; no speculative reservation/precharge.
 - Authentication principal = `observer:<key ID>`. SHA-256 hashes authenticate;
   the user-authorized current client secret also persists for repeated internal
   management display/copy. Revoke/delete clear both, disable retains them.
@@ -64,9 +63,9 @@ untouched. SDK baseline v8.0.30, schema 6 minimum.
   Header names and retained values share a 16KiB cap; overflow discards the
   whole group as too_large, while excluded credential headers consume no budget.
   Disabled capture is explicit, not an empty successful body.
-- Usage write failure: retain the already quoted event for bounded retry, block
-  subsequent admissions for the affected Key, expose health; recovery retries
-  the same quote. Never silently drop money or reprice a retried event.
+- Usage write failure: return the real error and expose sanitized health
+  diagnostics without retaining a retry queue or restricting future admission.
+  Missing executions remain missing; never invent charges or reprice history.
 - Daily rollup retention cannot erase independent Key used amounts. Raw detail
   default 24h; daily default 365d. Cleanup plus physical bbolt compaction.
 - Persist UTC instants and half-open [from,to) ranges. The browser sends its
@@ -185,7 +184,7 @@ type Key struct {
     ID string `json:"id"`; KeySpec // embedded flat JSON
     Secret string `json:"secret,omitempty"` // authenticated management display
     Used Limits `json:"used"`; Starts Windows `json:"starts"`; Resets Windows `json:"resets"`
-    Active int `json:"active"`; BlockedReason string `json:"blocked_reason,omitempty"`
+    Active int `json:"active"`
     CreatedAt time.Time `json:"created_at"`
 }
 type Admission struct {
@@ -201,7 +200,6 @@ func (*Store) UpdateKey(string,KeySpec) (Key,error)
 func (*Store) RotateKey(string) (Key,string,error)
 func (*Store) RevokeKey(string) error // disable + invalidate secret, retain history
 func (*Store) ResetKey(string,[]string) (Key,error) // five_hour/week/month/total
-func (*Store) RecoverKey(string,bool /* acknowledge unknown usage */) (Key,error)
 func (*Store) Keys() ([]Key,error)
 func (*Store) Authenticate(string) (Key,error) // enabled + expiry only
 func (*Store) Authorize(keyID, model string) error // enabled/expiry/model, no reservation
@@ -209,9 +207,9 @@ func (*Store) Admit(Admission) error // idempotent, checks limits+concurrency
 func (*Store) Complete(requestID string, at time.Time) error // idempotent slot release
 func (*Store) RecordUsage(pluginapi.UsageRecord) error // APIKey=observer:<id>
 func (*Store) Capture(CaptureInput) bool
-func (*Store) Maintenance() error // retry billing, expiry, opportunistic compaction
+func (*Store) Maintenance() error // expiry, opportunistic compaction
 func (*Store) Compact() error // explicit physical compaction
-func (*Store) Close() error // drain diagnostics; no silently discarded accounting
+func (*Store) Close() error // drain diagnostics and release storage
 type Settings struct {
     CaptureEnabled bool `json:"capture_enabled"`
     MaxBodyBytes int `json:"max_body_bytes"` // default 1MiB
@@ -226,7 +224,6 @@ func (*Store) UpdateSettings(Settings) (Settings,error)
 type Health struct {
     DatabaseBytes int64 `json:"database_bytes"`
     DroppedCaptures uint64 `json:"dropped_captures"`
-    PendingUsage int `json:"pending_usage"`
     ActiveRequests int `json:"active_requests"`
     LastError string `json:"last_error,omitempty"`
 }
@@ -285,7 +282,6 @@ Standard direct JSON response (not RPC envelope) and errors
 - PUT `/keys?id={id}` KeySpec -> Key; DELETE `/keys?id={id}` ->204 (revoke)
 - POST `/keys/rotate?id={id}` -> `{"key":Key,"secret":"..."}`
 - POST `/keys/reset?id={id}` `{"windows":["five_hour",...]}` ->Key
-- POST `/keys/recover?id={id}` `{"acknowledge":true}` ->Key (see safety below)
 - GET `/requests` ->RequestPage, GET `/requests/detail?id={id}` ->Detail
 - GET `/summary` ->Summary
 - GET/PUT `/settings` ->Settings; GET `/prices` ->pricing.Snapshot
@@ -361,19 +357,17 @@ unavailable selected IDs, surface errors and allow manual exact IDs. No pricing
 catalog or config/credential JSON downloads as availability sources. Failed
 discovery never makes an existing restricted Key unrestricted.
 
-Per-Key recovery: retained pending billing retries automatically with original
-quote. For a crash or irrecoverably lost event, persist a Key-scoped blocked
-reason; do not permanently poison a whole database including future new Keys.
-An administrator may explicitly acknowledge unknown/missing usage via RecoverKey
-only after retries have settled and storage works. Expose a clearly warned
-confirmation in UI; reset/rotate must never implicitly acknowledge it. Recovery
-does not change counters, historical costs or limits. Close must release handles
-even on debt, and a failed close must not leave the plugin holding a closed Store.
+Accounting availability: callbacks, failed writes and unclean restarts never
+create a Key block or an acknowledgement requirement. A usage write either
+commits its entire transaction or returns an error; no retry queue is retained.
+Existing schema3 Key records decode normally with obsolete fields ignored.
+No startup scan rewrites their counters, history or limits. Close releases
+handles, and a failed close must not leave the plugin holding a closed Store.
 
 Bound all event-derived state: completed admissions/correlations expire, dedup
 has a documented replay horizon (7d) with durable monotonic cutoff so expired
-replays cannot be billed again. A too-old unseen event must fail closed for its
-Key, not silently recharge it. Max captured body <=8MiB; queue and storage are
+replays cannot be billed again. A too-old unseen event returns an accounting
+error for that event only, not an admission block. Max captured body <=8MiB; queue and storage are
 bounded. Compress request metadata/details as well as bodies. Short ranges fully
 covered by raw retention return useful hourly trends; older whole-day ranges use
 daily buckets. UTC uses hourly/daily fast paths; other IANA zones project minute
@@ -386,14 +380,11 @@ when the same model has provider-specific rates, with no effect on model-wide
 manual overrides.
 
 The pinned host has no guaranteed usage-queue drain before hot replacement or
-shutdown. A callback delivered to a detached store or an unexpected accounting
-panic must persist a Key-scoped interruption marker outside the closed bbolt
-handle. Every new Store/Open/admission/list reads it; only explicit recovery may
-clear it. Use a small atomic marker and file lock for recovery races, not another
-billing database. `engine.RecordInterruption(dataPath,keyID string) error` is the
-shared entry point, safe across different native-library runtimes. Source events
-never delivered by CPA cannot be reconstructed; document this boundary and don't
-claim exactly-once delivery from a non-durable host queue.
+shutdown. Late callbacks and unexpected accounting panics report sanitized
+errors but do not create disk markers, failure latches or future admission
+restrictions. Source events never delivered by CPA cannot be reconstructed;
+missing charges remain missing. Do not claim exactly-once delivery from a
+non-durable host queue.
 
 Gemini countTokens: before-hook receives a wildcard path, but frontend auth has
 the original URL.Path. Use a distinct stable nonbilling principal/caller_scope
