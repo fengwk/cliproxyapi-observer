@@ -14,9 +14,6 @@ import (
 func TestRequestViewTimezoneBoundsThroughRealHost(t *testing.T) {
 	h := newHarness(t)
 	created := h.createKey(t, validSpec())
-	// An execution without a price is an accounting error that stores no row,
-	// so the accounted execution must name the identity it prices.
-	acceptancePriceFixture(t, h, 1_000_000)
 	record := acceptanceInferAndAwait(t, h, created.Secret, map[string]struct{}{})
 
 	loc, err := time.LoadLocation("Asia/Kathmandu")

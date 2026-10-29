@@ -73,9 +73,6 @@ func TestBrowserAgainstRealHost(t *testing.T) {
 
 	h := newHarness(t)
 	created := h.createKey(t, validSpec())
-	// An execution without a price is an accounting error that stores no row,
-	// so the accounted execution must name the identity it prices.
-	acceptancePriceFixture(t, h, 1_000_000)
 
 	settings := acceptanceGetSettings(t, h)
 	settings["capture_enabled"] = true

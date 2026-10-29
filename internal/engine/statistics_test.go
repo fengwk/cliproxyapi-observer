@@ -33,7 +33,7 @@ func TestDetailedAggregatesAndRequestViews(t *testing.T) {
 	second.Failed = true
 	second.TTFT = time.Second
 	second.Latency = 4 * time.Second
-	p.cost, p.source = 0, "manual"
+	p.cost, p.source = 0, "zero"
 	must(t, s.RecordUsage(second))
 	p.cost, p.source = 7, ""
 	third := detailedEvent(b, "exec-c", day(*now).Add(11*time.Hour))

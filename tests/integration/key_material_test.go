@@ -48,9 +48,6 @@ func listKeyMaterials(t *testing.T, h *harness, path string) map[string]keyMater
 func TestClientKeyPlaintextMaterialPersistsThroughManagement(t *testing.T) {
 	h := newHarness(t)
 	generated := h.createKey(t, validSpec())
-	// An execution without a price is an accounting error that stores no row,
-	// so the accounted execution must name the identity it prices.
-	acceptancePriceFixture(t, h, 1_000_000)
 	if current := listKeyMaterials(t, h, "/keys")[generated.Key.ID]; current.Secret != generated.Secret {
 		t.Fatalf("generated plaintext missing from list: %+v", current)
 	}

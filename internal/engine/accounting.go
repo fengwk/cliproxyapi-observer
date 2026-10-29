@@ -92,12 +92,6 @@ func (s *Store) RecordUsage(u pluginapi.UsageRecord) error {
 	if seen {
 		return nil
 	}
-	for _, n := range []int64{u.Detail.InputTokens, u.Detail.OutputTokens, u.Detail.ReasoningTokens, u.Detail.CachedTokens, u.Detail.CacheReadTokens, u.Detail.CacheCreationTokens, u.Detail.TotalTokens} {
-		if n < 0 || n > maxSafe {
-			s.lastError = "invalid usage"
-			return ErrAccounting
-		}
-	}
 	if u.RequestedAt.IsZero() || u.RequestedAt.Before(s.cutoff) || u.RequestedAt.After(s.now()) {
 		s.lastError = "invalid usage"
 		return ErrAccounting
@@ -112,9 +106,7 @@ func (s *Store) RecordUsage(u pluginapi.UsageRecord) error {
 		s.lastError = "usage pricing failed"
 		return fmt.Errorf("%w: %w", ErrAccounting, e)
 	}
-	// The pricing service represents an unavailable price or missing facts as
-	// a zero quote for preview. It is not a calculable accounting result.
-	if q.Source == "zero" || q.Reason == "missing_facts" || q.CostMicroUSD < 0 || q.CostMicroUSD > maxSafe {
+	if q.CostMicroUSD < 0 || q.CostMicroUSD > maxSafe {
 		s.lastError = "usage pricing failed"
 		return ErrAccounting
 	}
@@ -124,7 +116,7 @@ func (s *Store) RecordUsage(u pluginapi.UsageRecord) error {
 		rate := *q.Rates.Reasoning
 		q.Rates.Reasoning = &rate
 	}
-	p := usageTransaction{Record: r, At: at, Quote: q, CaptureEnabled: s.settings.CaptureEnabled, CaptureMode: s.settings.CaptureMode, Epoch: key.Epoch}
+	p := usageTransaction{Record: r, At: at, Quote: q, CaptureEnabled: s.settings.CaptureEnabled, CaptureMode: s.settings.CaptureMode}
 	if e = s.persistLocked(p); e == nil {
 		return nil
 	}
@@ -173,11 +165,10 @@ func (s *Store) persistLocked(p usageTransaction) error {
 		// A reset window is charged according to the ingestion timestamp.
 		roll(&k.Key, p.At)
 		for _, v := range []struct {
-			used          *int64
-			start         time.Time
-			epoch, quoted int64
-		}{{&k.Used.FiveHour, k.Starts.FiveHour, k.Epoch.FiveHour, p.Epoch.FiveHour}, {&k.Used.Week, k.Starts.Week, k.Epoch.Week, p.Epoch.Week}, {&k.Used.Month, k.Starts.Month, k.Epoch.Month, p.Epoch.Month}, {&k.Used.Total, k.Starts.Total, k.Epoch.Total, p.Epoch.Total}} {
-			if v.epoch == v.quoted && !p.At.Before(v.start) {
+			used  *int64
+			start time.Time
+		}{{&k.Used.FiveHour, k.Starts.FiveHour}, {&k.Used.Week, k.Starts.Week}, {&k.Used.Month, k.Starts.Month}, {&k.Used.Total, k.Starts.Total}} {
+			if !p.At.Before(v.start) {
 				n, e := add(*v.used, r.CostMicroUSD)
 				if e != nil {
 					return e

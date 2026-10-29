@@ -179,98 +179,6 @@ func acceptancePutPricing(t *testing.T, h *harness, cfg acceptancePricing) accep
 	return updated.Pricing
 }
 
-// acceptanceAccountingError is the sanitized health diagnostic the engine
-// reports when a usage record cannot be priced. It is the observable proof
-// that an accounting attempt happened and was rejected instead of stored.
-const acceptanceAccountingError = "usage pricing failed"
-
-// acceptancePriceView is one pricing snapshot entry: a complete observed or
-// configured identity together with the source that priced it.
-type acceptancePriceView struct {
-	Model    string `json:"model"`
-	Provider string `json:"provider"`
-	Source   string `json:"source"`
-	Reason   string `json:"reason"`
-}
-
-// acceptancePricesView is the pricing snapshot wire shape.
-type acceptancePricesView struct {
-	Source string                `json:"source"`
-	Prices []acceptancePriceView `json:"prices"`
-}
-
-// acceptancePrices fetches the current pricing snapshot. The snapshot lists
-// every observed identity, so it exposes the real host model/provider pair even
-// when the quote for that identity failed.
-func acceptancePrices(t *testing.T, h *harness) acceptancePricesView {
-	t.Helper()
-	var out acceptancePricesView
-	h.api(t, http.MethodGet, "/prices", nil, http.StatusOK, &out)
-	return out
-}
-
-// acceptanceAwaitUnpricedAccounting waits until an unpriced execution has been
-// accounted and rejected. The pricing snapshot observes the real host identity
-// and the health diagnostic reports the sanitized accounting failure. Both are
-// observable states, so the barrier never sleeps.
-func acceptanceAwaitUnpricedAccounting(t *testing.T, h *harness) acceptancePriceView {
-	t.Helper()
-	var observed acceptancePriceView
-	h.await(t, "the unpriced execution is observed and rejected", func() bool {
-		var health acceptanceHealth
-		h.api(t, http.MethodGet, "/health", nil, http.StatusOK, &health)
-		if health.LastError != acceptanceAccountingError {
-			return false
-		}
-		prices := acceptancePrices(t, h)
-		if len(prices.Prices) != 1 {
-			return false
-		}
-		observed = prices.Prices[0]
-		return observed.Source == "zero" && observed.Model != "" && observed.Provider != ""
-	})
-	return observed
-}
-
-// acceptanceAssertNoFabrication proves that a rejected accounting attempt left
-// no ledger row, no key charge and no rollup behind.
-func acceptanceAssertNoFabrication(t *testing.T, h *harness) {
-	t.Helper()
-	if page := h.page(t, "page_size=100"); len(page.Items) != 0 {
-		t.Fatalf("rejected accounting fabricated %d ledger rows: %+v", len(page.Items), page.Items)
-	}
-	keys := h.keys(t)
-	if len(keys) != 1 || keys[0].Used != (limitsView{}) {
-		t.Fatalf("rejected accounting charged the key: %+v", keys)
-	}
-	var summary acceptanceSummary
-	h.api(t, http.MethodGet, "/summary", nil, http.StatusOK, &summary)
-	if summary.Requests != 0 || summary.CostMicroUSD != 0 {
-		t.Fatalf("rejected accounting changed the summary: %+v", summary)
-	}
-}
-
-// acceptancePriceFixture pins the explicit manual price for every identity the
-// local mock fixture can report. An execution whose identity has no price is
-// an accounting error that stores no row, so a test that expects an accounted
-// execution must name the identity it prices.
-func acceptancePriceFixture(t *testing.T, h *harness, rate int64) {
-	t.Helper()
-	applied := acceptancePutPricing(t, h, acceptancePricing{
-		Auto:   false,
-		Source: "models_dev_v2",
-		Prices: []acceptancePrice{
-			acceptanceManual(modelName, acceptanceProvider, rate),
-			acceptanceManual(upstreamModel, acceptanceProvider, rate),
-			acceptanceManual(modelNameTwo, acceptanceProvider, rate),
-			acceptanceManual(upstreamModelTwo, acceptanceProvider, rate),
-		},
-	})
-	if applied.Auto || len(applied.Prices) != 4 {
-		t.Fatalf("saved pricing = %+v, want four explicit fixture prices", applied)
-	}
-}
-
 // acceptanceAwaitNewRecord waits for a usage record whose ID was not observed
 // before and records it as known. Selecting by ID avoids depending on request
 // page ordering.
@@ -346,9 +254,9 @@ func acceptanceAssertCost(t *testing.T, record recordView, wantCost int64, wantS
 }
 
 // TestPricingDefaultMissingPriceManualAndImmutable proves a missing catalog
-// price is an accounting error that stores no row, an explicit manual complete
-// (model, provider) identity produces exact micro-USD costs, and later price
-// edits never reprice already ingested records or rollups.
+// price is charged zero without blocking, a manual complete (model, provider)
+// identity produces exact micro-USD costs, and later price edits never reprice
+// already ingested records or rollups.
 func TestPricingDefaultMissingPriceManualAndImmutable(t *testing.T) {
 	h := newHarness(t)
 	created := h.createKey(t, validSpec())
@@ -363,37 +271,14 @@ func TestPricingDefaultMissingPriceManualAndImmutable(t *testing.T) {
 	}
 
 	known := make(map[string]struct{})
-	// A missing price never blocks the client: the answer is unchanged, the
-	// accounting attempt fails and nothing is stored.
-	status, body := h.infer(t, created.Secret, false)
-	if status != http.StatusOK {
-		t.Fatalf("unpriced inference status = %d body %s, want 200", status, truncate(body, 400))
+	unpriced := acceptanceInferAndAwait(t, h, created.Secret, known)
+	acceptanceAssertTokens(t, unpriced)
+	acceptanceAssertCost(t, unpriced, 0, "zero")
+	model, provider := unpriced.Model, unpriced.Provider
+	if provider == "" {
+		t.Fatal("real host record did not expose its provider identity")
 	}
-	if got := jsonContent(body); got != fixtureText {
-		t.Errorf("unpriced inference content = %q, want %q", got, fixtureText)
-	}
-	observed := acceptanceAwaitUnpricedAccounting(t, h)
-	model, provider := observed.Model, observed.Provider
 	t.Logf("real host model/provider identity: %q/%q", model, provider)
-	// The rejected attempt leaves no fabricated zero-cost row, no charge and
-	// no rollup behind.
-	acceptanceAssertNoFabrication(t, h)
-
-	// An explicit zero rate is a genuine free price: it is priced, so the
-	// zero-cost row is stored and later price edits must never reprice it.
-	free := acceptancePutPricing(t, h, acceptancePricing{
-		Auto:   false,
-		Source: "models_dev_v2",
-		Prices: []acceptancePrice{acceptanceManual(model, provider, 0)},
-	})
-	if free.Auto || len(free.Prices) != 1 ||
-		free.Prices[0].Model != model || free.Prices[0].Provider != provider ||
-		free.Prices[0].Definition.Base.Input != 0 {
-		t.Fatalf("saved pricing = %+v, want the explicit free price for %q/%q", free, model, provider)
-	}
-	freeRecord := acceptanceInferAndAwait(t, h, created.Secret, known)
-	acceptanceAssertTokens(t, freeRecord)
-	acceptanceAssertCost(t, freeRecord, 0, "manual")
 
 	// An empty-provider price must not act as a model-wide wildcard; the exact
 	// complete identity is the only price that may apply.
@@ -427,8 +312,8 @@ func TestPricingDefaultMissingPriceManualAndImmutable(t *testing.T) {
 
 	manualAgain := acceptanceRecordByID(t, h, manual.ID)
 	acceptanceAssertCost(t, manualAgain, 15, "manual")
-	freeAgain := acceptanceRecordByID(t, h, freeRecord.ID)
-	acceptanceAssertCost(t, freeAgain, 0, "manual")
+	zeroAgain := acceptanceRecordByID(t, h, unpriced.ID)
+	acceptanceAssertCost(t, zeroAgain, 0, "zero")
 
 	var summary acceptanceSummary
 	h.api(t, http.MethodGet, "/summary", nil, http.StatusOK, &summary)
@@ -447,19 +332,9 @@ func TestPricingOverridesLaterWinsMultipliersAndRequestedAt(t *testing.T) {
 	created := h.createKey(t, validSpec())
 	known := make(map[string]struct{})
 
-	// The default configuration has no manual price: the execution is an
-	// accounting error that stores no row, and the real host identity is the
-	// only thing the rejected attempt leaves behind.
-	status, body := h.infer(t, created.Secret, false)
-	if status != http.StatusOK {
-		t.Fatalf("unpriced inference status = %d body %s, want 200", status, truncate(body, 400))
-	}
-	if got := jsonContent(body); got != fixtureText {
-		t.Errorf("unpriced inference content = %q, want %q", got, fixtureText)
-	}
-	observed := acceptanceAwaitUnpricedAccounting(t, h)
-	model, provider := observed.Model, observed.Provider
-	acceptanceAssertNoFabrication(t, h)
+	baseline := acceptanceInferAndAwait(t, h, created.Secret, known)
+	acceptanceAssertCost(t, baseline, 0, "zero") // default config has no manual price
+	model, provider := baseline.Model, baseline.Provider
 
 	matching := acceptanceCondition{Context: &acceptanceContext{GTE: acceptanceInt64(10)}}
 	nonmatching := acceptanceCondition{Time: &acceptanceTime{
@@ -529,9 +404,9 @@ func TestPricingOverridesLaterWinsMultipliersAndRequestedAt(t *testing.T) {
 	}
 	result := make(chan inferResult, 1)
 	go func() {
-		callStatus, callBody, callErr := h.rawRequest(http.MethodPost, "/v1/chat/completions", chatBody(false),
+		status, body, err := h.rawRequest(http.MethodPost, "/v1/chat/completions", chatBody(false),
 			map[string]string{"Authorization": "Bearer " + created.Secret})
-		result <- inferResult{status: callStatus, body: callBody, err: callErr}
+		result <- inferResult{status: status, body: body, err: err}
 	}()
 	select {
 	case <-gate.entered:
@@ -607,19 +482,9 @@ func TestSettingsHealthCompactRestartPreserveKeysAndCosts(t *testing.T) {
 	acceptancePutPricing(t, h, acceptancePricing{Auto: true, Source: "models_dev_v2", Prices: []acceptancePrice{}})
 
 	known := make(map[string]struct{})
-	// Without a price the execution is an accounting error that stores no row;
-	// the real host identity is the only thing the rejected attempt leaves
-	// behind.
-	status, body := h.infer(t, created.Secret, false)
-	if status != http.StatusOK {
-		t.Fatalf("unpriced inference status = %d body %s, want 200", status, truncate(body, 400))
-	}
-	if got := jsonContent(body); got != fixtureText {
-		t.Errorf("unpriced inference content = %q, want %q", got, fixtureText)
-	}
-	observed := acceptanceAwaitUnpricedAccounting(t, h)
-	model, provider := observed.Model, observed.Provider
-	acceptanceAssertNoFabrication(t, h)
+	unpriced := acceptanceInferAndAwait(t, h, created.Secret, known)
+	acceptanceAssertCost(t, unpriced, 0, "zero")
+	model, provider := unpriced.Model, unpriced.Provider
 
 	pricing := acceptancePricing{
 		Auto: false, Source: "models_dev_v2",
@@ -648,10 +513,9 @@ func TestSettingsHealthCompactRestartPreserveKeysAndCosts(t *testing.T) {
 	acceptanceAssertTokens(t, priced)
 	acceptanceAssertCost(t, priced, 15, "manual")
 
-	// The stored row and the completion callback must settle before restart; an
-	// HTTP response alone is not a lifecycle fence. The rejected unpriced
-	// execution stores no row, so the ledger holds exactly the priced one.
-	h.awaitGracefulRestartReady(t, 1)
+	// Both rows and completion callbacks must settle before restart; an HTTP
+	// response alone is not a lifecycle fence.
+	h.awaitGracefulRestartReady(t, 2)
 
 	var health acceptanceHealth
 	h.api(t, http.MethodGet, "/health", nil, http.StatusOK, &health)

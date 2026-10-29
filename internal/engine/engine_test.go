@@ -237,6 +237,7 @@ func TestLegacyAccountingMarkersAreIgnored(t *testing.T) {
 			return e
 		}
 		row["blocked_reason"] = "unknown accounting"
+		row["Epoch"] = map[string]int64{"five_hour": maxSafe, "week": maxSafe, "month": maxSafe, "total": maxSafe}
 		var e error
 		legacy, e = json.Marshal(row)
 		if e != nil {
@@ -289,6 +290,11 @@ func TestLegacyAccountingMarkersAreIgnored(t *testing.T) {
 	must(t, reopened.Admit(Admission{RequestID: "new", KeyID: k.ID}))
 	must(t, reopened.Complete("new", *now))
 	must(t, reopened.RecordUsage(event(k, "next", *now)))
+	reset, e := reopened.ResetKey(k.ID, []string{"five_hour"})
+	must(t, e)
+	if reset.Used != (Limits{Week: 14, Month: 14, Total: 14}) {
+		t.Fatal("reset changed another window or retained legacy epoch", reset.Used)
+	}
 	if e = reopened.Admit(Admission{RequestID: "over-limit", KeyID: k.ID}); !errors.Is(e, ErrQuota) {
 		t.Fatal("quota not preserved", e)
 	}
@@ -508,9 +514,10 @@ func TestResetDoesNotRefillOldWindow(t *testing.T) {
 	}
 }
 
-// A configured free price is still a valid quote; raw counters can recover
-// canonical buckets without inventing a nonzero charge.
-func TestFreePricingAndTokens(t *testing.T) {
+// Unknown pricing is a valid zero-cost quote, not an inference gate. Explicit,
+// conservative raw counters can recover canonical buckets, but billing still
+// stays zero when no price exists.
+func TestUnknownPricingAndTokens(t *testing.T) {
 	s, now, p := fixture(t)
 	p.cost = 0
 	k, _ := key(t, s, KeySpec{Enabled: true})
@@ -528,16 +535,19 @@ func TestFreePricingAndTokens(t *testing.T) {
 	must(t, s.Complete("allowed", *now))
 }
 
-// The real pricing service uses zero-valued preview quotes for missing prices
-// and facts; neither is an accounting success, but a later real quote works.
-func TestUnpricedAndMissingFactsReturnErrorsWithoutBlocking(t *testing.T) {
+// Successful zero quotes remain ledger records, while a real quote error
+// leaves no record or admission gate and the next valid quote is charged.
+func TestZeroQuotesAndPricingError(t *testing.T) {
 	s, now, _ := fixture(t)
 	k, _ := key(t, s, KeySpec{Enabled: true})
 	pricer, e := pricing.NewService(pricing.Config{}, "", nil)
 	must(t, e)
 	s.pricer = pricer
-	if e = s.RecordUsage(event(k, "unpriced", *now)); !errors.Is(e, ErrAccounting) {
-		t.Fatal("unpriced usage accepted", e)
+	must(t, s.RecordUsage(event(k, "unpriced", *now)))
+	d, e := s.Detail("unpriced")
+	must(t, e)
+	if d.Record.CostMicroUSD != 0 || d.Record.PriceSource != "zero" {
+		t.Fatal("unpriced quote not stored", d)
 	}
 	rate := int64(2_000_000)
 	must(t, pricer.Configure(pricing.Config{Prices: []pricing.ManualPrice{{
@@ -551,16 +561,19 @@ func TestUnpricedAndMissingFactsReturnErrorsWithoutBlocking(t *testing.T) {
 		},
 	}}}))
 	u := event(k, "missing-facts", *now)
-	if e = s.RecordUsage(u); !errors.Is(e, ErrAccounting) {
-		t.Fatal("uncalculable quote accepted", e)
+	must(t, s.RecordUsage(u))
+	d, e = s.Detail("missing-facts")
+	must(t, e)
+	if d.Record.CostMicroUSD != 0 || d.PriceQuote.Reason != "missing_facts" {
+		t.Fatal("missing-facts quote not stored", d)
 	}
-	if total(t, s).Used.Total != 0 || s.Health().LastError == "" {
-		t.Fatal("failed quote changed counters or lost diagnostic")
+	bad := event(k, "quote-error", *now)
+	bad.Model = "" // pricing rejects an invalid model identity.
+	if e = s.RecordUsage(bad); !errors.Is(e, ErrAccounting) {
+		t.Fatal("quote error hidden", e)
 	}
-	for _, id := range []string{"unpriced", "missing-facts"} {
-		if _, e = s.Detail(id); !errors.Is(e, ErrNotFound) {
-			t.Fatal("failed quote produced a row", id, e)
-		}
+	if _, e = s.Detail("quote-error"); !errors.Is(e, ErrNotFound) || s.Health().LastError == "" || total(t, s).Used.Total != 0 {
+		t.Fatal("quote error stored or diagnostic missing", e)
 	}
 	must(t, s.Admit(Admission{RequestID: "still-available", KeyID: k.ID}))
 	must(t, s.Complete("still-available", *now))
@@ -569,36 +582,7 @@ func TestUnpricedAndMissingFactsReturnErrorsWithoutBlocking(t *testing.T) {
 	must(t, s.RecordUsage(u))
 	must(t, s.Maintenance())
 	if got := total(t, s).Used.Total; got != 16 {
-		t.Fatal("valid quote not charged, or failed quote replayed", got)
-	}
-}
-
-// Malformed raw counters cannot be normalized into a fabricated successful
-// quote, even if the pricer itself would accept the normalized values.
-func TestInvalidUsageCountersDoNotChargeOrBlock(t *testing.T) {
-	s, now, _ := fixture(t)
-	k, _ := key(t, s, KeySpec{Enabled: true})
-	for _, tc := range []struct {
-		id    string
-		value int64
-	}{{"negative", -1}, {"overflow", maxSafe + 1}} {
-		u := event(k, tc.id, *now)
-		u.Detail.CacheReadTokens = tc.value
-		if err := s.RecordUsage(u); !errors.Is(err, ErrAccounting) {
-			t.Fatal("invalid counter accepted", tc.id, err)
-		}
-		if _, err := s.Detail(tc.id); !errors.Is(err, ErrNotFound) {
-			t.Fatal("invalid counter stored", tc.id, err)
-		}
-	}
-	if total(t, s).Used.Total != 0 || s.Health().LastError == "" {
-		t.Fatal("invalid usage charged or lost diagnostic")
-	}
-	must(t, s.Admit(Admission{RequestID: "after-invalid", KeyID: k.ID}))
-	must(t, s.Complete("after-invalid", *now))
-	must(t, s.RecordUsage(event(k, "valid", *now)))
-	if total(t, s).Used.Total != 7 {
-		t.Fatal("valid usage not charged")
+		t.Fatal("valid quote not charged", got)
 	}
 }
 

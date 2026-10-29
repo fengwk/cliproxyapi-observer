@@ -201,9 +201,6 @@ func TestLocalModelDiscovery(t *testing.T) {
 // without dispatch, updates swap the selection, and a restart preserves it.
 func TestGeneratedKeyModelSelectionsPersist(t *testing.T) {
 	h := newHarness(t)
-	// An execution without a price is an accounting error that stores no row,
-	// so the accounted executions must name the identity they price.
-	acceptancePriceFixture(t, h, 1_000_000)
 
 	created := h.createKey(t, validSpec())
 	modelsAllow(t, h, created.Secret, modelName)

@@ -16,9 +16,6 @@ func TestKeyModelNativeRouteIdentity(t *testing.T) {
 	h := newHarness(t)
 	first := h.createKey(t, keySpec{Label: "Fixture Key A", Enabled: true, AllowedModels: []string{}})
 	second := h.createKey(t, keySpec{Label: "Fixture Key B", Enabled: true, AllowedModels: []string{}})
-	// An execution without a price is an accounting error that stores no row,
-	// so the accounted executions must name the identity they price.
-	acceptancePriceFixture(t, h, 1_000_000)
 
 	for _, created := range []createdKey{first, second} {
 		status, body, err := h.rawRequest(http.MethodPost, "/v1/chat/completions", chatBody(false),

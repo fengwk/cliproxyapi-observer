@@ -154,7 +154,14 @@ func TestUsagePanicDoesNotRestrictFutureAdmissions(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "observer.db")
 	call(t, m, "plugin.register", lifecycleRequest{[]byte("db: " + db), 6})
 	t.Cleanup(func() { call(t, m, "plugin.shutdown", nil) })
-	setTestPrice(t, m, "model", "openai")
+	settings, err := m.store.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.Pricing = pricing.Config{Prices: []pricing.ManualPrice{{Model: "model", Provider: "openai", Definition: pricing.PricingDefinition{Base: pricing.RateSet{Input: 1_000_000}}}}}
+	if _, err = m.store.UpdateSettings(settings); err != nil {
+		t.Fatal(err)
+	}
 	key, _, err := m.store.CreateKey(engine.KeySpec{Enabled: true})
 	if err != nil {
 		t.Fatal(err)

@@ -305,8 +305,8 @@ func (m *Manager) closeLocked() error {
 // Accounting failures are genuine errors: an invalid record, a pricing error
 // or a failed write is reported to the host instead of being swallowed. No Key
 // is ever latched, no marker is written and no later admission is restricted
-// because of accounting. A missing charge stays missing; Observer never
-// invents a $0 success and never repairs a cost it could not compute.
+// because of accounting. A failed or missing charge stays missing; a successful
+// quote, including an unpriced zero-cost quote, is recorded as returned.
 func (m *Manager) handleUsage(raw []byte) ([]byte, error) {
 	var r pluginapi.UsageRecord
 	if json.Unmarshal(raw, &r) != nil {

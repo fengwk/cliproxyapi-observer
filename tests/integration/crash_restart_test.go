@@ -10,26 +10,12 @@ import (
 	"time"
 )
 
-// This file covers the availability-first crash contract: an unclean native
-// host exit must never fence a Key, must never require an explicit recovery
-// call and must never fabricate the usage of an execution that never
+// Crash contract: an unclean host exit never fences a Key, never requires a
+// recovery call and never fabricates the usage of an execution that never
 // committed.
 //
-// The expectation is deliberately the opposite of the historical
-// fence-and-recover behavior:
-//
-//   - the pre-crash Key is usable again on the very first request after the
-//     restart, without any acknowledgment and without any recovery call;
-//   - the committed history and the durable totals survive the crash;
-//   - the execution that was admitted but never committed stays missing: it is
-//     never fabricated and never charged;
-//   - the next real execution is accounted normally and accumulates on top of
-//     the durable totals.
-//
-// Graceful restart (SIGTERM through harness.Stop) preserving counters and the
-// original client secret is already covered by
-// TestSettingsHealthCompactRestartPreserveKeysAndCosts in acceptance_test.go;
-// this file deliberately does not duplicate that scenario.
+// Graceful restart (SIGTERM through harness.Stop) is covered by
+// TestSettingsHealthCompactRestartPreserveKeysAndCosts in acceptance_test.go.
 
 // crashKey returns the public state of one Key.
 func crashKey(t *testing.T, h *harness, id string) keyView {
@@ -43,17 +29,18 @@ func crashKey(t *testing.T, h *harness, id string) keyView {
 	return keyView{}
 }
 
-// TestCrashRestartKeepsKeysUsableAndCommitsOnlyRealUsage kills the real
-// native host while an admitted request is blocked upstream, then restarts
-// against the same database. The crash must not fence the pre-crash Key, the
-// committed history and totals must survive, the missing execution must stay
-// missing and the next real execution must accumulate on the durable totals.
+// TestCrashRestartKeepsKeysUsableAndCommitsOnlyRealUsage kills the host while
+// an admitted request is blocked upstream and restarts against the same
+// database. The pre-crash Key must work on the first request after the
+// restart, the committed history and totals must survive, the missing
+// execution must stay missing and the next execution must accumulate on the
+// durable totals.
 func TestCrashRestartKeepsKeysUsableAndCommitsOnlyRealUsage(t *testing.T) {
 	h := newHarness(t)
 	created := h.createKey(t, validSpec())
 
-	// Pin both the client alias and the upstream identity to the same exact
-	// integer rate so the fixture always costs 6+4+5 = 15 micro-USD.
+	// Pin the client alias and the upstream identity to the same integer rate
+	// so the fixture always costs 6+4+5 = 15 micro-USD.
 	applied := acceptancePutPricing(t, h, acceptancePricing{
 		Auto:   false,
 		Source: "models_dev_v2",
@@ -94,8 +81,8 @@ func TestCrashRestartKeepsKeysUsableAndCommitsOnlyRealUsage(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("native host did not exit after SIGKILL")
 	}
-	// Release the blocked httptest handler synchronously. Cleanup remains as a
-	// second idempotent release for early failures.
+	// Release the blocked handler synchronously; cleanup stays as a second
+	// idempotent release for early failures.
 	gate.open()
 	select {
 	case <-inFlight:
@@ -108,9 +95,8 @@ func TestCrashRestartKeepsKeysUsableAndCommitsOnlyRealUsage(t *testing.T) {
 		t.Fatalf("restart after crash: %v", err)
 	}
 
-	// The crash must not fabricate the missing execution: the ledger still
-	// holds exactly the one committed record and the totals still describe
-	// exactly that record.
+	// The crash must not fabricate the missing execution: the ledger holds
+	// exactly the one committed record and the totals describe exactly it.
 	page := restarted.page(t, "page_size=100")
 	if page.HasMore || len(page.Items) != 1 {
 		t.Fatalf("ledger after the crash = %+v, want exactly the 1 committed execution", page.Items)
@@ -127,9 +113,8 @@ func TestCrashRestartKeepsKeysUsableAndCommitsOnlyRealUsage(t *testing.T) {
 		t.Fatalf("counters after the crash = %+v, want the durable %+v", after.Used, wantUsed)
 	}
 
-	// The pre-crash Key must work again immediately: no fence, no
-	// acknowledgment and no recovery request may stand between the client and
-	// the upstream.
+	// The pre-crash Key must work immediately: no fence, no acknowledgment
+	// and no recovery request may stand between the client and the upstream.
 	calls := restarted.mock.callCount()
 	status, body := restarted.infer(t, created.Secret, false)
 	if status != http.StatusOK {

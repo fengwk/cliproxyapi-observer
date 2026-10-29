@@ -41,7 +41,6 @@ func TestAccountMetadataProjectionAndFacetSearch(t *testing.T) {
 	m.now = func() time.Time { return now }
 	call(t, m, "plugin.register", lifecycleRequest{[]byte("db: " + filepath.Join(t.TempDir(), "observer.db")), 6})
 	t.Cleanup(func() { call(t, m, "plugin.shutdown", nil) })
-	setTestPrice(t, m, "exact/model", "openai")
 	key, _, err := m.store.CreateKey(engine.KeySpec{Enabled: true, Label: "Client"})
 	if err != nil {
 		t.Fatal(err)

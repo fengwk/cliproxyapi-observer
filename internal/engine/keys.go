@@ -269,38 +269,18 @@ func (s *Store) ResetKey(id string, windows []string) (Key, error) {
 		for _, w := range windows {
 			switch w {
 			case "five_hour":
-				n, e := add(k.Epoch.FiveHour, 1)
-				if e != nil {
-					return e
-				}
-				k.Epoch.FiveHour = n
 				k.Used.FiveHour = 0
 				k.Starts.FiveHour = t
 				k.Resets.FiveHour = t.Add(5 * time.Hour)
 			case "week":
-				n, e := add(k.Epoch.Week, 1)
-				if e != nil {
-					return e
-				}
-				k.Epoch.Week = n
 				k.Used.Week = 0
 				k.Starts.Week = t
 				k.Resets.Week = t.Add(7 * 24 * time.Hour)
 			case "month":
-				n, e := add(k.Epoch.Month, 1)
-				if e != nil {
-					return e
-				}
-				k.Epoch.Month = n
 				k.Used.Month = 0
 				k.Starts.Month = t
 				k.Resets.Month = month(t)
 			case "total":
-				n, e := add(k.Epoch.Total, 1)
-				if e != nil {
-					return e
-				}
-				k.Epoch.Total = n
 				k.Used.Total = 0
 				k.Starts.Total = t
 			default:

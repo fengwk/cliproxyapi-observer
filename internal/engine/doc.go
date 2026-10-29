@@ -9,10 +9,10 @@
 // identities.
 //
 // Failed accounting returns an error, rolls back the entire transaction and
-// leaves a sanitized health diagnostic. Unpriced or uncalculable usage is not
-// recorded as a fabricated zero-cost success. There is no retry queue or
-// admission restriction based on failed or missing usage. CPA's non-durable
-// queue may never deliver some events; missing charges remain missing.
+// leaves a sanitized health diagnostic. A successful pricing quote is recorded
+// as returned, including a zero-cost quote for missing prices or facts. There
+// is no retry queue or admission restriction based on failed or missing usage.
+// CPA's non-durable queue may never deliver some events; missing charges remain missing.
 // Unclean shutdown and callbacks after Close do not create recovery requirements.
 // Close drains capture and releases the database; closed APIs return ErrClosed.
 //

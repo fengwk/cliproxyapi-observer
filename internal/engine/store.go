@@ -19,8 +19,7 @@ var buckets = []string{"meta", "keys", "hashes", "records", "dedup", "daily", "h
 
 type storedKey struct {
 	Key
-	Hash  string
-	Epoch Limits
+	Hash string
 }
 type usageTransaction struct {
 	Quote          pricing.Quote
@@ -28,7 +27,6 @@ type usageTransaction struct {
 	At             time.Time
 	CaptureEnabled bool
 	CaptureMode    string
-	Epoch          Limits
 }
 type recordData struct {
 	Record
