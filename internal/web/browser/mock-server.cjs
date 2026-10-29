@@ -11,7 +11,6 @@
  *   GET  /keys                       POST /keys
  *   PUT  /keys?id={id}               DELETE /keys?id={id}
  *   POST /keys/rotate?id={id}        POST /keys/reset?id={id}
- *   POST /keys/recover?id={id}
  *   GET  /requests                   GET /requests/detail?id={id}
  *   GET  /summary
  *   GET  /settings                   PUT /settings
@@ -182,8 +181,7 @@ function createKey(id, label, overrides) {
         total: iso(now - 30 * 24 * 3600 * 1000)
       },
       active: 1,
-      created_at: iso(now - 30 * 24 * 3600 * 1000),
-      blocked_reason: ''
+      created_at: iso(now - 30 * 24 * 3600 * 1000)
     },
     overrides || {}
   );
@@ -424,12 +422,6 @@ function createState(options) {
         max_concurrent: 2,
         active: 0,
         expires_at: NANO_EXPIRY
-      }),
-      createKey('key-blocked', '待恢复计费 Key', {
-        allowed_models: ['gpt-5-codex'],
-        max_concurrent: 1,
-        active: 0,
-        blocked_reason: 'unknown usage after crash; pending billing cannot be retried'
       })
     ],
     records: createRecords(now),
@@ -447,7 +439,6 @@ function createState(options) {
       keyCreates: 0,
       keyRotates: 0,
       keyResets: 0,
-      keyRecovers: 0,
       keyRevokes: 0,
       detailReads: 0,
       catalogTokenIssued: 0,
@@ -957,7 +948,6 @@ function health(state) {
   return {
     database_bytes: 18_874_368,
     dropped_captures: 0,
-    pending_usage: 0,
     active_requests: 1,
     last_error: '',
     version: '0.6.0-test',
@@ -1371,14 +1361,6 @@ function rejectAnyQuery(url) {
   }
 }
 
-function parseAcknowledge(body) {
-  rejectUnknown(body, new Set(['acknowledge']), 'recover request');
-  if (body.acknowledge !== true) {
-    throw failure(400, 'invalid_json', 'recover requires acknowledge:true');
-  }
-  return true;
-}
-
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1705,6 +1687,7 @@ function createServer(options) {
           const body = await readJson(req);
           call.request_body = clone(body);
           const spec = normalizeKeySpec(body);
+          if (spec.enabled && !state.secrets.has(id)) throw failure(409, 'conflict', 'revoked key requires rotation');
           Object.assign(key, {
             label: spec.label,
             enabled: spec.enabled,
@@ -1722,7 +1705,6 @@ function createServer(options) {
           key.enabled = false;
           key.revoked = true;
           key.active = 0;
-          key.blocked_reason = 'revoked';
           state.secrets.delete(key.id);
           state.secretValues.delete(key.id);
           state.counters.keyRevokes += 1;
@@ -1759,6 +1741,7 @@ function createServer(options) {
         if (owner) throw failure(409, 'conflict', 'client key already exists');
         state.secrets.set(key.id, digest);
         state.secretValues.set(key.id, secret);
+        key.revoked = false;
         key.secret_rotated_at = iso(Date.now());
         state.counters.keyRotates += 1;
         sendJson(res, 200, { key: managementKey(state, key), secret });
@@ -1779,21 +1762,6 @@ function createServer(options) {
           key.resets[window] = at;
         }
         state.counters.keyResets += 1;
-        sendJson(res, 200, managementKey(state, key));
-        return;
-      }
-
-      if (suffix === '/keys/recover') {
-        requireMethod(req, 'POST');
-        const id = parseQueryID(url, 'POST /keys/recover');
-        const key = findKey(state, id);
-        const body = await readJson(req);
-        call.request_body = clone(body);
-        parseAcknowledge(body);
-        // 恢复只清除 Key 级阻塞原因并记录审计；不得改动 used/starts/resets/limits。
-        key.blocked_reason = '';
-        key.recovered_at = iso(Date.now());
-        state.counters.keyRecovers += 1;
         sendJson(res, 200, managementKey(state, key));
         return;
       }

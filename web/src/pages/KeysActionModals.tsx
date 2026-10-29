@@ -461,125 +461,6 @@ export function RevokeKeyModal({ keyData, api, onClose, onSuccess }: RevokeKeyMo
 }
 
 /* ==========================================================================
-   RecoverKeyModal (Unblock accounting failure)
-   ========================================================================== */
-
-export interface RecoverKeyModalProps {
-  keyData: Key;
-  api: ApiClient;
-  onClose: () => void;
-  onSuccess: () => void;
-}
-
-export function RecoverKeyModal({ keyData, api, onClose, onSuccess }: RecoverKeyModalProps) {
-  const [acknowledged, setAcknowledged] = useState<boolean>(false);
-  const [submitting, setSubmitting] = useState<boolean>(false);
-  const [error, setError] = useState<string>('');
-
-  const isSubmittingRef = useRef<boolean>(false);
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const mountedRef = useRef<boolean>(true);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      }
-    };
-  }, []);
-
-  const handleSafeClose = useCallback(() => {
-    if (isSubmittingRef.current || submitting) {
-      return;
-    }
-    onClose();
-  }, [submitting, onClose]);
-
-  const handleRecover = async () => {
-    if (isSubmittingRef.current) {
-      return;
-    }
-
-    if (!acknowledged) {
-      setError('必须明确勾选确认并承担责任后方可解除封锁');
-      return;
-    }
-
-    isSubmittingRef.current = true;
-    setSubmitting(true);
-    setError('');
-    abortControllerRef.current = new AbortController();
-
-    try {
-      await api.request(`/keys/recover?id=${encodeURIComponent(keyData.id)}`, {
-        method: 'POST',
-        body: { acknowledge: true },
-        signal: abortControllerRef.current.signal,
-      });
-      if (mountedRef.current) {
-        onSuccess();
-      }
-    } catch (err: unknown) {
-      if (abortControllerRef.current?.signal.aborted) {
-        return;
-      }
-      if (!mountedRef.current) {
-        return;
-      }
-      setError(errorMessage(err) || '恢复 Key 失败');
-    } finally {
-      if (mountedRef.current) {
-        setSubmitting(false);
-      }
-      isSubmittingRef.current = false;
-    }
-  };
-
-  return (
-    <Modal
-      title={`核对并恢复 Key: ${keyData.label}`}
-      onClose={handleSafeClose}
-      size="md"
-      footer={
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
-          <Button variant="ghost" onClick={handleSafeClose} disabled={submitting}>
-            取消
-          </Button>
-          <Button
-            variant="danger"
-            onClick={handleRecover}
-            disabled={!acknowledged || submitting}
-            loading={submitting}
-          >
-            确认核对后恢复
-          </Button>
-        </div>
-      }
-    >
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-        {error && <Notice tone="danger">{error}</Notice>}
-
-        <Notice tone="warning">
-          该 Key 因底层计费写入或存储异常已被系统暂停。系统会自动重试保留的计费事件；若服务异常期间有未知或丢失用量，管理员须核对处理后确认承担责任。此操作仅解除封锁，不会修改已用金额或历史费用。
-        </Notice>
-
-        <label className="cpa-radio-label" style={{ alignItems: 'flex-start', marginTop: '0.5rem' }}>
-          <input
-            type="checkbox"
-            checked={acknowledged}
-            onChange={(e) => setAcknowledged(e.target.checked)}
-            style={{ marginTop: '0.2rem' }}
-          />
-          <span>我已核对并处理缺失用量，确认存储正常，承担未知用量核对责任</span>
-        </label>
-      </div>
-    </Modal>
-  );
-}
-
-/* ==========================================================================
    DetailsModal
    ========================================================================== */
 
@@ -769,11 +650,11 @@ export function DeleteKeyModal({ keyData, api, onClose, onSuccess }: DeleteKeyMo
         msg.includes('在处理') ||
         msg.includes('正在处理')
       ) {
-        setError('当前仍有活跃请求或待记账操作正在处理中，暂无法删除，请稍后重试');
+        setError('当前仍有活跃请求或后台操作正在处理中，暂无法删除，请稍后重试');
       } else {
         setError(msg || '删除 Key 失败');
       }
-      // Per contract: pending/busy 错误不关闭弹窗
+      // Per contract: busy 错误不关闭弹窗
     } finally {
       if (mountedRef.current) {
         setSubmitting(false);

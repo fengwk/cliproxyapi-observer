@@ -96,9 +96,6 @@ describe('KeysPage', () => {
         if (path.startsWith('/keys/reset?')) {
           return Promise.resolve(mockKeys[0]);
         }
-        if (path.startsWith('/keys/recover?')) {
-          return Promise.resolve(mockKeys[0]);
-        }
         return Promise.reject(new Error('Unknown path: ' + path));
       }),
       models: vi.fn().mockResolvedValue([{ id: 'gpt-4o' }, { id: 'claude-3-5-sonnet' }]),

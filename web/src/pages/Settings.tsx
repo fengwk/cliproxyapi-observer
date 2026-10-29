@@ -77,7 +77,6 @@ const DEFAULT_SNAPSHOT: PriceSnapshot = {
 const DEFAULT_HEALTH: Health = {
   database_bytes: 0,
   dropped_captures: 0,
-  pending_usage: 0,
   active_requests: 0,
 };
 
@@ -777,7 +776,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
     );
   }
 
-  const hasFault = Boolean(health.last_error || health.maintenance_error || health.pending_usage > 0);
+  const hasFault = Boolean(health.last_error || health.maintenance_error);
   const isLastSyncValid = Boolean(snapshot.last_sync && !snapshot.last_sync.startsWith('0001'));
 
   return (
@@ -1367,7 +1366,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
           )}
         </div>
         <p className="settings-section-desc">
-          查看数据库占用与计费队列健康状态；通过空间整理回收磁盘空闲碎片。
+          查看数据库占用与存储健康状态；通过空间整理回收磁盘空闲碎片。
         </p>
 
         {compactStatus && <Notice tone={compactStatus.tone}>{compactStatus.message}</Notice>}
@@ -1392,12 +1391,9 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
         </Modal>}
 
         {/* Fault warning always visible outside */}
-        {hasFault && (
+        {health.last_error && (
           <div style={{ marginBottom: 14 }}>
-            {health.last_error && <Notice tone="danger">最近系统错误：{health.last_error}</Notice>}
-            {health.pending_usage > 0 && (
-              <Notice tone="warning">待重试计费队列存在 {health.pending_usage} 条事件正在排队写入。</Notice>
-            )}
+            <Notice tone="danger">最近系统错误：{health.last_error}</Notice>
           </div>
         )}
 
@@ -1430,10 +1426,6 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
             <div className="settings-diagnostic-item">
               <span className="settings-diagnostic-label">当前活跃请求</span>
               <span className="settings-diagnostic-value">{health.active_requests}</span>
-            </div>
-            <div className="settings-diagnostic-item">
-              <span className="settings-diagnostic-label">待重试计费事件</span>
-              <span className="settings-diagnostic-value">{health.pending_usage}</span>
             </div>
             <div className="settings-diagnostic-item">
               <span className="settings-diagnostic-label">超限丢弃捕获数</span>
@@ -1480,7 +1472,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
               确定要执行数据库空间整理吗？当前数据库占用 <strong>{formatBytes(health.database_bytes)}</strong>。
             </p>
             <p className="settings-note" style={{ marginTop: 8 }}>
-              仅在无活跃请求、无待写计费时整理，忙时请稍后重试。整理期间新受管请求可能收到可重试的 503，不影响已接受请求或 CPA 原生 Key。需要临时磁盘空间；复制或替换前失败保留原文件，替换后同步错误会如实报告。
+              仅在无活跃请求且后台操作空闲时整理，忙时请稍后重试。整理期间新受管请求可能收到可重试的 503，不影响已接受请求或 CPA 原生 Key。需要临时磁盘空间；复制或替换前失败保留原文件，替换后同步错误会如实报告。
             </p>
           </Modal>
         )}
