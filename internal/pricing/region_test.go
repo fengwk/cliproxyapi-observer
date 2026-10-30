@@ -121,6 +121,16 @@ func TestV2RegionMultiplierValidationStillRejects(t *testing.T) {
 			issue: "unsupported_condition_field:region",
 		},
 		{
+			name:  "empty region",
+			cost:  `{"text":{"input":{"price":1}},"multipliers":[{"when":{"region":{"equals":""}},"factor":1.1}]}`,
+			issue: "unsupported_condition_field:region",
+		},
+		{
+			name:  "oversized region value",
+			cost:  `{"text":{"input":{"price":1}},"multipliers":[{"when":{"region":{"equals":"` + strings.Repeat("r", 129) + `"}},"factor":1.1}]}`,
+			issue: "unsupported_condition_field:region",
+		},
+		{
 			name:  "invalid factor after valid region",
 			cost:  `{"text":{"input":{"price":1},"output":{"price":2}},"multipliers":[{"when":{"region":{"in":["us","eu"]}},"factor":{"text":-1}}]}`,
 			issue: "invalid_multiplier_factor",
@@ -166,6 +176,16 @@ func TestV2RegionMultiplierKeepsImportBounds(t *testing.T) {
 		strings.Repeat(`{"context":{"gt":1}},`, maxConditionList) + `{"context":{"gt":1}}]}`
 	if _, _, ok := parseV2Multipliers(json.RawMessage(`[{"when":` + listHeavy + `,"factor":1.1}]`)); ok {
 		t.Fatal("region multiplier beyond list limit accepted")
+	}
+
+	// Region membership keeps the same bounded string-set shape as service tiers.
+	regions := make([]string, maxConditionList+1)
+	for i := range regions {
+		regions[i] = `"` + strings.Repeat("r", i+1) + `"`
+	}
+	regionListHeavy := `{"region":{"in":[` + strings.Join(regions, ",") + `]}}`
+	if _, _, ok := parseV2Multipliers(json.RawMessage(`[{"when":` + regionListHeavy + `,"factor":1.1}]`)); ok {
+		t.Fatal("region membership beyond list limit accepted")
 	}
 
 	ruleHeavy := `[` + strings.Repeat(`{"when":{"region":{"equals":"us"}},"factor":1.1},`, maxRulesPerModel) +

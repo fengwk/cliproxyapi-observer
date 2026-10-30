@@ -1124,7 +1124,15 @@ func validRegionCondition(raw json.RawMessage) bool {
 		return false
 	}
 	values, ok := stringListCondition(fields)
-	return ok && len(values) > 0
+	if !ok || len(values) == 0 || len(values) > maxConditionList {
+		return false
+	}
+	for _, value := range values {
+		if !validIdentity(value) || len(value) > 128 {
+			return false
+		}
+	}
+	return true
 }
 
 func weekdayNumber(name string) (int, bool) {
