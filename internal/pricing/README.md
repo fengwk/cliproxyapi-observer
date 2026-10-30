@@ -78,6 +78,25 @@ shape cannot be represented safely, the entry is `unpriced` with
 `Snapshot` show the base tier and mark it with `reason: "context_tiers"` because
 they have no invented token context.
 
+## Region-gated multipliers
+
+The public v2 catalog sometimes gates a multiplier on the upstream region.
+Observer has no runtime region fact, so at import a multiplier whose complete
+condition tree contains a valid `region` `equals`/`in` leaf is omitted as one
+whole rule. The condition tree and factor are still parsed with the normal
+depth, node, list, field-whitelist and factor-range checks; malformed or
+unknown conditions, invalid factors and region conditions in price overrides
+still reject the model price. Other multipliers keep their order and
+source-index IDs, and base, TTL and override rates are unchanged. Such a price
+is still supported and carries `region_multiplier_ignored`; the UI must warn
+that measured cost and quota deductions may stay below the actual upstream
+charge without disabling the candidate. This import exception adds no runtime
+condition field, request fact or schema, and does not change the service-tier
+("fast") fact requirement: callers must still supply the final tier exactly as
+before. Manual precedence and previously stored quotes/accounting are
+unchanged. Refresh the catalog after upgrading so imported definitions reflect
+this behavior.
+
 ## Diagnostics
 
 `Price`, `PreviewPrice` and `Quote` expose optional:

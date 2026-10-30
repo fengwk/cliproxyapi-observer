@@ -1,0 +1,23 @@
+{
+  "anthropic": {
+    "models": {
+      "claude-opus-5-5": {
+        "canonical_id": "anthropic/claude-opus-5-5",
+        "cost": {
+          "text": {
+            "input": {
+              "price": 4,
+              "cache": { "read": 0.2, "write": { "5m": 5, "1h": 8 } }
+            },
+            "output": { "price": 20 }
+          },
+          "web_search": { "price": 10 },
+          "multipliers": [
+            { "when": { "service_tier": { "equals": "fast" } }, "factor": { "text": 2 } },
+            { "when": { "region": { "equals": "us" } }, "factor": { "text": 1.1 } }
+          ]
+        }
+      }
+    }
+  }
+}

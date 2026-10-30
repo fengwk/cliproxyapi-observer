@@ -95,10 +95,12 @@ describe('Settings.helpers', () => {
       expect(validTimeRange('8:00-18:00')).toBe(false);
     });
 
-    // Excluded fees remain visible on usable prices; rejected regional rules
-    // explain the missing fact rather than leaking a generic machine code.
-    it('explains catalog exclusions and regional pricing failures', () => {
+    // Ignored region multipliers remain usable and expose an underestimate
+    // warning; unsupported region override conditions keep the strict message.
+    it('explains catalog exclusions, ignored region multipliers and rejected regional overrides', () => {
       expect(pricingIssuesLabel(['web_search_cost_not_included'])).toBe('网页搜索附加费用未计入 Token 价格');
+      expect(pricingIssuesLabel(['region_multiplier_ignored']))
+        .toBe('已忽略地区倍率，统计费用及额度扣费可能低于实际上游费用');
       expect(pricingIssuesLabel(['unsupported_condition', 'unsupported_condition_field:region']))
         .toBe('缺少上游实际地区，无法判定地区价格规则；请手工配置适用价格');
       expect(pricingIssuesLabel(['future_issue'])).toBe('目录适配诊断：future_issue');

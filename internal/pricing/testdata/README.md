@@ -18,14 +18,23 @@ exercise partial rates, explicit zero, an unsupported tier type and the legacy
 needed by the adapter regression tests: `cost.text.input/output`, field-wise
 `overrides`, TTL cache writes (`5m`/`1h`), scalar and object `multipliers`,
 `canonical_id`, and conditions using `context`, `service_tier`, `date`,
-`utc_days` and `utc_hours`. It also includes an unsupported `region` condition
-and a `unit: "character"` price that must be rejected rather than treated as a
-per-token price. Provider/model names are retained only for this small local
-fixture; tests never contact the network.
+`utc_days` and `utc_hours`. The `region-only` multiplier is ignored as a
+complete rule and must leave its base rates usable; a `unit: "character"` price
+must still be rejected rather than treated as a per-token price. Provider/model
+names are retained only for this small local fixture; tests never contact the
+network.
 
 `models.dev.v2.gemini.json` retains the complete `cost` objects and canonical IDs
 of `google/gemini-3.8-flash` and `google-vertex/gemini-3.8-flash` from the v2
 catalog inspected on 2026-10-23 (catalog SHA-256
 `ed982576921d90863842ff0fda7f611a6a792d6cc21b596b926d7b38f7dc9bff`).
-It covers excluded `web_search` fees, scalar `factor.text`, tier/date multipliers,
-and the Vertex region condition that cannot safely be evaluated.
+It covers excluded `web_search` fees, scalar `factor.text`, tier/date
+multipliers, and the Vertex region multiplier that is ignored while its other
+three multipliers and prices remain usable.
+
+`models.dev.v2.anthropic.json` retains the `claude-opus-5-5` cost object from
+the v2 catalog inspected on 2026-10-30 (catalog SHA-256
+`800a7973e97258e2afd1943ad78beaa32f9932c5f35be1e753e8189960804972`). It fixes
+the base input/output/cache rates, `5m`/`1h` cache-write prices, the fast
+service-tier multiplier and the `region: "us"` multiplier used to verify that
+only the region-gated rule is omitted.

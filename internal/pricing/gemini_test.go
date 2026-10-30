@@ -53,13 +53,41 @@ func TestV2GeminiTextPricingAndAncillaryCosts(t *testing.T) {
 			}
 		})
 	}
-	// Vertex's not(region) is not "always true". No runtime region is available;
-	// reject its whole price and identify the actual condition, not web_search.
+	// Vertex's region-gated multiplier is skipped as a complete rule while its
+	// base, cache, tier and date pricing remain usable.
 	vertex, ok := index.exactEntry("gemini-3.8-flash", "google-vertex")
-	if !ok || vertex.Supported || vertex.Definition.Base.Input != 0 ||
-		!contains(vertex.SupportIssues, "unsupported_condition_field:region") ||
-		!contains(vertex.SupportIssues, "web_search_cost_not_included") {
+	if !ok || !vertex.Supported || vertex.Definition.Base.Input != 750000 ||
+		vertex.Definition.Base.Output != 3750000 ||
+		len(vertex.Definition.Multipliers) != 3 ||
+		!contains(vertex.SupportIssues, "region_multiplier_ignored") ||
+		!contains(vertex.SupportIssues, "web_search_cost_not_included") ||
+		contains(vertex.SupportIssues, "unsupported_condition_field:region") {
 		t.Fatalf("vertex = %+v", vertex)
+	}
+	for i, want := range []string{"multiplier-0", "multiplier-1", "multiplier-3"} {
+		if vertex.Definition.Multipliers[i].ID != want {
+			t.Fatalf("vertex multiplier IDs = %+v", vertex.Definition.Multipliers)
+		}
+	}
+	for _, tc := range []struct {
+		at   string
+		tier string
+		want int64
+	}{
+		{"2026-12-31T23:59:59Z", "standard", 4575000},
+		{"2026-12-31T23:59:59Z", "priority", 8235000},
+		{"2027-01-01T00:00:00Z", "standard", 9150000},
+	} {
+		at, err := time.Parse(time.RFC3339, tc.at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		q, err := s.Quote("gemini-3.8-flash", "google-vertex",
+			Tokens{Input: 1000000, Output: 1000000, Reasoning: 500000, CacheRead: 1000000}, at, tc.tier)
+		if err != nil || !q.PricingSupported || q.CostMicroUSD != tc.want ||
+			!contains(q.SupportIssues, "region_multiplier_ignored") {
+			t.Fatalf("vertex quote = %+v, err = %v", q, err)
+		}
 	}
 }
 

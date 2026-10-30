@@ -158,9 +158,11 @@ func TestV2AdapterOverridesTTLAndUnsupportedConditions(t *testing.T) {
 		t.Fatalf("factors = %+v", databricks.Definition.Multipliers)
 	}
 	region, ok := index.exactEntry("region-only", "opencode")
-	if !ok || region.Supported || region.Definition.Base.Input != 0 ||
-		!contains(region.SupportIssues, "unsupported_condition") {
-		t.Fatal("unsupported condition imported", region)
+	if !ok || !region.Supported || region.Definition.Base.Input != 1_000_000 ||
+		region.Definition.Base.Output != 2_000_000 || len(region.Definition.Multipliers) != 0 ||
+		!contains(region.SupportIssues, "region_multiplier_ignored") ||
+		contains(region.SupportIssues, "unsupported_condition") {
+		t.Fatal("region multiplier was not ignored as one complete rule", region)
 	}
 	character, ok := index.exactEntry("character-priced", "opencode")
 	if !ok || character.Supported || !contains(character.SupportIssues, "unsupported_price_unit") {

@@ -271,6 +271,7 @@ export function pricingIssuesLabel(issues: string[] = []): string {
     explicit_cache_pricing_not_supported: '显式缓存费用未计入 Token 价格',
     unsupported_cost_field: '目录包含尚不支持的费用字段，无法完整解析价格',
     unsupported_condition: '目录包含无法判定的价格条件，不能自动导入',
+    region_multiplier_ignored: '已忽略地区倍率，统计费用及额度扣费可能低于实际上游费用',
     'unsupported_condition_field:region': '缺少上游实际地区，无法判定地区价格规则；请手工配置适用价格',
     'unsupported_condition_field:thinking': '尚不支持此思考状态价格条件；请手工配置适用价格',
     'unsupported_condition_field:holiday': '尚不支持此节假日价格条件；请手工配置适用价格',

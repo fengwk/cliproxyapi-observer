@@ -1056,23 +1056,29 @@ describe('SettingsPage', () => {
     expect(screen.getByText('gpt-4o', { selector: 'strong' })).toBe(row);
   });
 
-  // A rejected candidate must not masquerade as a free model. Usable Google
-  // pricing keeps ancillary-fee warnings; Vertex remains blocked for region.
-  it('distinguishes usable token pricing from rejected candidates without fake zero quotes', async () => {
+  // A rejected main price must not masquerade as free. A candidate whose only
+  // limitation is an ignored region multiplier remains importable with its
+  // underestimate warning, while genuinely unsupported candidates stay blocked.
+  it('distinguishes usable region-multiplier warnings from rejected candidates without fake zero quotes', async () => {
     const google = {
       ...initialPreview.items[0], model: 'gemini-3.8-flash', provider: 'google',
       definition: { ...manualDefinition, base: { ...manualDefinition.base, input: 750000, output: 3750000 } },
       support_issues: ['web_search_cost_not_included'],
     };
     const vertex = {
-      ...google, provider: 'google-vertex', pricing_supported: false,
+      ...google, provider: 'google-vertex',
+      support_issues: ['web_search_cost_not_included', 'region_multiplier_ignored'],
+    };
+    const unsupported = {
+      ...google, provider: 'opencode', model: 'character-priced', pricing_supported: false,
       definition: initialPreview.items[1].definition,
-      support_issues: ['unsupported_condition', 'unsupported_condition_field:region'],
+      support_issues: ['unsupported_price_unit'],
     };
     const original = mockApi.request;
     mockApi.request = vi.fn((path, options) => path === '/prices/preview' ? Promise.resolve({ items: [{
       ...initialPreview.items[1], model: 'channel/gemini-3.8-flash', pricing_supported: false,
-      support_issues: vertex.support_issues, candidates: [google, vertex],
+      support_issues: ['unsupported_condition', 'unsupported_condition_field:region'],
+      candidates: [google, vertex, unsupported],
     }] }) : original(path, options)) as ApiClient['request'];
     render(<SettingsPage api={mockApi} onDirtyChange={onDirtyChange} />);
     const row = (await screen.findByText('channel/gemini-3.8-flash')).closest('tr')!;
@@ -1083,14 +1089,18 @@ describe('SettingsPage', () => {
     expect(row).toHaveTextContent('缺少上游实际地区');
     fireEvent.click(within(row).getByRole('button', { name: '为 channel/gemini-3.8-flash 选择价格来源' }));
     const good = screen.getByText('google / gemini-3.8-flash').closest('.settings-row')!;
-    const bad = screen.getByText('google-vertex / gemini-3.8-flash').closest('.settings-row')!;
+    const region = screen.getByText('google-vertex / gemini-3.8-flash').closest('.settings-row')!;
+    const bad = screen.getByText('opencode / character-priced').closest('.settings-row')!;
     expect(good).toHaveTextContent('输入 $0.75 · 输出 $3.75');
     expect(good).toHaveTextContent('网页搜索附加费用未计入 Token 价格');
     expect(within(good as HTMLElement).getByRole('button', { name: '加入草稿' })).toBeEnabled();
+    expect(region).toHaveTextContent('已忽略地区倍率，统计费用及额度扣费可能低于实际上游费用');
+    expect(within(region as HTMLElement).getByRole('button', { name: '加入草稿' })).toBeEnabled();
+    expect(bad).toHaveTextContent('价格无法解析，不能导入此候选报价；请手工配置适用价格。');
     expect(within(bad as HTMLElement).getByRole('button', { name: '加入草稿' })).toBeDisabled();
     expect(bad).not.toHaveTextContent('$0');
-    expect(bad).toHaveTextContent('缺少上游实际地区');
-    fireEvent.click(within(good as HTMLElement).getByRole('button', { name: '加入草稿' }));
+    fireEvent.click(within(region as HTMLElement).getByRole('button', { name: '加入草稿' }));
+    await screen.findByText('channel/gemini-3.8-flash → google-vertex / gemini-3.8-flash');
     fireEvent.keyDown(screen.getByRole('combobox', { name: '价格匹配状态' }), { key: 'ArrowDown' });
     fireEvent.click(screen.getByRole('option', { name: '零价格' }));
     expect(screen.queryByText('channel/gemini-3.8-flash', { selector: 'strong' })).toBeNull();

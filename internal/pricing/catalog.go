@@ -744,10 +744,11 @@ func parseV2Multipliers(raw json.RawMessage) ([]Multiplier, []string, bool) {
 			return nil, []string{"unsupported_multiplier"}, false
 		}
 		when := Condition{}
+		regionMultiplier := false
 		if rawWhen, exists := fields["when"]; exists {
 			var supported bool
 			var conditionIssues []string
-			when, conditionIssues, supported = parseV2Condition(rawWhen)
+			when, conditionIssues, supported, regionMultiplier = parseV2ConditionContext(rawWhen, true)
 			if !supported {
 				return nil, append(issues, conditionIssues...), false
 			}
@@ -755,6 +756,13 @@ func parseV2Multipliers(raw json.RawMessage) ([]Multiplier, []string, bool) {
 		factors, factorIssues, supported := parseV2Factor(fields["factor"])
 		if !supported {
 			return nil, append(issues, factorIssues...), false
+		}
+		// A valid region-gated rule cannot be evaluated without the upstream
+		// region fact. Skip the whole rule, but only after its condition and
+		// factor passed the same strict validation as every other multiplier.
+		if regionMultiplier {
+			issues = append(issues, "region_multiplier_ignored")
+			continue
 		}
 		issues = append(issues, factorIssues...)
 		out = append(out, Multiplier{ID: "multiplier-" + strconv.Itoa(i), When: when, Factors: factors})
@@ -891,24 +899,36 @@ func factorString(raw json.RawMessage) (string, bool) {
 	return s, true
 }
 
+type v2ConditionParseContext struct {
+	nodes            int
+	unsupportedField string
+	allowRegion      bool
+	regionSeen       bool
+}
+
 func parseV2Condition(raw json.RawMessage) (Condition, []string, bool) {
-	var unsupportedField string
-	cond, supported := parseV2ConditionDepth(raw, 0, new(int), &unsupportedField)
+	cond, issues, supported, _ := parseV2ConditionContext(raw, false)
+	return cond, issues, supported
+}
+
+func parseV2ConditionContext(raw json.RawMessage, allowRegion bool) (Condition, []string, bool, bool) {
+	ctx := &v2ConditionParseContext{allowRegion: allowRegion}
+	cond, supported := parseV2ConditionDepth(raw, 0, ctx)
 	if supported {
-		return cond, nil, true
+		return cond, nil, true, ctx.regionSeen
 	}
 	issues := []string{"unsupported_condition"}
-	if unsupportedField != "" {
-		issues = append(issues, "unsupported_condition_field:"+unsupportedField)
+	if ctx.unsupportedField != "" {
+		issues = append(issues, "unsupported_condition_field:"+ctx.unsupportedField)
 	}
-	return Condition{}, issues, false
+	return Condition{}, issues, false, false
 }
 
 // parseV2ConditionDepth bounds recursion before decoding a condition so a
 // hostile 32 MiB catalog cannot exhaust the stack before validCondition runs.
-func parseV2ConditionDepth(raw json.RawMessage, depth int, nodes *int, unsupportedField *string) (Condition, bool) {
-	*nodes++
-	if depth > maxConditionDepth || *nodes > maxConditionNodes {
+func parseV2ConditionDepth(raw json.RawMessage, depth int, ctx *v2ConditionParseContext) (Condition, bool) {
+	ctx.nodes++
+	if depth > maxConditionDepth || ctx.nodes > maxConditionNodes {
 		return Condition{}, false
 	}
 	fields, ok := strictKeys(raw, map[string]bool{
@@ -1020,31 +1040,38 @@ func parseV2ConditionDepth(raw json.RawMessage, depth int, nodes *int, unsupport
 		cond.Time = &TimeCondition{Start: start, End: end, Timezone: "UTC", Weekdays: weekdays}
 	}
 	if rawAll, ok := fields["all"]; ok {
-		children, ok := parseConditionList(rawAll, depth+1, nodes, unsupportedField)
+		children, ok := parseConditionList(rawAll, depth+1, ctx)
 		if !ok {
 			return Condition{}, false
 		}
 		cond.All = children
 	}
 	if rawAny, ok := fields["any"]; ok {
-		children, ok := parseConditionList(rawAny, depth+1, nodes, unsupportedField)
+		children, ok := parseConditionList(rawAny, depth+1, ctx)
 		if !ok {
 			return Condition{}, false
 		}
 		cond.Any = children
 	}
 	if rawNot, ok := fields["not"]; ok {
-		child, ok := parseV2ConditionDepth(rawNot, depth+1, nodes, unsupportedField)
+		child, ok := parseV2ConditionDepth(rawNot, depth+1, ctx)
 		if !ok {
 			return Condition{}, false
 		}
 		cond.Not = &child
 	}
-	// thinking/region/holiday/utc_dates cannot be represented by the internal
-	// fact set. Treating them as always-true would silently change the price.
-	for _, key := range []string{"thinking", "region", "holiday", "utc_dates"} {
+	if rawRegion, ok := fields["region"]; ok {
+		if !ctx.allowRegion || !validRegionCondition(rawRegion) {
+			ctx.unsupportedField = "region"
+			return Condition{}, false
+		}
+		ctx.regionSeen = true
+	}
+	// thinking/holiday/utc_dates cannot be represented by the internal fact
+	// set. Treating them as always-true would silently change the price.
+	for _, key := range []string{"thinking", "holiday", "utc_dates"} {
 		if _, present := fields[key]; present {
-			*unsupportedField = key
+			ctx.unsupportedField = key
 			return Condition{}, false
 		}
 	}
@@ -1073,20 +1100,31 @@ func stringListCondition(fields map[string]json.RawMessage) ([]string, bool) {
 	return uniqueStrings(out), true
 }
 
-func parseConditionList(raw json.RawMessage, depth int, nodes *int, unsupportedField *string) ([]Condition, bool) {
+func parseConditionList(raw json.RawMessage, depth int, ctx *v2ConditionParseContext) ([]Condition, bool) {
 	var elements []json.RawMessage
 	if json.Unmarshal(raw, &elements) != nil || len(elements) > maxConditionList {
 		return nil, false
 	}
 	out := make([]Condition, 0, len(elements))
 	for _, element := range elements {
-		cond, ok := parseV2ConditionDepth(element, depth, nodes, unsupportedField)
+		cond, ok := parseV2ConditionDepth(element, depth, ctx)
 		if !ok {
 			return nil, false
 		}
 		out = append(out, cond)
 	}
 	return out, true
+}
+
+// validRegionCondition accepts only the catalog's region equals/in shape. The
+// value itself is never needed because a region multiplier is not imported.
+func validRegionCondition(raw json.RawMessage) bool {
+	fields, ok := strictKeys(raw, map[string]bool{"equals": true, "in": true})
+	if !ok {
+		return false
+	}
+	values, ok := stringListCondition(fields)
+	return ok && len(values) > 0
 }
 
 func weekdayNumber(name string) (int, bool) {
