@@ -7,6 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
+const { isDeepStrictEqual } = require('node:util');
 const { chromium } = require('../../../web/node_modules/playwright');
 const mock = require('./mock-server.cjs');
 const { ensureManagementHTML } = require('./shell-helper.cjs');
@@ -782,14 +783,29 @@ async function interactions(env) {
     ttlSummaries: await frame.locator('.settings-details > summary').filter({ hasText: '缓存写入 TTL 覆盖' }).count(),
   };
   check('structured definition renders overrides, multipliers and TTL section',
-    definitionParts.overrides === 1 && definitionParts.multipliers === 1 &&
+    definitionParts.overrides === 2 && definitionParts.multipliers === 1 &&
     definitionParts.ttlSummaries >= 1, JSON.stringify(definitionParts));
+  // The new body rule is additive: both it and the pre-existing pricing rules
+  // must render, survive an edit/save, and reload from the management API.
+  const bodyPath = frame.getByLabel('第 1 条手工价格 价格覆盖 2 请求体路径', { exact: true });
+  const bodyValue = frame.getByLabel('第 1 条手工价格 价格覆盖 2 请求体值', { exact: true });
+  check('request-body rule renders its exact pointer, scalar type and value',
+    await bodyPath.inputValue() === '/speed' && await bodyValue.inputValue() === 'fast' &&
+    (await frame.getByLabel('第 1 条手工价格 价格覆盖 2 请求体值类型', { exact: true }).innerText()).includes('字符串') &&
+    await frame.getByLabel('第 1 条手工价格 价格覆盖 1 规则 ID', { exact: true }).inputValue() === 'long-context' &&
+    await frame.getByLabel('第 1 条手工价格 价格覆盖 2 规则 ID', { exact: true }).inputValue() === 'fast-mode');
   check('preview marks manual and zero prices with rule counts, never unpriced',
     await frame.getByText('手工价格', { exact: true }).count() > 0 &&
     await frame.getByText('零价格', { exact: true }).count() > 0 &&
-    await frame.getByText('2 条条件规则', { exact: true }).count() > 0 &&
-    await frame.getByText(/未定价|missing_rates/).count() === 0);
+    await frame.getByText('3 条条件规则', { exact: true }).count() === 1 &&
+    await frame.getByText(/未定价|missing_rates/).count() === 0,
+    await frame.locator('.settings-table').innerText());
   await shot(page, 'settings-pricing-host');
+  const expectedDefinition = structuredClone(server.state.settings.pricing.prices[0].definition);
+  // The editor serializes an omitted TTL map as {}, an equivalent empty map.
+  expectedDefinition.base.cache_write_by_ttl ??= {};
+  expectedDefinition.overrides[1].when.requestBody.equals = 'fast-browser';
+  await bodyValue.fill('fast-browser');
   await sourceSelect.click();
   await frame.getByRole('option', { name: 'models.dev v1', exact: true }).click();
   await frame.getByLabel('第 1 条手工价格 Provider', { exact: true }).fill('openai');
@@ -799,7 +815,19 @@ async function interactions(env) {
   check('pricing save persists v1 source and exact provider pair',
     server.state.settings.pricing.source === 'models_dev_v1' && savedPrice?.provider === 'openai' &&
     savedPrice?.definition.base.input === 1_250_000);
+  check('pricing save changes only the edited body condition, preserving all other rules',
+    isDeepStrictEqual(savedPrice?.definition, expectedDefinition), JSON.stringify(savedPrice?.definition));
   check('pricing save preserves confirmed capture settings', server.state.settings.capture_enabled && !server.state.settings.pricing.auto);
+  await frame.goto(frame.url());
+  await frame.locator('.requests-table tbody tr').first().waitFor();
+  await settingsTab(frame).click();
+  await frame.locator('.settings-table tbody tr').first().waitFor();
+  check('request-body edit reloads with the original override and multiplier intact',
+    await bodyPath.inputValue() === '/speed' && await bodyValue.inputValue() === 'fast-browser' &&
+    await frame.getByLabel('第 1 条手工价格 价格覆盖 1 规则 ID', { exact: true }).inputValue() === 'long-context' &&
+    await frame.locator('[data-testid="definition-override"]').count() === 2 &&
+    await frame.locator('[data-testid="definition-multiplier"]').count() === 1 &&
+    isDeepStrictEqual(server.state.settings.pricing.prices[0].definition, expectedDefinition));
   await shot(page, 'settings-pricing-saved-host');
   server.state.pricesError = 'test catalog offline';
   const sync = server.state.pricesLastSync;

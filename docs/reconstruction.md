@@ -1,6 +1,6 @@
 # Observer 当前开发实现说明
 
-本文件描述 v1.0.0 当前实现；`REFACTOR-next.md` 是历史需求设计，
+本文件描述 v1.1.0 当前实现；`REFACTOR-next.md` 是历史需求设计，
 v0.6/v0.7/v0.8 发布说明保留各版本历史行为。当前采用最小非独占认证共存，
 详见 [认证与模型权限](model-policy.md)，不接管 CPA 的原生凭据或实时令牌。
 
@@ -27,7 +27,8 @@ v0.6/v0.7/v0.8 发布说明保留各版本历史行为。当前采用最小非�
 
 ## 认证范围与 SDK 限制
 
-- SDK 锁定 `CLIProxyAPI/v8 v8.0.30`，不修改 CPA 核心。
+- SDK 锁定 `CLIProxyAPI/v8 v8.0.47`，最低宿主仍为 CPA v8.0.30 / 插件 schema 6。
+  不启用新版正文省略/修改能力，不修改 CPA 核心。
 - 识别的生成操作：POST `/v1/chat/completions`、`/v1/completions`、`/v1/messages`、
   `/v1/responses`、`/backend-api/codex/responses`，以及 Gemini
   `/v1beta/models/{model}:generateContent|streamGenerateContent`。
@@ -161,6 +162,11 @@ preview、Snapshot、Quote 使用同一个 resolver；完整定义、原因/候�
 支持问题由服务端提供。未知数据仍显示 `—`，确认的免费价才显示 0。目录故障保留
 最后有效快照，入库报价固定，之后改映射/目录/手动价都不重算历史。
 
+手工规则的 `requestBody: {path, equals}` 使用 RFC 6901 Pointer 和严格标量匹配；
+数字按精确十进制比较。只在内存保留条件指纹与匹配结果，不为计费持久化请求值或正文，
+采集关闭时也能求值。最多收集 128 个条件、解析 32MiB 正文，关联缺失/过期时条件未知。
+该字段由客户端控制，不能当作可信上游事实。详见 [v1.1.0 发布说明](release-notes-v1.1.0.md)。
+
 ## 升级、失败恢复与回退
 
 1. 安排停流，等待活跃请求结束，正常停止 CPA。不要把一次 HTTP 响应结束
@@ -168,11 +174,12 @@ preview、Snapshot、Quote 使用同一个 resolver；完整定义、原因/候�
 2. 备份**整个数据目录**与匹配旧插件二进制，并核实可读取。
    不要在线普通复制正在写入的 bbolt 文件。
 3. 确认采用认证共存策略，且 CPA/Observer 使用不同凭据。
-4. v1.0.0 使用 **schema3 / `observer_features=3`**，明确拒绝 schema2 及更早数据库，
-   不迁移、不双读、不就地补价。需要保留历史时，请由用户安排新的数据库路径，
-   重新创建 Key 与价格配置；发布过程不自动删除、覆盖或修改生产数据库。
+4. v1.1.0 使用 **schema3 / `observer_features=4`**。从 v1.0.0–v1.0.4 升级无需重建库，
+   但新版打开后旧版会拒绝该库。schema2 及更早数据库仍被明确拒绝，不迁移、不双读、
+   不就地补价；仅从这些旧版升级时需安排新数据库路径并重新创建 Key 与价格配置。
+   发布过程不自动删除、覆盖或修改生产数据库。
 5. 如需回退，停止新版本，恢复第 2 步的一致备份及对应旧二进制。
-   不能直接让旧版本写 schema3 新库；恢复旧备份意味着放弃升级后数据，
+   不能直接让 feature 3 的旧版本打开 feature 4 数据库；恢复旧备份意味着放弃升级后数据，
    必须先导出/保全所需证据并明确接受该代价。
 
 `TestUpgradeRejectsActualV070DatabaseWithoutMutation` 从固定旧 commit
@@ -191,7 +198,7 @@ make frontend
 CPA_MANAGEMENT_HTML=/absolute/temp/management.html make browser
 OBSERVER_BROWSER=1 CPA_BINARY=/absolute/temp/cpa-v8.0.30 \
   CPA_TEST_ARTIFACTS=/absolute/temp/report-30 make integration
-# 换成 cpa-v8.0.33 与独立 report-33 再执行；不沿用旧发布证据。
+# 换成 cpa-v8.0.47 与独立 report-47 再执行；不沿用旧发布证据。
 ```
 
 `load` 使用 1 万/10 万真实 gzip 元数据、36500 个日维度、并发准入，
