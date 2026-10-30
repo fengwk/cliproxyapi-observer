@@ -3,6 +3,8 @@
 package integration
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"reflect"
 	"testing"
@@ -60,14 +62,20 @@ type acceptanceTime struct {
 	Weekdays []int  `json:"weekdays,omitempty"`
 }
 
+type acceptanceRequestBody struct {
+	Path   string `json:"path"`
+	Equals any    `json:"equals"`
+}
+
 type acceptanceCondition struct {
-	Context     *acceptanceContext    `json:"context,omitempty"`
-	ServiceTier []string              `json:"serviceTier,omitempty"`
-	Date        *acceptanceDate       `json:"date,omitempty"`
-	Time        *acceptanceTime       `json:"time,omitempty"`
-	All         []acceptanceCondition `json:"all,omitempty"`
-	Any         []acceptanceCondition `json:"any,omitempty"`
-	Not         *acceptanceCondition  `json:"not,omitempty"`
+	Context     *acceptanceContext     `json:"context,omitempty"`
+	ServiceTier []string               `json:"serviceTier,omitempty"`
+	Date        *acceptanceDate        `json:"date,omitempty"`
+	Time        *acceptanceTime        `json:"time,omitempty"`
+	RequestBody *acceptanceRequestBody `json:"requestBody,omitempty"`
+	All         []acceptanceCondition  `json:"all,omitempty"`
+	Any         []acceptanceCondition  `json:"any,omitempty"`
+	Not         *acceptanceCondition   `json:"not,omitempty"`
 }
 
 type acceptanceOverride struct {
@@ -117,6 +125,7 @@ type acceptancePricing struct {
 
 type acceptanceSettings struct {
 	CaptureEnabled      bool              `json:"capture_enabled"`
+	CaptureMode         string            `json:"capture_mode"`
 	MaxBodyBytes        int               `json:"max_body_bytes"`
 	MaxBodyStorageBytes int64             `json:"max_body_storage_bytes"`
 	RawRetentionHours   int               `json:"raw_retention_hours"`
@@ -233,7 +242,18 @@ func acceptanceTimeWindow(start time.Time, span time.Duration) acceptanceTime {
 // observed execution record.
 func acceptanceInferAndAwait(t *testing.T, h *harness, secret string, known map[string]struct{}) recordView {
 	t.Helper()
-	status, body := h.infer(t, secret, false)
+	return acceptanceInferRawAndAwait(t, h, secret, chatBody(false), known)
+}
+
+// acceptanceInferRawAndAwait sends one exact client body and verifies that the
+// real host still returns the fixture unchanged before waiting for new usage.
+func acceptanceInferRawAndAwait(t *testing.T, h *harness, secret string, request []byte, known map[string]struct{}) recordView {
+	t.Helper()
+	status, body, err := h.rawRequest(http.MethodPost, "/v1/chat/completions", request,
+		map[string]string{"Authorization": "Bearer " + secret})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if status != http.StatusOK {
 		t.Fatalf("inference status = %d body %s, want 200", status, truncate(body, 400))
 	}
@@ -241,6 +261,15 @@ func acceptanceInferAndAwait(t *testing.T, h *harness, secret string, known map[
 		t.Errorf("inference content = %q, want %q", got, fixtureText)
 	}
 	return acceptanceAwaitNewRecord(t, h, known)
+}
+
+// acceptanceChatBodyWithPriority keeps the ordinary chat request intact while
+// adding an inbound scalar used only by request-body pricing.
+func acceptanceChatBodyWithPriority(priority string) []byte {
+	return []byte(fmt.Sprintf(
+		`{"model":%q,"messages":[{"role":"user","content":%q}],"stream":false,"metadata":{"priority":%q}}`,
+		modelName, upstreamPrompt, priority,
+	))
 }
 
 func acceptanceAssertCost(t *testing.T, record recordView, wantCost int64, wantSource string) {
@@ -436,6 +465,145 @@ func TestPricingOverridesLaterWinsMultipliersAndRequestedAt(t *testing.T) {
 	acceptanceAssertCost(t, requestTime, 27, "manual")
 	if requestTime.Time.Before(windowStart) || !requestTime.Time.Before(windowEnd) {
 		t.Errorf("record time = %s, want original request inside [%s,%s)", requestTime.Time, windowStart, windowEnd)
+	}
+	h.mock.requireClean(t)
+}
+
+// TestRequestBodyConditionalPricing drives one real manager.before admission
+// through a matching, nonmatching and missing request-body leaf. Admission and
+// usage RequestIDs differ in the host; a 45/15/15 result is only possible when
+// the engine correlates them by Key+Trace and the original request time.
+func TestRequestBodyConditionalPricing(t *testing.T) {
+	h := newHarness(t)
+	created := h.createKey(t, validSpec())
+
+	var initial acceptanceSettings
+	h.api(t, http.MethodGet, "/settings", nil, http.StatusOK, &initial)
+	if initial.CaptureEnabled || initial.CaptureMode != "off" {
+		t.Fatalf("initial capture = %t/%q, want disabled/off", initial.CaptureEnabled, initial.CaptureMode)
+	}
+
+	known := make(map[string]struct{})
+	// Discover the real record identity before installing a manual price. This
+	// keeps the focused test tied to the host's reported identity rather than a
+	// guessed provider label.
+	baseline := acceptanceInferAndAwait(t, h, created.Secret, known)
+	acceptanceAssertCost(t, baseline, 0, "zero")
+	model, provider := baseline.Model, baseline.Provider
+	if model == "" || provider == "" {
+		t.Fatalf("real host record lacks model/provider identity: %+v", baseline)
+	}
+	t.Logf("real host model/provider identity: %q/%q", model, provider)
+
+	fast := acceptanceRequestBody{Path: "/metadata/priority", Equals: "fast"}
+	definition := acceptanceDefinition{
+		Base: acceptanceRatesAll(1_000_000),
+		Overrides: []acceptanceOverride{{
+			ID: "fast-input", When: acceptanceCondition{RequestBody: &fast},
+			Rates: acceptanceRatePatch{Input: acceptanceInt64(3_000_000)},
+		}},
+		Multipliers: []acceptanceMultiplier{{
+			ID: "fast-factor", When: acceptanceCondition{RequestBody: &fast},
+			Factors: acceptanceFactors{Input: acceptanceString("2")},
+		}},
+	}
+	applied := acceptancePutPricing(t, h, acceptancePricing{
+		Auto: false, Source: "models_dev_v2",
+		Prices: []acceptancePrice{{Model: model, Provider: provider, Definition: definition}},
+	})
+	if len(applied.Prices) != 1 || len(applied.Prices[0].Definition.Overrides) != 1 ||
+		len(applied.Prices[0].Definition.Multipliers) != 1 ||
+		applied.Prices[0].Definition.Overrides[0].When.RequestBody == nil ||
+		applied.Prices[0].Definition.Overrides[0].When.RequestBody.Path != "/metadata/priority" ||
+		applied.Prices[0].Definition.Overrides[0].When.RequestBody.Equals != "fast" {
+		t.Fatalf("request-body condition did not round-trip: %+v", applied)
+	}
+
+	matched := acceptanceInferRawAndAwait(t, h, created.Secret, acceptanceChatBodyWithPriority("fast"), known)
+	acceptanceAssertTokens(t, matched)
+	// Base 1M. Input override 3M and input factor 2 give 6*6 + cached 4*1 +
+	// output 5*1 = 45 micro-USD.
+	acceptanceAssertCost(t, matched, 45, "manual")
+
+	missed := acceptanceInferRawAndAwait(t, h, created.Secret, acceptanceChatBodyWithPriority("slow"), known)
+	acceptanceAssertTokens(t, missed)
+	acceptanceAssertCost(t, missed, 15, "manual")
+
+	missing := acceptanceInferAndAwait(t, h, created.Secret, known)
+	acceptanceAssertTokens(t, missing)
+	acceptanceAssertCost(t, missing, 15, "manual")
+
+	records := []recordView{matched, missed, missing}
+	ids := map[string]bool{}
+	traces := map[string]bool{}
+	for _, record := range records {
+		if record.ID == "" || record.TraceID == "" || record.KeyID != created.Key.ID {
+			t.Fatalf("invalid execution attribution: %+v", record)
+		}
+		if ids[record.ID] || traces[record.TraceID] {
+			t.Fatalf("requests reused execution identity: %+v", record)
+		}
+		ids[record.ID], traces[record.TraceID] = true, true
+	}
+
+	// Capture stays off: the usage records survive without retaining the
+	// client body or any captured headers.
+	for _, record := range records {
+		var detail struct {
+			Body          json.RawMessage `json:"body"`
+			Headers       http.Header     `json:"headers"`
+			CaptureStatus string          `json:"capture_status"`
+		}
+		h.api(t, http.MethodGet, "/requests/detail?id="+record.ID, nil, http.StatusOK, &detail)
+		if detail.CaptureStatus != "disabled" || string(detail.Body) != "null" || len(detail.Headers) != 0 {
+			t.Fatalf("capture-off detail for %s = status %q body %s headers %d",
+				record.ID, detail.CaptureStatus, detail.Body, len(detail.Headers))
+		}
+	}
+
+	// A later rule change affects only future quotes. The already stored 45
+	// micro-USD quote and the recorded summary remain immutable.
+	changed := acceptancePricing{
+		Auto: false, Source: "models_dev_v2",
+		Prices: []acceptancePrice{{
+			Model: model, Provider: provider,
+			Definition: acceptanceDefinition{
+				Base: acceptanceRatesAll(1_000_000),
+				Overrides: []acceptanceOverride{{
+					ID: "fast-input", When: acceptanceCondition{RequestBody: &acceptanceRequestBody{
+						Path: "/metadata/priority", Equals: "turbo",
+					}}, Rates: acceptanceRatePatch{Input: acceptanceInt64(9_000_000)},
+				}},
+				Multipliers: []acceptanceMultiplier{{
+					ID: "fast-factor", When: acceptanceCondition{RequestBody: &acceptanceRequestBody{
+						Path: "/metadata/priority", Equals: "turbo",
+					}}, Factors: acceptanceFactors{Input: acceptanceString("3")},
+				}},
+			},
+		}},
+	}
+	changedApplied := acceptancePutPricing(t, h, changed)
+	if changedApplied.Prices[0].Definition.Overrides[0].When.RequestBody == nil ||
+		changedApplied.Prices[0].Definition.Overrides[0].When.RequestBody.Equals != "turbo" {
+		t.Fatalf("changed condition did not persist: %+v", changedApplied)
+	}
+	historical := acceptanceRecordByID(t, h, matched.ID)
+	acceptanceAssertTokens(t, historical)
+	acceptanceAssertCost(t, historical, 45, "manual")
+
+	var summary acceptanceSummary
+	h.api(t, http.MethodGet, "/summary", nil, http.StatusOK, &summary)
+	if summary.Requests != 4 || summary.CostMicroUSD != 75 {
+		t.Fatalf("summary = %+v, want requests=4 cost=75 after a rule change", summary)
+	}
+
+	var final acceptanceSettings
+	h.api(t, http.MethodGet, "/settings", nil, http.StatusOK, &final)
+	if final.CaptureEnabled || final.CaptureMode != "off" {
+		t.Fatalf("pricing updates changed capture to %t/%q", final.CaptureEnabled, final.CaptureMode)
+	}
+	if calls := h.mock.callsSnapshot(); len(calls) != 4 {
+		t.Fatalf("upstream calls = %d, want exactly 4; request semantics changed or retried", len(calls))
 	}
 	h.mock.requireClean(t)
 }
