@@ -57,6 +57,16 @@ func TestRequestBodyVectors(t *testing.T) {
 	}
 }
 
+// Exponent leading zeros are insignificant JSON syntax; they must not overflow
+// the parser into an unrelated exponent before comparison.
+func TestRequestBodyNumberExponentLeadingZerosRegression(t *testing.T) {
+	condition := bodyCondition(t, "/n", numberScalar(t, "1e1"))
+	got := snapshotRequestBody([]byte(`{"n":1e000000000000001}`), []RequestBodyCondition{condition})
+	if got == nil || !got[condition.Fingerprint()] {
+		t.Fatalf("exact-number match = %v, want true", got)
+	}
+}
+
 func TestRequestBodyMissingAndScalarTraversalAreFalse(t *testing.T) {
 	conditions := []RequestBodyCondition{
 		bodyCondition(t, "/missing", JSONString("x")),

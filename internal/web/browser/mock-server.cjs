@@ -101,8 +101,25 @@ function iso(ms) {
   return new Date(ms).toISOString();
 }
 
+const JSON_NUMBER_TOKEN = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+
+// Node 22 reviver context.source plus JSON.rawJSON keeps requestBody.equals
+// numbers exact. There is deliberately no rounded fallback.
+function parseExactJSON(text) {
+  if (typeof JSON.rawJSON !== 'function' || typeof JSON.isRawJSON !== 'function') {
+    throw new Error('mock requires JSON.rawJSON and JSON.isRawJSON');
+  }
+  return JSON.parse(text, function (_key, value, context) {
+    if (_key !== 'equals' || typeof value !== 'number') return value;
+    if (!context || typeof context.source !== 'string' || !JSON_NUMBER_TOKEN.test(context.source)) {
+      throw new Error('mock requires exact JSON.parse reviver context.source');
+    }
+    return JSON.rawJSON(context.source);
+  });
+}
+
 function clone(value) {
-  return JSON.parse(JSON.stringify(value));
+  return parseExactJSON(JSON.stringify(value));
 }
 
 function publicKey(key) {
@@ -593,7 +610,7 @@ async function readJson(req) {
   if (buf.length === 0) return {};
   let value;
   try {
-    value = JSON.parse(buf.toString('utf8'));
+    value = parseExactJSON(buf.toString('utf8'));
   } catch (err) {
     throw failure(400, 'invalid_json', 'request body must be valid JSON');
   }
@@ -1030,6 +1047,37 @@ function validateTtlMap(value, name) {
   }
 }
 
+// Mirrors the Go contract's exact decimal bounds without converting to a
+// JavaScript Number: at most 64 significant digits and normalized scale -18..18.
+function validateRequestBodyNumberToken(text, name) {
+  const match = /^(-?)(0|[1-9]\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(text);
+  if (!JSON_NUMBER_TOKEN.test(text) || !match) {
+    throw failure(400, 'invalid_json', name + ' must be an exact JSON number');
+  }
+  const fraction = match[3] || '';
+  const allDigits = match[2] + fraction;
+  let start = 0;
+  while (start < allDigits.length && allDigits[start] === '0') start++;
+  // Zero canonicalizes to zero regardless of exponent, matching the Go parser.
+  if (start === allDigits.length) return;
+  let exponent = 0;
+  if (match[4] !== undefined) {
+    const exponentDigits = match[4].replace(/^[+-]/, '').replace(/^0+/, '');
+    if (exponentDigits.length > 9) {
+      throw failure(400, 'invalid_json', name + ' exponent is out of range');
+    }
+    exponent = Number(match[4]);
+  }
+  let digits = allDigits.slice(start);
+  let end = digits.length;
+  while (end > 0 && digits[end - 1] === '0') end--;
+  exponent = exponent - fraction.length + (digits.length - end);
+  digits = digits.slice(0, end);
+  if (digits.length > 64 || exponent < -18 || exponent > 18) {
+    throw failure(400, 'invalid_json', name + ' exceeds the 64-digit/-18..18 scale limit');
+  }
+}
+
 function validateCondition(condition, name, depth = 0, state = { nodes: 0 }) {
   state.nodes += 1;
   if (depth > 8 || state.nodes > 64) {
@@ -1059,10 +1107,10 @@ function validateCondition(condition, name, depth = 0, state = { nodes: 0 }) {
       if (Buffer.byteLength(equals, 'utf8') > 1024) {
         throw failure(400, 'invalid_json', name + '.requestBody.equals string is too long');
       }
+    } else if (JSON.isRawJSON(equals)) {
+      validateRequestBodyNumberToken(equals.rawJSON, name + '.requestBody.equals');
     } else if (typeof equals === 'number') {
-      if (!Number.isFinite(equals)) {
-        throw failure(400, 'invalid_json', name + '.requestBody.equals number is invalid');
-      }
+      throw failure(400, 'invalid_json', name + '.requestBody.equals number must be parsed exactly');
     } else if (equals !== null && typeof equals !== 'boolean') {
       throw failure(400, 'invalid_json', name + '.requestBody.equals must be a scalar');
     }

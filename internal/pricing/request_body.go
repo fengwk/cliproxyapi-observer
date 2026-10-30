@@ -253,7 +253,10 @@ func parseDecimal(text string) (decimalForm, bool) {
 			}
 			expText = expText[1:]
 		}
-		if len(expText) > 10 {
+		expText = strings.TrimLeft(expText, "0")
+		if expText == "" {
+			exp = 0
+		} else if len(expText) > 10 {
 			exp = sign * (1 << 30)
 		} else {
 			n, err := strconv.ParseInt(expText, 10, 64)

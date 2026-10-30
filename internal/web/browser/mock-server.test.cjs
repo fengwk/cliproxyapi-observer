@@ -782,6 +782,63 @@ test('settings/prices/compact: round-trip, refresh and method rejection', async 
   });
 });
 
+test('settings: exact requestBody number survives PUT and GET without rounding', async () => {
+  await withServer(async (server) => {
+    const exact = '9007199254740993';
+    // Send raw text: parsing this request in the test first would round the
+    // number before it ever reaches the mock.
+    const payload = `{
+      "capture_enabled": false,
+      "capture_mode": "off",
+      "capture_retention_seconds": 86400,
+      "max_body_bytes": 1048576,
+      "max_body_storage_bytes": 268435456,
+      "raw_retention_hours": 24,
+      "daily_retention_days": 365,
+      "pricing": {
+        "auto": false,
+        "source": "models_dev_v2",
+        "prices": [{
+          "model": "exact-number",
+          "provider": "fixture",
+          "definition": {
+            "base": { "input": 1, "output": 1, "cache_read": 0, "cache_write": 0, "reasoning": null },
+            "overrides": [{
+              "id": "exact",
+              "when": { "requestBody": { "path": "/n", "equals": ${exact} } },
+              "rates": { "input": 2 }
+            }],
+            "multipliers": []
+          }
+        }],
+        "mappings": []
+      }
+    }`;
+    const headers = Object.assign({ 'Content-Type': 'application/json' }, AUTH);
+    const put = await fetch(server.origin + BASE + '/settings', { method: 'PUT', headers, body: payload });
+    assert.equal(put.status, 200);
+    const putText = await put.text();
+    assert.match(putText, new RegExp('"equals":' + exact + '(?=[,}])'));
+    assert.doesNotMatch(putText, /9007199254740992/);
+
+    const get = await fetch(server.origin + BASE + '/settings', { headers: AUTH });
+    assert.equal(get.status, 200);
+    const getText = await get.text();
+    assert.match(getText, new RegExp('"equals":' + exact + '(?=[,}])'));
+    assert.doesNotMatch(getText, /9007199254740992/);
+
+    // A native raw JSON object is exact; an arbitrary lookalike object is not.
+    const lookalike = payload.replace(
+      `"equals": ${exact}`,
+      '"equals": { "rawJSON": "9007199254740993" }'
+    );
+    const rejected = await fetch(server.origin + BASE + '/settings', { method: 'PUT', headers, body: lookalike });
+    assert.equal(rejected.status, 400);
+    const rejectedBody = await rejected.json();
+    assert.ok(errorShape(rejectedBody));
+  });
+});
+
 test('mock control endpoints expose calls/state only on loopback', async () => {
   await withServer(async (server) => {
     await json(server, '/health');
