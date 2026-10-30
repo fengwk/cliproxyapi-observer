@@ -10,8 +10,10 @@ import type {
   PricingSource,
   RatePatch,
   RateSet,
+  RequestBodyCondition,
 } from '../lib/types';
 import { parseUSD, formatUSD, getBrowserTimeZone } from '../lib/format';
+import { RawJSONNumber, isRawJSONNumber, stringifyWithRawJSON } from '../lib/rawJson';
 
 export const MAX_SAFE_MICRO = 9_000_000_000_000_000;
 export const DEFAULT_MAX_BODY_BYTES = 1_048_576; // 1 MiB
@@ -37,6 +39,7 @@ export type PricingReasoningMode = 'inherit' | 'custom';
 export type PatchReasoningMode = 'inherit' | 'same_output' | 'custom';
 export type ContextLowerOp = '' | 'gt' | 'gte';
 export type ContextUpperOp = '' | 'lt' | 'lte';
+export type RequestBodyValueType = 'string' | 'number' | 'boolean' | 'null';
 
 export interface GeneralSettingsDraft {
   capture_enabled: boolean;
@@ -94,6 +97,11 @@ export interface ConditionDraft {
   timeEnd: string;
   timezone: string;
   weekdays: number[];
+  requestBodyPresent: boolean;
+  requestBodyPath: string;
+  requestBodyType: RequestBodyValueType;
+  /** Exact text for string/number; "true"/"false" for boolean; empty for null. */
+  requestBodyValue: string;
   /** Condition[] groups composed with AND. */
   allPresent: boolean;
   all: ConditionDraft[];
@@ -516,6 +524,10 @@ export function emptyConditionDraft(): ConditionDraft {
     timeEnd: '',
     timezone: getBrowserTimeZone(),
     weekdays: [],
+    requestBodyPresent: false,
+    requestBodyPath: '',
+    requestBodyType: 'string',
+    requestBodyValue: '',
     allPresent: false,
     all: [],
     anyPresent: false,
@@ -524,11 +536,97 @@ export function emptyConditionDraft(): ConditionDraft {
   };
 }
 
+function utf8Length(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
+export function validateRequestBodyPath(path: string): void {
+  if (!path || path[0] !== '/') {
+    throw new Error('请求体路径必须是非空 RFC 6901 JSON Pointer，并以 / 开头');
+  }
+  if (utf8Length(path) > 512) throw new Error('请求体路径不能超过 512 个 UTF-8 字节');
+  const segments = path.slice(1).split('/');
+  if (segments.length > 16) throw new Error('请求体路径不能超过 16 段');
+  for (const segment of segments) {
+    for (let i = 0; i < segment.length; i++) {
+      if (segment[i] !== '~') continue;
+      if (segment[i + 1] !== '0' && segment[i + 1] !== '1') {
+        throw new Error('请求体路径只允许 ~0 和 ~1 转义');
+      }
+      i++;
+    }
+  }
+}
+
+/** Exact decimal canonicalization matching the Go pricing validator. */
+export function canonicalRequestBodyNumber(input: string): string {
+  const text = input.trim();
+  const match = /^(-?)(0|[1-9]\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(text);
+  if (!match) throw new Error('请求体数字必须是合法 JSON 数字');
+  const negative = match[1] === '-';
+  const fraction = match[3] ?? '';
+  let digits = match[2] + fraction;
+  let exponent = 0;
+  if (match[4]) {
+    if (match[4].replace(/^[+-]/, '').length > 9) {
+      throw new Error('请求体数字的指数超出允许范围');
+    }
+    exponent = Number(match[4]);
+  }
+  let start = 0;
+  while (start < digits.length && digits[start] === '0') start++;
+  if (start === digits.length) return '0';
+  digits = digits.slice(start);
+  let end = digits.length;
+  while (end > 0 && digits[end - 1] === '0') end--;
+  const trailing = digits.length - end;
+  digits = digits.slice(0, end);
+  exponent = exponent - fraction.length + trailing;
+  if (digits.length > 64) throw new Error('请求体数字的有效位数不能超过 64 位');
+  if (exponent < -18 || exponent > 18) {
+    throw new Error('请求体数字的归一化小数位必须在 -18 至 18 之间');
+  }
+  const sign = negative ? '-' : '';
+  if (exponent >= 0) return sign + digits + '0'.repeat(exponent);
+  const point = digits.length + exponent;
+  if (point > 0) return `${sign}${digits.slice(0, point)}.${digits.slice(point)}`;
+  return `${sign}0.${'0'.repeat(-point)}${digits}`;
+}
+
+function requestBodyEquals(draft: ConditionDraft): RequestBodyCondition['equals'] {
+  switch (draft.requestBodyType) {
+    case 'number':
+      return new RawJSONNumber(canonicalRequestBodyNumber(draft.requestBodyValue));
+    case 'boolean':
+      if (draft.requestBodyValue !== 'true' && draft.requestBodyValue !== 'false') {
+        throw new Error('请求体布尔值必须是 true 或 false');
+      }
+      return draft.requestBodyValue === 'true';
+    case 'null':
+      return null;
+    default:
+      if (utf8Length(draft.requestBodyValue) > 1024) {
+        throw new Error('请求体字符串不能超过 1024 个 UTF-8 字节');
+      }
+      return draft.requestBodyValue;
+  }
+}
+
+function parseRequestBodyDraft(draft: ConditionDraft, label: string): RequestBodyCondition | undefined {
+  if (!draft.requestBodyPresent) return undefined;
+  try {
+    validateRequestBodyPath(draft.requestBodyPath);
+    return { path: draft.requestBodyPath, equals: requestBodyEquals(draft) };
+  } catch (error) {
+    throw new Error(`${label}请求体条件：${error instanceof Error ? error.message : '无效'}`);
+  }
+}
+
 export function conditionToDraft(condition: Condition | undefined | null): ConditionDraft {
   const draft = emptyConditionDraft();
   if (!condition) return draft;
 
-  const { context, serviceTier, date, time, all, any, not } = condition;
+  const { context, serviceTier, date, time, requestBody, all, any, not } = condition;
   if (context) {
     const lowerOp: ContextLowerOp = context.gt !== undefined ? 'gt' : context.gte !== undefined ? 'gte' : '';
     const lowerValue = lowerOp === 'gt' ? context.gt : lowerOp === 'gte' ? context.gte : undefined;
@@ -552,6 +650,27 @@ export function conditionToDraft(condition: Condition | undefined | null): Condi
     draft.timeEnd = time.end;
     draft.timezone = time.timezone || 'UTC';
     draft.weekdays = [...(time.weekdays ?? [])];
+  }
+  if (requestBody) {
+    draft.requestBodyPresent = true;
+    draft.requestBodyPath = requestBody.path;
+    const equals = requestBody.equals;
+    if (isRawJSONNumber(equals)) {
+      draft.requestBodyType = 'number';
+      draft.requestBodyValue = equals.text;
+    } else if (typeof equals === 'number') {
+      draft.requestBodyType = 'number';
+      draft.requestBodyValue = String(equals);
+    } else if (typeof equals === 'boolean') {
+      draft.requestBodyType = 'boolean';
+      draft.requestBodyValue = equals ? 'true' : 'false';
+    } else if (equals === null) {
+      draft.requestBodyType = 'null';
+      draft.requestBodyValue = '';
+    } else {
+      draft.requestBodyType = 'string';
+      draft.requestBodyValue = equals;
+    }
   }
   draft.allPresent = Array.isArray(all);
   draft.all = (all ?? []).map(conditionToDraft);
@@ -582,6 +701,15 @@ export function conditionSummary(draft: ConditionDraft): string {
   }
   if (draft.weekdays.length) {
     parts.push(`星期 ${draft.weekdays.map((day) => WEEKDAYS.find((item) => item.value === day)?.label).join('')}`);
+  }
+  if (draft.requestBodyPresent) {
+    const typeLabel = { string: '字符串', number: '数字', boolean: '布尔', null: 'null' }[draft.requestBodyType];
+    const value = draft.requestBodyType === 'null'
+      ? 'null'
+      : draft.requestBodyType === 'string'
+        ? JSON.stringify(draft.requestBodyValue)
+        : draft.requestBodyValue;
+    parts.push(`请求体 ${draft.requestBodyPath || '…'} = ${typeLabel}:${value}`);
   }
   if (draft.all.length) parts.push(`全部满足 ${draft.all.length} 组`);
   else if (draft.allPresent) parts.push('全部条件为空（恒真）');
@@ -690,6 +818,9 @@ function parseCondition(
       ...(weekdays.length ? { weekdays } : {}),
     };
   }
+
+  const requestBody = parseRequestBodyDraft(draft, label);
+  if (requestBody) out.requestBody = requestBody;
 
   if (draft.allPresent || draft.all.length) {
     if (draft.all.length > MAX_CONDITION_LIST) {
@@ -934,6 +1065,12 @@ function normalizedCondition(condition: Condition): Record<string, unknown> {
         : {}),
     };
   }
+  if (condition.requestBody) {
+    out.requestBody = {
+      path: condition.requestBody.path,
+      equals: condition.requestBody.equals,
+    };
+  }
   if (Array.isArray(condition.all)) out.all = condition.all.map(normalizedCondition);
   if (Array.isArray(condition.any)) out.any = condition.any.map(normalizedCondition);
   if (condition.not) out.not = normalizedCondition(condition.not);
@@ -961,11 +1098,11 @@ export function roundTripDefinition(definition: PricingDefinition): PricingDefin
 }
 
 export function definitionsSemanticallyEqual(a: PricingDefinition, b: PricingDefinition): boolean {
-  return JSON.stringify(normalizedDefinition(a)) === JSON.stringify(normalizedDefinition(b));
+  return stringifyWithRawJSON(normalizedDefinition(a)) === stringifyWithRawJSON(normalizedDefinition(b));
 }
 
 function normalizedPrice(price: ManualPrice): string {
-  return JSON.stringify({
+  return stringifyWithRawJSON({
     model: price.model,
     provider: price.provider ?? '',
     definition: normalizedDefinition(price.definition),

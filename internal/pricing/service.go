@@ -27,17 +27,18 @@ type flight struct {
 }
 
 type Service struct {
-	mu          sync.Mutex
-	config      Config
-	client      *http.Client
-	cachePath   string
-	sources     map[string]*sourceState
-	generation  uint64
-	observed    map[identity]struct{}
-	flights     map[string]*flight
-	queue       chan struct{}
-	lastAttempt time.Time
-	running     bool
+	mu                sync.Mutex
+	config            Config
+	requestConditions []RequestBodyCondition
+	client            *http.Client
+	cachePath         string
+	sources           map[string]*sourceState
+	generation        uint64
+	observed          map[identity]struct{}
+	flights           map[string]*flight
+	queue             chan struct{}
+	lastAttempt       time.Time
+	running           bool
 }
 
 var _ Pricer = (*Service)(nil)
@@ -60,7 +61,8 @@ func NewService(c Config, cachePath string, client *http.Client) (*Service, erro
 		return nil
 	}
 	s := &Service{
-		config: cloneConfig(c), cachePath: cachePath, client: &h,
+		config: cloneConfig(c), requestConditions: manualRequestBodyConditions(c),
+		cachePath: cachePath, client: &h,
 		sources: map[string]*sourceState{}, observed: map[identity]struct{}{},
 		flights: map[string]*flight{}, queue: make(chan struct{}, 1),
 	}
@@ -86,9 +88,11 @@ func (s *Service) Configure(c Config) error {
 		return err
 	}
 	c = cloneConfig(c)
+	conditions := manualRequestBodyConditions(c)
 	s.mu.Lock()
 	wasAuto, wasSource := s.config.Auto, s.config.Source
 	s.config = c
+	s.requestConditions = conditions
 	if wasSource != c.Source {
 		s.generation++
 		s.lastAttempt = time.Time{}

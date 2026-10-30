@@ -6,6 +6,7 @@ import { definitionToDraft, parseDefinition } from './Settings.helpers';
 import type { DefinitionDraft } from './Settings.helpers';
 import type { PricingDefinition } from '../lib/types';
 import { formatDateTime } from '../lib/format';
+import { RawJSONNumber, isRawJSONNumber } from '../lib/rawJson';
 
 function Harness({ initial, onChange }: {
   initial: PricingDefinition;
@@ -69,5 +70,51 @@ describe('PriceDefinitionEditor semantic controls', () => {
     expect(screen.getByText((content) => content.includes(`本地生效：从 ${startLocal} 起`))).toBeInTheDocument();
     expect(screen.getByText((content) => content.includes(`本地生效：至 ${endLocal} 前`))).toBeInTheDocument();
     expect(screen.getByLabelText('测试 价格覆盖 1 时区')).toHaveValue('UTC');
+  });
+});
+
+describe('PriceDefinitionEditor request-body leaf', () => {
+  it('edits path/type/value and preserves an exact numeric condition', () => {
+    const exact = '123456789012345678901234567890.000000000000000001';
+    const definition: PricingDefinition = {
+      base: { input: 1, output: 2, cache_read: 0, cache_write: 0, reasoning: null },
+      overrides: [{
+        id: 'body-rule',
+        when: { requestBody: { path: '/speed', equals: new RawJSONNumber(exact) } },
+        rates: { input: 3 },
+      }],
+      multipliers: [],
+    };
+    const onChange = vi.fn();
+    render(<Harness initial={definition} onChange={onChange} />);
+
+    const path = screen.getByLabelText('测试 价格覆盖 1 请求体路径');
+    const value = screen.getByLabelText('测试 价格覆盖 1 请求体值');
+    expect(path).toHaveValue('/speed');
+    expect(value).toHaveValue(exact);
+    expect(screen.getByLabelText('测试 价格覆盖 1 请求体值类型')).toHaveTextContent('数字');
+    expect(screen.getByText(/客户端控制/)).toBeInTheDocument();
+
+    fireEvent.change(path, { target: { value: '/options/0/mode' } });
+    fireEvent.change(value, { target: { value: '-2.500' } });
+    const latest = onChange.mock.calls.at(-1)?.[0] as DefinitionDraft;
+    const parsed = parseDefinition(latest, '测试').overrides[0].when.requestBody;
+    expect(parsed?.path).toBe('/options/0/mode');
+    expect(isRawJSONNumber(parsed?.equals)).toBe(true);
+    expect((parsed?.equals as RawJSONNumber).text).toBe('-2.5');
+  });
+
+  it('adds and removes the structured leaf without a raw expression language', () => {
+    const definition: PricingDefinition = {
+      base: { input: 1, output: 2, cache_read: 0, cache_write: 0, reasoning: null },
+      overrides: [{ id: 'rule', when: {}, rates: { input: 2 } }],
+      multipliers: [],
+    };
+    const onChange = vi.fn();
+    render(<Harness initial={definition} onChange={onChange} />);
+    fireEvent.click(screen.getByTestId('condition-request-body-add'));
+    expect(screen.getByLabelText('测试 价格覆盖 1 请求体路径')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('condition-request-body-remove'));
+    expect(screen.queryByLabelText('测试 价格覆盖 1 请求体路径')).not.toBeInTheDocument();
   });
 });

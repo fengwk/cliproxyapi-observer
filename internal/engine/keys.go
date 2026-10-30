@@ -415,18 +415,31 @@ func (s *Store) Authorize(id, model string) error {
 	})
 }
 func (s *Store) Admit(a Admission) error {
+	return s.admit(a, nil)
+}
+
+// AdmitWithBody admits one owned generation and snapshots the request-body
+// condition results needed by later usage. body is transient and is never
+// retained by the store.
+func (s *Store) AdmitWithBody(a Admission, body []byte) error {
+	return s.admit(a, body)
+}
+
+func (s *Store) admit(a Admission, body []byte) error {
 	if s.maintenanceActive.Load() {
 		return ErrMaintenance
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if e := s.check(); e != nil {
+		s.mu.Unlock()
 		return e
 	}
 	if a.RequestID == "" {
+		s.mu.Unlock()
 		return ErrInvalid
 	}
 	if old, ok := s.active[a.RequestID]; ok {
+		s.mu.Unlock()
 		if old.KeyID != a.KeyID || old.Model != a.Model || old.TraceID != a.TraceID {
 			return ErrInvalid
 		}
@@ -434,6 +447,7 @@ func (s *Store) Admit(a Admission) error {
 	}
 	s.pruneCompletedLocked()
 	if old, ok := s.completed[a.RequestID]; ok {
+		s.mu.Unlock()
 		if old.KeyID != a.KeyID || old.Model != a.Model || old.TraceID != a.TraceID {
 			return ErrInvalid
 		}
@@ -463,10 +477,25 @@ func (s *Store) Admit(a Admission) error {
 		}
 		return put(b, k.ID, k)
 	})
-	if e == nil {
-		s.active[a.RequestID] = a
+	if e != nil {
+		s.mu.Unlock()
+		return e
 	}
-	return e
+	s.active[a.RequestID] = a
+	s.mu.Unlock()
+	if a.TraceID == "" {
+		return nil
+	}
+	// Parsing the body is deliberately outside the store lock. The admission is
+	// already active, so completion cannot remove its correlation slot first.
+	conditions := s.pricer.SnapshotConditions(body)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.recordAdmissionFactsLocked(a, conditions)
+	return nil
 }
 func (s *Store) Complete(id string, _ time.Time) error {
 	s.mu.Lock()
@@ -479,6 +508,7 @@ func (s *Store) Complete(id string, _ time.Time) error {
 		a.At = s.now().UTC()
 		s.completed[id] = a
 		s.pruneCompletedLocked()
+		s.completeAdmissionFactsLocked(a)
 	}
 	return nil
 }

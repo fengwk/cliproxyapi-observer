@@ -46,7 +46,7 @@
 // Generated secrets are sk- plus 48 unbiased alphanumeric characters; internal
 // IDs remain 64 lowercase hex and are never substituted for a missing secret.
 //
-// Schema is 3 and observer_features=3 marks the current clean-slate database,
+// Schema is 3 and observer_features=4 marks the current clean-slate database,
 // including persisted plaintext Key material and pricing/accounting records.
 // A nonempty database without these exact markers, including schema2 and
 // earlier, is rejected before a writable open. There is no migration, dual-read,

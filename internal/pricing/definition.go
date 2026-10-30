@@ -309,6 +309,9 @@ func validCondition(c Condition, depth int, nodes *int) bool {
 			return false
 		}
 	}
+	if c.RequestBody != nil && !c.RequestBody.valid() {
+		return false
+	}
 	if c.All != nil {
 		if len(c.All) > maxConditionList {
 			return false

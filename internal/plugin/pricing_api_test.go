@@ -79,3 +79,47 @@ func TestPricingSettingsRejectsLegacyAndInvalidIdentity(t *testing.T) {
 		t.Fatalf("failed update changed settings: %+v", settings.Pricing)
 	}
 }
+
+func TestPricingSettingsRequestBodyRoundTripAndStrictness(t *testing.T) {
+	m := liveManager(t)
+	body := `{"pricing":{"auto":false,"source":"models_dev_v1","prices":[
+		{"model":"m","definition":{"base":{"input":1000000,"output":2000000,"cache_read":0,"cache_write":0,"cache_write_by_ttl":{},"reasoning":null},
+		"overrides":[
+			{"id":"num","when":{"requestBody":{"path":"/n","equals":2.0}},"rates":{"input":2000000}},
+			{"id":"null","when":{"any":[{"requestBody":{"path":"/optional","equals":null}}]},"rates":{}}
+		],"multipliers":[]}}],"mappings":[]}}`
+	res := putSettingsForTest(t, m, body)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("requestBody settings rejected: %d %s", res.StatusCode, res.Body)
+	}
+	settings := readSettingsForTest(t, m)
+	when := settings.Pricing.Prices[0].Definition.Overrides[0].When.RequestBody
+	if when == nil || when.Path != "/n" || when.Equals.Kind() != "number" || when.Equals.Text() != "2" {
+		t.Fatalf("number condition round-trip = %+v", when)
+	}
+	nullWhen := settings.Pricing.Prices[0].Definition.Overrides[1].When.Any[0].RequestBody
+	if nullWhen == nil || nullWhen.Equals.Kind() != "null" {
+		t.Fatalf("null condition round-trip = %+v", nullWhen)
+	}
+
+	long := strings.Repeat("x", 1025)
+	invalid := []string{
+		`{"requestBody":{"path":"/x"}}`,
+		`{"requestBody":{"equals":1}}`,
+		`{"requestBody":{"path":"x","equals":1}}`,
+		`{"requestBody":{"path":"/x","equals":1,"kind":"number"}}`,
+		`{"requestBody":{"path":"/x","equals":[]}}`,
+		`{"requestBody":{"path":"/x","equals":{}}}`,
+		`{"requestBody":{"path":"/a~2b","equals":1}}`,
+		`{"requestBody":{"path":"/x","equals":1e-19}}`,
+		`{"requestBody":{"path":"/x","equals":1e19}}`,
+		`{"requestBody":{"path":"/x","equals":` + strings.Repeat("9", 65) + `}}`,
+		`{"requestBody":{"path":"/x","equals":"` + long + `"}}`,
+	}
+	for _, condition := range invalid {
+		raw := `{"pricing":{"auto":false,"prices":[{"model":"m","definition":{"base":{"input":0,"output":0,"cache_read":0,"cache_write":0},"overrides":[{"id":"x","when":` + condition + `,"rates":{}}],"multipliers":[]}}]}}`
+		if r := putSettingsForTest(t, m, raw); r.StatusCode != http.StatusBadRequest {
+			t.Fatalf("invalid requestBody accepted: %d %s", r.StatusCode, r.Body)
+		}
+	}
+}

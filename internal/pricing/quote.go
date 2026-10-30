@@ -8,9 +8,10 @@ import (
 )
 
 type evalFacts struct {
-	context *big.Int
-	at      time.Time
-	tier    string
+	context    *big.Int
+	at         time.Time
+	tier       string
+	conditions map[string]bool
 }
 
 func contextTokens(t Tokens) *big.Int {
@@ -76,6 +77,15 @@ func evalCondition(c Condition, f evalFacts) (bool, bool) {
 			apply(false, false)
 		} else {
 			apply(evalTime(*c.Time, f.at))
+		}
+	}
+	if c.RequestBody != nil {
+		if !c.RequestBody.valid() {
+			apply(false, false)
+		} else if match, ok := f.conditions[c.RequestBody.Fingerprint()]; ok {
+			apply(match, true)
+		} else {
+			apply(false, false)
 		}
 	}
 	if c.All != nil {
@@ -330,13 +340,18 @@ func validateTokens(t Tokens) error {
 }
 
 func (s *Service) Quote(model, provider string, t Tokens, at time.Time, serviceTier string) (Quote, error) {
+	return s.QuoteWithFacts(model, provider, UsageFacts{Tokens: t, RequestedAt: at, ServiceTier: serviceTier})
+}
+
+func (s *Service) QuoteWithFacts(model, provider string, usage UsageFacts) (Quote, error) {
+	t := usage.Tokens
 	if !validIdentity(model) || (provider != "" && !validIdentity(provider)) {
 		return Quote{}, errInvalid
 	}
 	if err := validateTokens(t); err != nil {
 		return Quote{}, err
 	}
-	facts := evalFacts{context: contextTokens(t), at: at, tier: serviceTier}
+	facts := evalFacts{context: contextTokens(t), at: usage.RequestedAt, tier: usage.ServiceTier, conditions: usage.Conditions}
 	s.mu.Lock()
 	res := s.resolveLocked(model, provider)
 	s.mu.Unlock()

@@ -72,13 +72,14 @@ type RateSet struct {
 // true. Time ranges are left-closed/right-open; weekdays use ISO 1=Monday and
 // belong to the start day for a range crossing midnight.
 type Condition struct {
-	Context     *ContextCondition `json:"context,omitempty"`
-	ServiceTier []string          `json:"serviceTier,omitempty"`
-	Date        *DateCondition    `json:"date,omitempty"`
-	Time        *TimeCondition    `json:"time,omitempty"`
-	All         []Condition       `json:"all,omitempty"`
-	Any         []Condition       `json:"any,omitempty"`
-	Not         *Condition        `json:"not,omitempty"`
+	Context     *ContextCondition     `json:"context,omitempty"`
+	ServiceTier []string              `json:"serviceTier,omitempty"`
+	Date        *DateCondition        `json:"date,omitempty"`
+	Time        *TimeCondition        `json:"time,omitempty"`
+	RequestBody *RequestBodyCondition `json:"requestBody,omitempty"`
+	All         []Condition           `json:"all,omitempty"`
+	Any         []Condition           `json:"any,omitempty"`
+	Not         *Condition            `json:"not,omitempty"`
 }
 
 type ContextCondition struct {
@@ -224,6 +225,9 @@ type UsageFacts struct {
 	Tokens      Tokens
 	RequestedAt time.Time
 	ServiceTier string
+	// Conditions maps condition fingerprints to known boolean results. A
+	// missing fingerprint leaves a requestBody condition unknown.
+	Conditions map[string]bool
 }
 
 // Quote is a fully materialized, immutable accounting result. Definition and
@@ -261,6 +265,8 @@ type ModelIdentity struct {
 
 type Pricer interface {
 	Quote(string, string, Tokens, time.Time, string) (Quote, error)
+	QuoteWithFacts(string, string, UsageFacts) (Quote, error)
+	SnapshotConditions([]byte) map[string]bool
 	Observe(string, string)
 	Configure(Config) error
 	Snapshot() Snapshot
@@ -368,6 +374,10 @@ func cloneCondition(c Condition) Condition {
 		v := *c.Time
 		v.Weekdays = cloneInt64sToInt(v.Weekdays)
 		c.Time = &v
+	}
+	if c.RequestBody != nil {
+		v := *c.RequestBody
+		c.RequestBody = &v
 	}
 	if c.All != nil {
 		v := make([]Condition, len(c.All))

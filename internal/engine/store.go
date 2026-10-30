@@ -51,6 +51,7 @@ type Store struct {
 	closed            bool
 	active            map[string]Admission
 	completed         map[string]Admission
+	admissionFacts    map[string]admissionFact
 	lastError         string
 	maintenanceError  string
 	captures          chan CaptureInput
@@ -194,7 +195,7 @@ func Open(o Options) (*Store, error) {
 	if e != nil {
 		return nil, e
 	}
-	s := &Store{db: db, path: o.DataPath, now: o.Now, pricer: o.Pricer, settings: DefaultSettings(), active: map[string]Admission{}, completed: map[string]Admission{}, captures: make(chan CaptureInput, 64), capturePending: map[string]int{}, openedAt: o.Now().UTC(), drops: map[string]int64{}}
+	s := &Store{db: db, path: o.DataPath, now: o.Now, pricer: o.Pricer, settings: DefaultSettings(), active: map[string]Admission{}, completed: map[string]Admission{}, admissionFacts: map[string]admissionFact{}, captures: make(chan CaptureInput, 64), capturePending: map[string]int{}, openedAt: o.Now().UTC(), drops: map[string]int64{}}
 	s.closeDone = make(chan struct{})
 	e = db.Update(func(tx *bolt.Tx) error {
 		for _, n := range buckets {

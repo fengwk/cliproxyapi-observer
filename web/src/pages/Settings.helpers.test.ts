@@ -7,6 +7,7 @@ import {
   MIN_DAILY_RETENTION_DAYS,
   MIN_RAW_RETENTION_HOURS,
   conditionSummary,
+  canonicalRequestBodyNumber,
   conditionToDraft,
   definitionToDraft,
   definitionsSemanticallyEqual,
@@ -30,6 +31,7 @@ import {
   splitBytesToCapacity,
   validTimeRange,
   validateGeneralSettings,
+  validateRequestBodyPath,
 } from './Settings.helpers';
 import type {
   Condition,
@@ -39,6 +41,7 @@ import type {
   RateSet,
 } from '../lib/types';
 import { getBrowserTimeZone } from '../lib/format';
+import { RawJSONNumber, isRawJSONNumber, parseSettingsJSON, stringifyWithRawJSON } from '../lib/rawJson';
 
 function baseDefinition(overrides: Partial<RateSet> = {}): PricingDefinition {
   return {
@@ -492,5 +495,108 @@ describe('Settings.helpers', () => {
       const manual: ManualPrice[] = parseManualPrices([manualDraft('m', '', definition)]);
       expect(manual[0].definition.overrides[0].when).toEqual(source);
     });
+  });
+});
+
+describe('requestBody condition codec', () => {
+  it('round-trips exact scalar types and never rounds large numbers through Number', () => {
+    const exact = '1234567890123456789012345678901234567890.000000000000000001';
+    const definition: PricingDefinition = {
+      ...baseDefinition(),
+      overrides: [{
+        id: 'typed',
+        when: {
+          requestBody: {
+            path: '/options/0/mode',
+            equals: new RawJSONNumber(exact),
+          },
+        },
+        rates: { input: 1 },
+      }, {
+        id: 'null',
+        when: { requestBody: { path: '/optional', equals: null } },
+        rates: { input: 2 },
+      }, {
+        id: 'bool',
+        when: { requestBody: { path: '/flag', equals: true } },
+        rates: { input: 3 },
+      }, {
+        id: 'string',
+        when: { requestBody: { path: '/speed', equals: 'fast' } },
+        rates: { input: 4 },
+      }],
+    };
+    const draft = definitionToDraft(definition);
+    expect(draft.overrides[0].condition.requestBodyType).toBe('number');
+    expect(draft.overrides[0].condition.requestBodyValue).toBe(exact);
+    expect(draft.overrides[1].condition.requestBodyType).toBe('null');
+    expect(draft.overrides[2].condition.requestBodyType).toBe('boolean');
+    expect(draft.overrides[3].condition.requestBodyType).toBe('string');
+    const round = roundTripDefinition(definition);
+    const equals = round.overrides[0].when.requestBody?.equals;
+    expect(isRawJSONNumber(equals)).toBe(true);
+    expect((equals as RawJSONNumber).text).toBe(exact);
+    expect(round.overrides[1].when.requestBody?.equals).toBeNull();
+    expect(round.overrides[2].when.requestBody?.equals).toBe(true);
+    expect(round.overrides[3].when.requestBody?.equals).toBe('fast');
+  });
+
+  it('serializes and parses requestBody number tokens exactly while validating bounds', () => {
+    const payload = {
+      pricing: {
+        prices: [{
+          definition: {
+            overrides: [{
+              when: { requestBody: { path: '/n', equals: new RawJSONNumber('1844674407370955161600000000000000000000') } },
+            }],
+          },
+        }],
+      },
+    };
+    const wire = stringifyWithRawJSON(payload);
+    expect(wire).toContain('"equals":1844674407370955161600000000000000000000');
+    const parsed = parseSettingsJSON(wire) as typeof payload;
+    const equals = parsed.pricing.prices[0].definition.overrides[0].when.requestBody.equals;
+    expect(isRawJSONNumber(equals)).toBe(true);
+    expect((equals as RawJSONNumber).text).toBe('1844674407370955161600000000000000000000');
+
+    expect(canonicalRequestBodyNumber('2.0')).toBe('2');
+    expect(canonicalRequestBodyNumber('1e2')).toBe('100');
+    expect(canonicalRequestBodyNumber('1e-18')).toBe('0.000000000000000001');
+    expect(() => canonicalRequestBodyNumber('1e-19')).toThrow();
+    expect(() => canonicalRequestBodyNumber('9'.repeat(65))).toThrow();
+    expect(() => validateRequestBodyPath('a/b')).toThrow();
+    expect(() => validateRequestBodyPath('/a~2b')).toThrow();
+  });
+
+  it('preserves negative and exponent tokens and rejects unsupported runtimes', () => {
+    for (const exact of ['-1.25e-3', '1e+18', '0']) {
+      const payload = {
+        requestBody: { path: '/n', equals: new RawJSONNumber(exact) },
+      };
+      const wire = stringifyWithRawJSON(payload);
+      expect(wire).toContain(`"equals":${exact}`);
+      const parsed = parseSettingsJSON(wire) as {
+        requestBody: { equals: RawJSONNumber };
+      };
+      expect(isRawJSONNumber(parsed.requestBody.equals)).toBe(true);
+      expect(parsed.requestBody.equals.text).toBe(exact);
+    }
+    expect(() => parseSettingsJSON(
+      '{"requestBody":{"path":"/n","equals":12345678901234567890}}',
+      { raw: true, source: false },
+    )).toThrow(/context.source/);
+    expect(() => new RawJSONNumber('1', { raw: false, source: true })).toThrow(/JSON.rawJSON/);
+    expect(() => new RawJSONNumber('01')).toThrow();
+    expect(() => new RawJSONNumber('1.')).toThrow();
+  });
+
+  it('does not reinterpret sentinel-looking or unrelated objects as numbers', () => {
+    const marker = parseSettingsJSON(
+      '{"requestBody":{"path":"/n","equals":{"__observerRawNumber":"123"}}}',
+    ) as { requestBody: { equals: unknown } };
+    expect(isRawJSONNumber(marker.requestBody.equals)).toBe(false);
+    expect(marker.requestBody.equals).toEqual({ __observerRawNumber: '123' });
+    expect(() => parseSettingsJSON('{"other":{"equals":7}}')).toThrow(/未绑定/);
   });
 });

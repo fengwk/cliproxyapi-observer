@@ -6,6 +6,8 @@
  * All new fields are optional for backwards compatibility with historical fixtures.
  */
 
+import type { RawJSONNumber } from './rawJson';
+
 export interface Limits {
   five_hour: number;
   week: number;
@@ -92,11 +94,21 @@ export interface TimeCondition {
   weekdays?: number[];
 }
 
+/**
+ * JSON scalar expected value. Numbers may remain a RawJSONNumber so a browser
+ * never rounds an exact configured decimal through Number.
+ */
+export interface RequestBodyCondition {
+  path: string;
+  equals: string | number | boolean | null | RawJSONNumber;
+}
+
 export interface Condition {
   context?: ContextCondition;
   serviceTier?: string[];
   date?: DateCondition;
   time?: TimeCondition;
+  requestBody?: RequestBodyCondition;
   all?: Condition[];
   any?: Condition[];
   not?: Condition;

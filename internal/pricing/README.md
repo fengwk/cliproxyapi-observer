@@ -78,6 +78,43 @@ shape cannot be represented safely, the entry is `unpriced` with
 `Snapshot` show the base tier and mark it with `reason: "context_tiers"` because
 they have no invented token context.
 
+## Request-body conditions
+
+A manual override or multiplier may include:
+
+```json
+{"requestBody": {"path": "/speed", "equals": "fast"}}
+```
+
+`path` is a bounded RFC 6901 JSON Pointer (nonempty, leading `/`, only `~0`/`~1`
+escapes, at most 512 UTF-8 bytes and 16 segments). `equals` accepts only a JSON
+string, number, boolean or explicit `null`; `"2"` never equals `2`. Numbers use
+exact decimal comparison and canonicalization (`2 = 2.0`), with at most 64
+significant digits and normalized scale from -18 to 18. No binary float
+comparison is used. Objects, arrays and unknown fields are rejected.
+
+Only manual prices participate. The engine snapshots configured manual leaves
+against the transient pre-protocol-translation `request.intercept_before` body:
+at most 128 unique conditions, 32MiB JSON and nesting 64. The snapshot retains
+only `SHA256(path NUL type NUL canonicalValue) -> bool`, never a request value
+or body. A missing path, non-scalar actual value or traversal through a scalar
+is known false; explicit `null` only matches a present null. Missing/invalid/
+oversized bodies, missing Key+Trace admission correlation, restart, expiry or
+overflow make the leaf unknown. The existing all/any/not short circuit is
+unchanged, and `NOT unknown` remains unknown.
+
+Admission and usage IDs differ. The engine associates facts by Key+Trace in a
+bounded in-memory map, retains them briefly after completion, treats a distinct
+admission reusing the same Key+Trace as ambiguous, and rejects a delayed usage
+whose `RequestedAt` predates the immutable admission start. Missing facts produce
+the normal zero-cost `missing_facts` quote; they never gate authentication,
+permissions, quota or concurrency. Stored quotes/history are not repriced.
+
+The request field is client-controlled and can be used to select a lower price.
+The UI uses `JSON.rawJSON` and `JSON.parse` reviver `context.source` so exact
+numbers never pass through JavaScript Number; a browser without those APIs must
+explicitly refuse to load or save numeric conditions.
+
 ## Region-gated multipliers
 
 The public v2 catalog sometimes gates a multiplier on the upstream region.

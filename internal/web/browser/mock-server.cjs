@@ -378,6 +378,11 @@ function createSettings() {
                 id: 'long-context',
                 when: { context: { gt: 200000 } },
                 rates: { input: 2_500_000, output: 15_000_000 }
+              },
+              {
+                id: 'fast-mode',
+                when: { requestBody: { path: '/speed', equals: 'fast' } },
+                rates: { input: 1_500_000 }
               }
             ],
             [
@@ -1033,7 +1038,35 @@ function validateCondition(condition, name, depth = 0, state = { nodes: 0 }) {
   if (condition === null || typeof condition !== 'object' || Array.isArray(condition)) {
     throw failure(400, 'invalid_json', name + ' must be an object');
   }
-  rejectUnknown(condition, new Set(['context', 'serviceTier', 'date', 'time', 'all', 'any', 'not']), name);
+  rejectUnknown(condition, new Set(['context', 'serviceTier', 'date', 'time', 'requestBody', 'all', 'any', 'not']), name);
+  if (condition.requestBody !== undefined) {
+    const body = condition.requestBody;
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      throw failure(400, 'invalid_json', name + '.requestBody must be an object');
+    }
+    rejectUnknown(body, new Set(['path', 'equals']), name + '.requestBody');
+    if (typeof body.path !== 'string' || body.path[0] !== '/' ||
+        Buffer.byteLength(body.path, 'utf8') > 512 ||
+        body.path.slice(1).split('/').length > 16 ||
+        body.path.slice(1).split('/').some((segment) => /~(?:[^01]|$)/.test(segment))) {
+      throw failure(400, 'invalid_json', name + '.requestBody.path must be a bounded RFC 6901 pointer');
+    }
+    if (!Object.prototype.hasOwnProperty.call(body, 'equals')) {
+      throw failure(400, 'invalid_json', name + '.requestBody.equals is required');
+    }
+    const equals = body.equals;
+    if (typeof equals === 'string') {
+      if (Buffer.byteLength(equals, 'utf8') > 1024) {
+        throw failure(400, 'invalid_json', name + '.requestBody.equals string is too long');
+      }
+    } else if (typeof equals === 'number') {
+      if (!Number.isFinite(equals)) {
+        throw failure(400, 'invalid_json', name + '.requestBody.equals number is invalid');
+      }
+    } else if (equals !== null && typeof equals !== 'boolean') {
+      throw failure(400, 'invalid_json', name + '.requestBody.equals must be a scalar');
+    }
+  }
   if (condition.context !== undefined) {
     const context = condition.context;
     if (context === null || typeof context !== 'object' || Array.isArray(context)) {

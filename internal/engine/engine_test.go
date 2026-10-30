@@ -24,16 +24,32 @@ type fakePrice struct {
 	calls     int
 	quoteAt   time.Time
 	quoteTier string
+	snapshot  map[string]bool
+	facts     map[string]bool
 }
 
-func (p *fakePrice) Quote(_, _ string, _ pricing.Tokens, at time.Time, tier string) (pricing.Quote, error) {
+func (p *fakePrice) Quote(model, provider string, tokens pricing.Tokens, at time.Time, tier string) (pricing.Quote, error) {
+	return p.QuoteWithFacts(model, provider, pricing.UsageFacts{Tokens: tokens, RequestedAt: at, ServiceTier: tier})
+}
+func (p *fakePrice) QuoteWithFacts(_, _ string, usage pricing.UsageFacts) (pricing.Quote, error) {
 	p.calls++
-	p.quoteAt, p.quoteTier = at, tier
+	p.quoteAt, p.quoteTier = usage.RequestedAt, usage.ServiceTier
+	p.facts = usage.Conditions
 	source := p.source
 	if source == "" {
 		source = "manual"
 	}
 	return pricing.Quote{CostMicroUSD: p.cost, Source: source}, nil
+}
+func (p *fakePrice) SnapshotConditions([]byte) map[string]bool {
+	if p.snapshot == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(p.snapshot))
+	for k, v := range p.snapshot {
+		out[k] = v
+	}
+	return out
 }
 func (*fakePrice) Observe(string, string) {}
 

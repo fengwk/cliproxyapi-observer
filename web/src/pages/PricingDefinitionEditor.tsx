@@ -369,6 +369,111 @@ function ConditionEditor({
         <span className="settings-note">跨午夜时按起始日归属；留空表示每天。</span>
       </div>
 
+      <div className="settings-condition-group">
+        <div className="settings-condition-group-header">
+          <div>
+            <strong>请求体字段（JSON Pointer）</strong>
+            <span className="settings-note">
+              仅手工价格规则；匹配协议翻译前 request.intercept_before 的 JSON 请求体。
+              缺失或非标量视为不匹配，无请求快照时该条件未知。
+            </span>
+          </div>
+          {draft.requestBodyPresent ? (
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={disabled}
+              onClick={() => patch({ requestBodyPresent: false })}
+              data-testid="condition-request-body-remove"
+            >
+              删除
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={disabled}
+              onClick={() => patch({ requestBodyPresent: true })}
+              data-testid="condition-request-body-add"
+            >
+              + 添加
+            </Button>
+          )}
+        </div>
+        {draft.requestBodyPresent && (
+          <>
+            <p className="settings-note">
+              该字段由客户端控制，可用于选择价格；修改规则不会重算历史请求。只保存匹配结果指纹，不保存字段值或正文。
+            </p>
+            <div className="settings-rule-conditions-grid">
+              <Field label="路径" hint="RFC 6901，例如 /speed、/options/0/mode 或 /。">
+                <Input
+                  value={draft.requestBodyPath}
+                  disabled={disabled}
+                  placeholder="/speed"
+                  aria-label={`${label} 请求体路径`}
+                  onChange={(event) => patch({ requestBodyPath: event.target.value })}
+                />
+              </Field>
+              <Field label="值类型" hint="字符串区分大小写；数字按精确十进制比较，不经过浮点。">
+                <Select
+                  aria-label={`${label} 请求体值类型`}
+                  value={draft.requestBodyType}
+                  disabled={disabled}
+                  options={[
+                    { value: 'string', label: '字符串' },
+                    { value: 'number', label: '数字' },
+                    { value: 'boolean', label: '布尔' },
+                    { value: 'null', label: 'null' },
+                  ]}
+                  onChange={(value) => {
+                    const type = value as ConditionDraft['requestBodyType'];
+                    patch({
+                      requestBodyType: type,
+                      requestBodyValue: type === 'boolean' ? 'true' : type === 'null' ? '' : draft.requestBodyValue,
+                    });
+                  }}
+                />
+              </Field>
+              {draft.requestBodyType === 'boolean' ? (
+                <Field label="值" hint="布尔值精确匹配。">
+                  <Select
+                    aria-label={`${label} 请求体布尔值`}
+                    value={draft.requestBodyValue || 'true'}
+                    disabled={disabled}
+                    options={[
+                      { value: 'true', label: 'true' },
+                      { value: 'false', label: 'false' },
+                    ]}
+                    onChange={(value) => patch({ requestBodyValue: value })}
+                  />
+                </Field>
+              ) : draft.requestBodyType === 'null' ? (
+                <Field label="值" hint="只有实际存在且为 null 才匹配；字段缺失不等于 null。">
+                  <span className="settings-note">null</span>
+                </Field>
+              ) : (
+                <Field
+                  label="值"
+                  hint={draft.requestBodyType === 'number'
+                    ? '合法 JSON 数字；最多 64 位有效数字，归一化小数位 -18 至 18。'
+                    : '最多 1024 个 UTF-8 字节，区分大小写且不做归一化。'}
+                >
+                  <Input
+                    value={draft.requestBodyValue}
+                    disabled={disabled}
+                    inputMode={draft.requestBodyType === 'number' ? 'decimal' : 'text'}
+                    placeholder={draft.requestBodyType === 'number' ? '例如 2 或 2.0' : '例如 fast'}
+                    aria-label={`${label} 请求体值`}
+                    onChange={(event) => patch({ requestBodyValue: event.target.value })}
+                  />
+                </Field>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+
       <details className="settings-condition-advanced" open={hasAdvancedCondition(draft)}>
         <summary>组合条件（all / any / not）</summary>
         {!canNest ? (

@@ -3,6 +3,8 @@ import type { ModelInfo } from './types';
 export interface ApiClient {
   request<T>(path: string, options?: {
     method?: string; body?: unknown; signal?: AbortSignal;
+    /** Raw response parser; used to preserve exact JSON number tokens. */
+    parse?: (text: string) => unknown;
   }): Promise<T>;
   models(options?: { signal?: AbortSignal; force?: boolean }): Promise<ModelInfo[]>;
   dispose?(): void;
@@ -139,7 +141,10 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
 
   const client: ApiClient = {
     dispose,
-    request<T>(path: string, opts: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
+    request<T>(path: string, opts: {
+      method?: string; body?: unknown; signal?: AbortSignal;
+      parse?: (text: string) => unknown;
+    } = {}): Promise<T> {
       const headers: Record<string, string> = { Accept: 'application/json' };
       if (sessionKey) headers.Authorization = `Bearer ${sessionKey}`;
       const body = opts.body === undefined ? undefined : JSON.stringify(opts.body);
@@ -149,7 +154,8 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         method: opts.method ?? (body === undefined ? 'GET' : 'POST'), headers, body,
       }, opts.signal, async response => {
         if (response.status === 204) return {} as T;
-        return response.json() as Promise<T>;
+        if (!opts.parse) return response.json() as Promise<T>;
+        return opts.parse(await response.text()) as T;
       });
     },
     async models(opts = {}) {

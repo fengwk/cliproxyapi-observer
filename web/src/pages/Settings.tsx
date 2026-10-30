@@ -25,6 +25,7 @@ import type {
   CleanupResult,
 } from '../lib/types';
 import { errorMessage, formatDateTime } from '../lib/format';
+import { parseSettingsJSON } from '../lib/rawJson';
 import {
   formatBytes,
   formatInt,
@@ -341,7 +342,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
         }
 
         const [settingsRes, pricesRes, healthRes] = await Promise.all([
-          api.request<Settings>('/settings', { signal }),
+          api.request<Settings>('/settings', { signal, parse: parseSettingsJSON }),
           api.request<PriceSnapshot>('/prices', { signal }),
           api.request<Health>('/health', { signal }),
         ]);
@@ -514,6 +515,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
         method: 'PUT',
         body: payload,
         signal: lifetimeAbortRef.current?.signal,
+        parse: parseSettingsJSON,
       });
 
       if (!isMountedRef.current) return;
@@ -643,6 +645,7 @@ export const SettingsPage: React.FC<PageProps> = ({ api, onDirtyChange, onLogout
         method: 'PUT',
         body: payload,
         signal: lifetimeAbortRef.current?.signal,
+        parse: parseSettingsJSON,
       });
 
       if (!isMountedRef.current) return;

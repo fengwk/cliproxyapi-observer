@@ -100,8 +100,12 @@ func (s *Store) RecordUsage(u pluginapi.UsageRecord) error {
 	at := s.now().UTC()
 	s.pricer.Observe(r.Model, r.Provider)
 	// Quote with the original request start and the final upstream tier, never
-	// the ingestion time or a requested-tier preference.
-	q, e := s.pricer.Quote(r.Model, r.Provider, r.Tokens, r.Time, r.ResponseServiceTier)
+	// the ingestion time or a requested-tier preference. Request-body
+	// fingerprints come only from this Key+Trace admission.
+	q, e := s.pricer.QuoteWithFacts(r.Model, r.Provider, pricing.UsageFacts{
+		Tokens: r.Tokens, RequestedAt: r.Time, ServiceTier: r.ResponseServiceTier,
+		Conditions: s.admissionConditionsLocked(r.KeyID, r.TraceID, r.Time),
+	})
 	if e != nil {
 		s.lastError = "usage pricing failed"
 		return fmt.Errorf("%w: %w", ErrAccounting, e)
@@ -118,6 +122,9 @@ func (s *Store) RecordUsage(u pluginapi.UsageRecord) error {
 	}
 	p := usageTransaction{Record: r, At: at, Quote: q, CaptureEnabled: s.settings.CaptureEnabled, CaptureMode: s.settings.CaptureMode}
 	if e = s.persistLocked(p); e == nil {
+		// Retries can produce more usage records for one admission. Keep the
+		// correlation for the full retention interval after the last use.
+		s.touchAdmissionFactsLocked(r.KeyID, r.TraceID)
 		return nil
 	}
 	s.lastError = "usage persistence failed"

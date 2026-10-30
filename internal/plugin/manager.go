@@ -483,7 +483,7 @@ func (m *Manager) before(raw []byte) (out []byte, err error) {
 		if r.RequestID == "" {
 			return okEnvelope(denied(400))
 		}
-		e = m.store.Admit(engine.Admission{RequestID: r.RequestID, TraceID: r.TraceID, KeyID: id, Model: model, At: m.now()})
+		e = m.store.AdmitWithBody(engine.Admission{RequestID: r.RequestID, TraceID: r.TraceID, KeyID: id, Model: model, At: m.now()}, r.Body)
 		if e == nil {
 			m.admitted.Store(r.RequestID, id)
 		}

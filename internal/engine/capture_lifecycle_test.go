@@ -581,7 +581,7 @@ func TestUnknownFeatureVersionReadOnlyRejected(t *testing.T) {
 	db, e := bolt.Open(path, 0600, nil)
 	must(t, e)
 	must(t, db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket([]byte("meta")).Put([]byte("observer_features"), []byte("4"))
+		return tx.Bucket([]byte("meta")).Put([]byte("observer_features"), []byte("5"))
 	}))
 	must(t, db.Close())
 	before, e := os.ReadFile(path)

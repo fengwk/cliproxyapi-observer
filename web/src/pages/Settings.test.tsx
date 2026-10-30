@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor, act, within } from '@testing-librar
 import { SettingsPage } from './Settings';
 import type { ApiClient } from '../lib/api';
 import type { Settings, PriceSnapshot, Health, ModelInfo, PricePreview } from '../lib/types';
+import { RawJSONNumber, isRawJSONNumber } from '../lib/rawJson';
 
 describe('SettingsPage', () => {
   let mockApi: ApiClient;
@@ -1108,4 +1109,45 @@ describe('SettingsPage', () => {
     fireEvent.click(screen.getByRole('option', { name: '价格不受支持' }));
     expect(screen.getByText('channel/gemini-3.8-flash', { selector: 'strong' })).toBeInTheDocument();
   });
+
+  it('saves a request-body path/type/value leaf as an exact numeric condition', async () => {
+    render(<SettingsPage api={mockApi} refreshInterval={0} onDirtyChange={onDirtyChange} />);
+    await waitFor(() => expect(screen.getByTestId('observer-settings')).toBeDefined());
+
+    fireEvent.click(screen.getByTestId('manual-price-add'));
+    fireEvent.change(screen.getByLabelText('第 2 条手工价格模型 ID'), { target: { value: 'body-priced' } });
+    fireEvent.change(screen.getByLabelText('第 2 条手工价格 Provider'), { target: { value: 'openai' } });
+    fireEvent.change(screen.getByLabelText('第 2 条手工价格 输入价格'), { target: { value: '1' } });
+    fireEvent.change(screen.getByLabelText('第 2 条手工价格 输出价格'), { target: { value: '2' } });
+
+    const addOverride = screen.getAllByTestId('definition-override-add');
+    fireEvent.click(addOverride[addOverride.length - 1]);
+    fireEvent.click(screen.getByTestId('condition-request-body-add'));
+    fireEvent.change(screen.getByLabelText('第 2 条手工价格 价格覆盖 1 请求体路径'), {
+      target: { value: '/options/0/mode' },
+    });
+    const typeControl = screen.getByLabelText('第 2 条手工价格 价格覆盖 1 请求体值类型');
+    fireEvent.keyDown(typeControl, { key: 'ArrowDown' });
+    fireEvent.click(screen.getByRole('option', { name: '数字' }));
+    fireEvent.change(screen.getByLabelText('第 2 条手工价格 价格覆盖 1 请求体值'), {
+      target: { value: '18446744073709551616000000000000000000' },
+    });
+
+    const save = screen.getByTestId('settings-pricing-save');
+    await waitFor(() => expect(save).toBeEnabled());
+    fireEvent.click(save);
+    await waitFor(() => {
+      const putCalls = (mockApi.request as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (call) => call[0] === '/settings' && call[1]?.method === 'PUT'
+      );
+      expect(putCalls.length).toBe(1);
+      const payload = putCalls[0][1].body as Settings;
+      const price = payload.pricing.prices.find((entry) => entry.model === 'body-priced');
+      const bodyCondition = price?.definition.overrides[0].when.requestBody;
+      expect(bodyCondition?.path).toBe('/options/0/mode');
+      expect(isRawJSONNumber(bodyCondition?.equals)).toBe(true);
+      expect((bodyCondition?.equals as RawJSONNumber).text).toBe('18446744073709551616000000000000000000');
+    });
+  });
+
 });

@@ -111,7 +111,7 @@ const (
 	captureReasonCorrelation  = "trace_collision"
 	captureHeaderLimit        = 16 << 10
 	captureEnvelopeVersion    = 1
-	supportedObserverFeature  = 3
+	supportedObserverFeature  = 4
 	maxCaptureBody            = 8 << 20
 	maxCaptureStorage         = 1 << 30
 )

@@ -1360,6 +1360,7 @@ type jsonFrame struct {
 	object    bool
 	keys      map[string]bool
 	expectKey bool
+	key       string
 }
 
 // validateJSONDocument performs one token pass over the complete document. It
@@ -1437,6 +1438,7 @@ func validateJSONDocument(raw []byte, allowedTopLevel map[string]bool) error {
 				return errJSONInvalid
 			}
 			frame.keys[value] = true
+			frame.key = value
 			if len(stack) == 1 && allowedTopLevel != nil && !allowedTopLevel[value] {
 				return errJSONInvalid
 			}
@@ -1454,6 +1456,17 @@ func validateJSONDocument(raw []byte, allowedTopLevel map[string]bool) error {
 				frame.expectKey = true
 			}
 			text := value.String()
+			// requestBody.equals is the only billing field that accepts a
+			// general JSON number. Pricing validates its precision/scale without
+			// binary floats; every other persisted numeric field keeps the strict
+			// non-negative safe-integer rule.
+			if frame.key == "equals" && len(stack) >= 2 {
+				parent := stack[len(stack)-2]
+				if parent.object && parent.key == "requestBody" {
+					frame.expectKey = true
+					continue
+				}
+			}
 			if strings.HasPrefix(text, "-") || strings.ContainsAny(text, ".eE") {
 				return errJSONUnsafeNumber
 			}
