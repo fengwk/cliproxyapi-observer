@@ -1,11 +1,11 @@
-# Observer v1.1.0
+# Observer v1.1.1
 
 认证采用最小侵入的非独占共存：CPA 凭据保留原生行为，Observer 仅管理自己支持的
 调用，不是全路由安全网关。范围见 [认证与模型权限](docs/model-policy.md)。
 
 CLIProxyAPI（CPA）独立原生插件，稳定 ID `cliproxyapi-observer`。提供**专属客户端 Key
 认证、美元额度、可解释用量成本记账与请求日志**，不修改 CPA 核心、请求正文/头、上游选择、
-模型路由、重试或会话。最低 CPA **v8.0.30 / 插件 schema 6**，SDK 锁定 v8.0.47；
+模型路由、重试或会话。最低 CPA **v8.0.30 / 插件 schema 6**，SDK 锁定 v8.0.53；
 更高 v8 稳定版由 CI 验证，不承诺未验证版本或 v9 兼容。
 
 **当前使用 schema3 和 `observer_features=4`，保存客户端密钥明文。**
@@ -17,6 +17,7 @@ CLIProxyAPI（CPA）独立原生插件，稳定 ID `cliproxyapi-observer`。提�
 旧库只存哈希的密钥无法还原明文，重新生成后才可在列表查看；不会拿内部 ID 冒充。
 升级前请备份，安排停流维护；发布不会自动修改生产配置或删除旧数据库。
 当前能力、API、SDK 限制和安全升级/回退步骤见 [重构说明](docs/reconstruction.md)。
+Claude 思考用量细分与零费用修复、最新 SDK 适配见 [v1.1.1 发布说明](docs/release-notes-v1.1.1.md)；
 请求体条件定价、目录兼容与 SDK 升级见 [v1.1.0 发布说明](docs/release-notes-v1.1.0.md)；
 删除记账异常封锁与人工恢复机制见 [v1.0.4 发布说明](docs/release-notes-v1.0.4.md)；
 请求日志筛选与离开确认修复见 [v1.0.3 发布说明](docs/release-notes-v1.0.3.md)；
@@ -167,6 +168,9 @@ reasoning 属于输出子集，同输出时不重复计费，独立定价时按�
 的显式目录来源，**只改变未来计费，不改变 CPA 路由**。
 预览与真实报价使用同一解析器和完整定义；详情保留入库时的费率、定义、
 目录身份与匹配诊断。已知 provider 沿用固定 SDK 的 token 语义；
+原生 Claude 回调丢失标准化细分时，仅在原始计数非负、缓存桶明确且正的显式 total
+严格守恒时，恢复“思考属于输出子集”的细分，不重复计入思考。已完整的独立计数
+保持原语义，其他 provider、兼容执行器和不守恒数据不套用该适配。
 未知语义不按 provider 名称猜测：仅当原始插件计数全部非负、显式 total 为正且至少一个
 输入/输出为正时，才用固定 SDK 构造器尝试 subset / independent / separate-reasoning。
 只有唯一的完整结果（或多个完全相同的完整结果）与显式 total 守恒才恢复细分，否则保留
@@ -273,7 +277,7 @@ make race                       # 全量 Go race
 make load                       # 1万/10万 gzip 元数据及接近内容预算负载验收
 CHROME_BIN=/usr/bin/google-chrome-stable make browser
 # 可指定 BROWSER_REPORT_DIR 保存 report.json / summary.txt / screenshots
-bash scripts/build-cpa-host.sh v8.0.47 /absolute/temp/cli-proxy-api
+bash scripts/build-cpa-host.sh v8.0.53 /absolute/temp/cli-proxy-api
 CPA_BINARY=/absolute/path/to/cli-proxy-api make integration
 # 原生宿主浏览器验收；官方 Management Center v1.26.5 shell 需从固定地址下载并核对
 # SHA-256 57558cd023475674634a114824b014d3e5ac161f6f3791e3d86b6adab962a700
@@ -297,7 +301,7 @@ python3 scripts/test_publish_release.py
 浏览器入口见 [现有说明](internal/web/browser/README.md)，使用本地假数据和实际 Chrome，
 CI 上传报告及截图。`make build` 验证本机 c-shared；发布矩阵仍构建三个平台。
 版本通过 `internal/plugin.Version` ldflags 注入，正式版本来自 tag，开发构建为
-`1.1.0-dev+<commit>`，不取 SDK 版本。
+`1.1.1-dev+<commit>`，不取 SDK 版本。
 
 现有依赖维护策略保留：仅白名单 Go/官方 Actions 纯版本升级可经完整 CI 后自动合并，
 普通功能合并不会触发自动发版；不可变发布器校验源码、三个平台归档与校验和，

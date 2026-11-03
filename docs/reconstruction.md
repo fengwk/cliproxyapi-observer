@@ -1,6 +1,6 @@
 # Observer 当前开发实现说明
 
-本文件描述 v1.1.0 当前实现；`REFACTOR-next.md` 是历史需求设计，
+本文件描述 v1.1.1 当前实现；`REFACTOR-next.md` 是历史需求设计，
 v0.6/v0.7/v0.8 发布说明保留各版本历史行为。当前采用最小非独占认证共存，
 详见 [认证与模型权限](model-policy.md)，不接管 CPA 的原生凭据或实时令牌。
 
@@ -27,8 +27,11 @@ v0.6/v0.7/v0.8 发布说明保留各版本历史行为。当前采用最小非�
 
 ## 认证范围与 SDK 限制
 
-- SDK 锁定 `CLIProxyAPI/v8 v8.0.47`，最低宿主仍为 CPA v8.0.30 / 插件 schema 6。
+- SDK 锁定 `CLIProxyAPI/v8 v8.0.53`，最低宿主仍为 CPA v8.0.30 / 插件 schema 6。
   不启用新版正文省略/修改能力，不修改 CPA 核心。
+- 原生 Claude 的输出计数已包含思考；插件桥没有标准化细分时，只有非负原始计数、
+  明确缓存桶与正的显式 total 严格守恒才恢复该子集语义。完整独立计数及其他
+  provider/执行器维持既有语义，原始计数不变，历史费用和额度不重算。
 - 识别的生成操作：POST `/v1/chat/completions`、`/v1/completions`、`/v1/messages`、
   `/v1/responses`、`/backend-api/codex/responses`，以及 Gemini
   `/v1beta/models/{model}:generateContent|streamGenerateContent`。

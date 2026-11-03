@@ -1,13 +1,15 @@
 package engine
 
 import (
+	"strings"
+
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
-// canonicalTokenBreakdown keeps the pinned SDK's provider-aware classification
-// and only recovers unknown semantics when available raw counters agree with a
-// positive reported total. It never rewrites the raw detail or invents a total.
+// canonicalTokenBreakdown adapts native Claude's raw output subset, then keeps
+// the SDK's provider-aware classification and conservative unknown recovery.
+// Adaptation and recovery never rewrite raw counters or invent a reported total.
 func canonicalTokenBreakdown(d pluginapi.UsageDetail, provider, executorType string) usage.TokenBreakdown {
 	b := usage.EnsureTokenBreakdownForProvider(usage.Detail{
 		InputTokens:         d.InputTokens,
@@ -18,8 +20,17 @@ func canonicalTokenBreakdown(d pluginapi.UsageDetail, provider, executorType str
 		CacheCreationTokens: d.CacheCreationTokens,
 		TotalTokens:         d.TotalTokens,
 	}, provider, executorType).TokenBreakdown
-	// Complete and inconsistent results are authoritative. Only an unknown
-	// semantic partition may be recovered, and never from a synthesized total.
+	// CPA's Claude parser keeps thinking inside raw OutputTokens, but the
+	// plugin bridge drops its TokenBreakdown. The SDK's legacy independent
+	// constructor then adds thinking again. Recover only the native contract
+	// proven by a positive explicit total; keep complete legacy partitions.
+	if b.Quality == usage.TokenAccountingQualityInconsistent {
+		if adapted, ok := nativeClaudeOutputSubset(d, provider, executorType); ok {
+			return adapted
+		}
+	}
+	// Other inconsistent results stay authoritative. Unknown semantics may
+	// only be recovered against an explicit total, never a synthesized one.
 	if b.Quality != usage.TokenAccountingQualityUnclassified {
 		return b
 	}
@@ -27,6 +38,25 @@ func canonicalTokenBreakdown(d pluginapi.UsageDetail, provider, executorType str
 		return recovered
 	}
 	return b
+}
+
+func nativeClaudeOutputSubset(d pluginapi.UsageDetail, provider, executorType string) (usage.TokenBreakdown, bool) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	executorType = strings.ToLower(strings.TrimSpace(executorType))
+	// Do not reinterpret custom providers or OpenAI compatibility executors,
+	// even when their names contain a Claude/Anthropic marker.
+	if provider != "claude" || executorType != "" && executorType != "claudeexecutor" {
+		return usage.TokenBreakdown{}, false
+	}
+	if d.TotalTokens <= 0 || d.ReasoningTokens <= 0 || d.ReasoningTokens > d.OutputTokens || !nonNegativeRawCounters(d) {
+		return usage.TokenBreakdown{}, false
+	}
+	if d.CachedTokens > 0 && d.CacheReadTokens == 0 && d.CacheCreationTokens == 0 {
+		return usage.TokenBreakdown{}, false
+	}
+	b := usage.NewIndependentTokenBreakdown(d.InputTokens, d.CacheReadTokens, d.CacheCreationTokens,
+		d.OutputTokens-d.ReasoningTokens, d.ReasoningTokens, d.TotalTokens)
+	return b, b.Quality == usage.TokenAccountingQualityComplete && b.Valid() && b.TotalTokens == d.TotalTokens
 }
 
 // recoverUnknownTokenBreakdown tries the three canonical partition contracts

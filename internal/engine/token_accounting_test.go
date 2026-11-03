@@ -16,6 +16,94 @@ func usageRecord(provider string, d pluginapi.UsageDetail) pluginapi.UsageRecord
 	return pluginapi.UsageRecord{RequestID: "execution", Provider: provider, Model: "gpt-exact", Detail: d}
 }
 
+// The native plugin bridge omits CPA's complete breakdown but preserves Claude's
+// raw output, which already includes thinking. Rebuilding must not add it twice.
+func TestClaudeOutputSubsetTokens(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  pluginapi.UsageDetail
+		want pricing.Tokens
+	}{
+		{
+			name: "cached-thinking",
+			raw:  pluginapi.UsageDetail{InputTokens: 2, OutputTokens: 244, ReasoningTokens: 40, CachedTokens: 44225, CacheReadTokens: 44225, CacheCreationTokens: 831, TotalTokens: 45302},
+			want: pricing.Tokens{Input: 2, Output: 244, Reasoning: 40, CacheRead: 44225, CacheWrite: 831, Total: 45302},
+		},
+		{
+			name: "uncached-thinking",
+			raw:  pluginapi.UsageDetail{InputTokens: 6, OutputTokens: 3, ReasoningTokens: 1, TotalTokens: 9},
+			want: pricing.Tokens{Input: 6, Output: 3, Reasoning: 1, Total: 9},
+		},
+		{
+			name: "no-thinking-control",
+			raw:  pluginapi.UsageDetail{InputTokens: 2, OutputTokens: 244, CachedTokens: 44225, CacheReadTokens: 44225, CacheCreationTokens: 831, TotalTokens: 45302},
+			want: pricing.Tokens{Input: 2, Output: 244, CacheRead: 44225, CacheWrite: 831, Total: 45302},
+		},
+		{
+			name: "all-output-is-thinking",
+			raw:  pluginapi.UsageDetail{InputTokens: 6, OutputTokens: 3, ReasoningTokens: 3, TotalTokens: 9},
+			want: pricing.Tokens{Input: 6, Output: 3, Reasoning: 3, Total: 9},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, executor := range []string{"ClaudeExecutor", ""} {
+				u := usageRecord("claude", tc.raw)
+				u.ExecutorType = executor
+				r := normalize(u)
+				if r.AccountingQuality != string(usage.TokenAccountingQualityComplete) || !reflect.DeepEqual(r.Tokens, tc.want) {
+					t.Fatalf("executor %q: quality=%q tokens=%+v, want complete %+v", executor, r.AccountingQuality, r.Tokens, tc.want)
+				}
+				if r.RawUsage != tc.raw || r.Provider != u.Provider || r.Model != u.Model {
+					t.Fatalf("raw counters or identity changed: %+v", r)
+				}
+			}
+		})
+	}
+}
+
+// Without an explicit total, the adapter cannot prove the subset contract and
+// must leave the SDK's existing interpretation alone.
+func TestClaudeOutputSubsetRequiresExplicitTotal(t *testing.T) {
+	d := pluginapi.UsageDetail{InputTokens: 6, OutputTokens: 3, ReasoningTokens: 1}
+	if b, ok := nativeClaudeOutputSubset(d, "claude", "ClaudeExecutor"); ok {
+		t.Fatalf("adapted without a reported total: %+v", b)
+	}
+}
+
+// The native Claude adapter is not a general inconsistent-usage fallback:
+// malformed counters and unrelated executors must keep the SDK classification.
+func TestClaudeOutputSubsetSafety(t *testing.T) {
+	cases := []struct {
+		name, provider, executor string
+		raw                      pluginapi.UsageDetail
+		quality                  usage.TokenAccountingQuality
+	}{
+		{"total-mismatch", "claude", "ClaudeExecutor", pluginapi.UsageDetail{InputTokens: 6, OutputTokens: 3, ReasoningTokens: 1, TotalTokens: 8}, usage.TokenAccountingQualityInconsistent},
+		{"thinking-exceeds-output", "claude", "ClaudeExecutor", pluginapi.UsageDetail{InputTokens: 6, OutputTokens: 3, ReasoningTokens: 4, TotalTokens: 9}, usage.TokenAccountingQualityInconsistent},
+		{"negative-legacy-cache", "claude", "ClaudeExecutor", pluginapi.UsageDetail{InputTokens: 6, OutputTokens: 3, ReasoningTokens: 1, CachedTokens: -1, TotalTokens: 9}, usage.TokenAccountingQualityInconsistent},
+		{"ambiguous-legacy-cache", "claude", "ClaudeExecutor", pluginapi.UsageDetail{InputTokens: 6, OutputTokens: 3, ReasoningTokens: 1, CachedTokens: 4, TotalTokens: 9}, usage.TokenAccountingQualityInconsistent},
+		{"overflow", "claude", "ClaudeExecutor", pluginapi.UsageDetail{InputTokens: math.MaxInt64, OutputTokens: 3, ReasoningTokens: 1, TotalTokens: math.MaxInt64}, usage.TokenAccountingQualityInconsistent},
+		{"unknown-provider", "custom", "", pluginapi.UsageDetail{InputTokens: 2, OutputTokens: 244, ReasoningTokens: 40, CacheReadTokens: 44225, CacheCreationTokens: 831, TotalTokens: 45302}, usage.TokenAccountingQualityUnclassified},
+		{"misleading-provider", "custom-claude", "", pluginapi.UsageDetail{InputTokens: 2, OutputTokens: 244, ReasoningTokens: 40, CacheReadTokens: 44225, CacheCreationTokens: 831, TotalTokens: 45302}, usage.TokenAccountingQualityInconsistent},
+		{"compat-executor", "claude", "OpenAICompatExecutor", pluginapi.UsageDetail{InputTokens: 2, OutputTokens: 244, ReasoningTokens: 40, CacheReadTokens: 44225, CacheCreationTokens: 831, TotalTokens: 45302}, usage.TokenAccountingQualityInconsistent},
+		{"other-executor", "claude", "CustomExecutor", pluginapi.UsageDetail{InputTokens: 2, OutputTokens: 244, ReasoningTokens: 40, CacheReadTokens: 44225, CacheCreationTokens: 831, TotalTokens: 45302}, usage.TokenAccountingQualityInconsistent},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u := usageRecord(tc.provider, tc.raw)
+			u.ExecutorType = tc.executor
+			r := normalize(u)
+			if r.AccountingQuality != string(tc.quality) || r.RawUsage != tc.raw || r.Tokens.Total != tc.raw.TotalTokens {
+				t.Fatalf("quality/raw/total changed: %+v, want %s", r, tc.quality)
+			}
+			if r.Tokens.Input != 0 || r.Tokens.Output != 0 || r.Tokens.CacheRead != 0 || r.Tokens.CacheWrite != 0 || r.Tokens.Reasoning != 0 {
+				t.Fatalf("invented partition: %+v", r.Tokens)
+			}
+		})
+	}
+}
+
 // Custom provider names are not token-semantic markers for the pinned SDK.
 // When the raw counters and explicit total prove a canonical partition, the
 // recovered buckets must match the native provider with the same semantics.
@@ -83,8 +171,8 @@ func TestCustomProviderCanonicalTokens(t *testing.T) {
 
 // Recovery is deliberately conservative: authoritative totals alone, missing
 // totals, malformed counters, unsupported totals, and legacy cached counters
-// without a read/write split remain unclassified. Known-provider inconsistent
-// results are never reclassified.
+// without a read/write split remain unclassified. Known-provider inconsistencies
+// outside the native Claude bridge adaptation are never reclassified.
 func TestCustomProviderCanonicalFallbackSafety(t *testing.T) {
 	cases := []struct {
 		name     string
