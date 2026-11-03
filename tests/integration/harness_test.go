@@ -205,6 +205,8 @@ type hostOptions struct {
 	TwoUpstreams bool
 	// GeminiURL adds a standard api-keys.gemini upstream at this local URL.
 	GeminiURL string
+	// ClaudeURL adds a standard api-keys.claude upstream at this local URL.
+	ClaudeURL string
 }
 
 func defaultHostOptions() hostOptions { return hostOptions{} }
@@ -355,6 +357,22 @@ func hostConfig(port int, authDir, pluginsDir, mockURL string, opts hostOptions)
          alias: %q
 `, opts.GeminiURL, geminiUpstreamKey, geminiUpstreamModel, geminiModelName)
 	}
+	claudeSection := ""
+	if opts.ClaudeURL != "" {
+		claudeSection = fmt.Sprintf(`
+ claude:
+   - name: "observer-claude"
+     base-url: %q
+     keys:
+       - api-key: %q
+     models:
+       - name: %q
+         alias: %q
+         thinking:
+           min: 1024
+           max: 4096
+`, opts.ClaudeURL, claudeUpstreamKey, claudeUpstreamModel, claudeModelName)
+	}
 	return []byte(fmt.Sprintf(`config-version: 8
 server:
   host: "127.0.0.1"
@@ -383,14 +401,14 @@ api-keys:
       - name: %q
         alias: %q
       - name: %q
-        alias: %q%s
+        alias: %q%s%s
 plugins:
   enabled: %t
   dir: %q
   configs:
     %s:
       enabled: true
-`, port, mgmtKey, nativeKeys, authDir, compatProviderName, mockURL+"/v1", upstreamKey, extraKey, upstreamModel, modelName, upstreamModelTwo, modelNameTwo, geminiSection, !opts.PluginDisabled, pluginsDir, pluginID))
+`, port, mgmtKey, nativeKeys, authDir, compatProviderName, mockURL+"/v1", upstreamKey, extraKey, upstreamModel, modelName, upstreamModelTwo, modelNameTwo, geminiSection, claudeSection, !opts.PluginDisabled, pluginsDir, pluginID))
 }
 
 // hostEnv builds a minimal environment that cannot inherit production CPA
