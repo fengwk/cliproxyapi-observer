@@ -3,9 +3,39 @@
 package integration
 
 import (
+	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 )
+
+// Verify canonical UI assets remain reachable and the real host reports no
+// normalized-route collisions at startup or after native replacement.
+func assertUIRoutesWithoutConflicts(t *testing.T, h *harness) {
+	t.Helper()
+	for _, prefix := range []string{"/v0/management/plugins/", "/v0/resource/plugins/"} {
+		var headers map[string]string
+		if prefix == "/v0/management/plugins/" {
+			headers = map[string]string{"Authorization": "Bearer " + mgmtKey}
+		}
+		for _, suffix := range []string{"/ui", "/ui.js", "/ui.css", "/theme.js"} {
+			path := prefix + pluginID + suffix
+			status, responseHeaders, body, err := h.rawRequestWithHeaders(http.MethodGet, path, nil, headers)
+			if err != nil || status != http.StatusOK || len(body) == 0 {
+				t.Fatalf("UI asset %s status=%d err=%v bytes=%d", path, status, err, len(body))
+			}
+			if responseHeaders.Get("Cache-Control") != "no-store" {
+				t.Errorf("UI asset %s cache policy=%q", path, responseHeaders.Get("Cache-Control"))
+			}
+		}
+	}
+	for _, line := range strings.Split(h.stdout.String()+"\n"+h.stderr.String(), "\n") {
+		if strings.Contains(line, "pluginhost: plugin "+pluginID+" ") &&
+			strings.Contains(line, " route ") && strings.Contains(line, " conflicts with ") {
+			t.Errorf("Observer route conflict: %s", line)
+		}
+	}
+}
 
 // Query IDs must be present exactly once, nonblank and accompanied by no
 // unrecognized parameters. Invalid mutations must not rotate/revoke the Key.

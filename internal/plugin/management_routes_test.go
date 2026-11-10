@@ -25,9 +25,8 @@ func dispatchForTest(t *testing.T, m *Manager, method, path string, query url.Va
 	}})
 }
 
-// The host only dispatches exact static method+path keys. Dynamic-looking
-// routes must be absent from registration, and /ui/ must be declared even
-// though the host normalizes its trailing slash.
+// The host trims trailing slashes before indexing exact method+path keys.
+// Check normalized uniqueness so /ui and /ui/ cannot silently self-conflict.
 func TestManagementRegistrationHasOnlyStaticExactRoutes(t *testing.T) {
 	reg := managementRegistration()
 	want := map[string]bool{
@@ -54,7 +53,6 @@ func TestManagementRegistrationHasOnlyStaticExactRoutes(t *testing.T) {
 		"POST " + routeCapturesPurge:   true,
 		"POST " + routeCompact:         true,
 		"GET " + routeUI:               true,
-		"GET " + routeUIAlt:            true,
 		"GET " + routeUIJS:             true,
 		"GET " + routeUICSS:            true,
 		"GET " + routeThemeJS:          true,
@@ -63,10 +61,11 @@ func TestManagementRegistrationHasOnlyStaticExactRoutes(t *testing.T) {
 	seen := map[string]bool{}
 	for _, route := range reg.Routes {
 		key := route.Method + " " + route.Path
-		if seen[key] {
-			t.Fatalf("duplicate registration: %s", key)
+		normalizedKey := strings.ToUpper(strings.TrimSpace(route.Method)) + " " + strings.TrimRight(strings.TrimSpace(route.Path), "/")
+		if seen[normalizedKey] {
+			t.Fatalf("duplicate normalized registration: %s", normalizedKey)
 		}
-		seen[key] = true
+		seen[normalizedKey] = true
 		if !want[key] {
 			t.Fatalf("unexpected registration: %s", key)
 		}
@@ -81,13 +80,16 @@ func TestManagementRegistrationHasOnlyStaticExactRoutes(t *testing.T) {
 	}
 
 	resources := map[string]bool{}
+	normalizedResources := map[string]bool{}
 	for _, resource := range reg.Resources {
-		if resources[resource.Path] {
-			t.Fatalf("duplicate resource: %s", resource.Path)
+		path := strings.TrimRight(strings.TrimSpace(resource.Path), "/")
+		if normalizedResources[path] {
+			t.Fatalf("duplicate normalized resource: %s", path)
 		}
+		normalizedResources[path] = true
 		resources[resource.Path] = true
 	}
-	for _, path := range []string{"/ui", "/ui/", "/ui.js", "/ui.css"} {
+	for _, path := range []string{"/ui", "/ui.js", "/ui.css", "/theme.js"} {
 		if !resources[path] {
 			t.Fatalf("missing resource: %s", path)
 		}

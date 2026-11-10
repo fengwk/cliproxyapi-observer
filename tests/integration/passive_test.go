@@ -106,6 +106,7 @@ func TestCountTokensDoesNotAdmitOrCharge(t *testing.T) {
 // storage release/reopen. No stub/invalid library or CPA internals are used.
 func TestCleanNativeReplacementPreservesKeys(t *testing.T) {
 	h := newHarness(t)
+	assertUIRoutesWithoutConflicts(t, h)
 	created := h.createKey(t, validSpec())
 	before := acceptanceInferAndAwait(t, h, created.Secret, map[string]struct{}{})
 	h.waitForLog(t, "file watcher started", 20*time.Second)
@@ -147,4 +148,5 @@ func TestCleanNativeReplacementPreservesKeys(t *testing.T) {
 	if records := h.page(t, "page_size=100"); len(records.Items) != beforeRecords {
 		t.Fatalf("native key after replacement entered Observer accounting: %d -> %d records", beforeRecords, len(records.Items))
 	}
+	assertUIRoutesWithoutConflicts(t, h)
 }

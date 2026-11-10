@@ -46,7 +46,6 @@ const (
 	routePricesPreview   = routesPrefix + "/prices/preview"
 	routeCompact         = routesPrefix + "/compact"
 	routeUI              = routesPrefix + "/ui"
-	routeUIAlt           = routeUI + "/"
 	routeUIJS            = routesPrefix + "/ui.js"
 	routeUICSS           = routesPrefix + "/ui.css"
 	routeThemeJS         = routesPrefix + "/theme.js"
@@ -80,6 +79,8 @@ type managementRegistrationResponse struct {
 // CPA v8.0.30 normalizes plugin routes to an exact method+path map and rejects
 // any path containing ':' or '*'. Key and request identifiers therefore travel
 // in the query string; no parameterized path is registered or dispatched.
+// Register only canonical UI paths: CPA trims trailing slashes, so declaring
+// both /ui and /ui/ would collide in each route table.
 func managementRegistration() managementRegistrationResponse {
 	return managementRegistrationResponse{
 		Routes: []pluginapi.ManagementRoute{
@@ -106,14 +107,12 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPost, Path: routeCapturesPurge, Description: "Purge all captured content after explicit confirmation."},
 			{Method: http.MethodPost, Path: routeCompact, Description: "Compact storage and return health counters."},
 			{Method: http.MethodGet, Path: routeUI, Description: PluginName + " management UI."},
-			{Method: http.MethodGet, Path: routeUIAlt, Description: PluginName + " management UI with trailing slash."},
 			{Method: http.MethodGet, Path: routeUIJS, Description: PluginName + " management UI script."},
 			{Method: http.MethodGet, Path: routeUICSS, Description: PluginName + " management UI styles."},
 			{Method: http.MethodGet, Path: routeThemeJS, Description: PluginName + " pre-render theme bridge."},
 		},
 		Resources: []pluginapi.ResourceRoute{
 			{Path: "/ui", Menu: PluginName, Description: PluginName + " management UI."},
-			{Path: "/ui/", Description: PluginName + " management UI with trailing slash."},
 			{Path: "/ui.js", Description: PluginName + " management UI script."},
 			{Path: "/ui.css", Description: PluginName + " management UI styles."},
 			{Path: "/theme.js", Description: PluginName + " pre-render theme bridge."},

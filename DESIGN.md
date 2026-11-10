@@ -286,7 +286,7 @@ Standard direct JSON response (not RPC envelope) and errors
 - GET `/summary` ->Summary
 - GET/PUT `/settings` ->Settings; GET `/prices` ->pricing.Snapshot
 - POST `/prices/refresh` ->Snapshot, POST `/compact` ->Health
-- GET `/ui` (trailing slash supported), `/ui.js`, `/ui.css` ->embedded assets.
+- GET `/ui`, `/ui.js`, `/ui.css`, `/theme.js` ->embedded assets.
   Same assets via resource base `/v0/resource/plugins/cliproxyapi-observer/`.
 
 Query params: from/to RFC3339, key_id/model/provider/auth_index/status,
@@ -342,7 +342,10 @@ Document commands; tests comment their intent. No manual-only validation.
 
 The SDK management router only matches registered static paths. The query-ID
 routes above supersede the originally planned dynamic paths; do not retain dead
-compatibility routes. Register the trailing `/ui/` route as well as `/ui`.
+compatibility routes. Register only canonical `/ui`: the host trims trailing
+slashes during registration, so a separate `/ui/` declaration self-conflicts.
+The plugin handler still accepts `/ui/` if a host forwards it, but that is not a
+separately registered host route.
 
 Key model selection: default all; explicit searchable checkbox multi-select
 restricts to selected exact requested IDs. Real .30 acceptance proved config
