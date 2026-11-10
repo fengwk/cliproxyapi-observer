@@ -1,11 +1,11 @@
-# Observer v1.1.1
+# Observer v1.1.4
 
 认证采用最小侵入的非独占共存：CPA 凭据保留原生行为，Observer 仅管理自己支持的
 调用，不是全路由安全网关。范围见 [认证与模型权限](docs/model-policy.md)。
 
 CLIProxyAPI（CPA）独立原生插件，稳定 ID `cliproxyapi-observer`。提供**专属客户端 Key
 认证、美元额度、可解释用量成本记账与请求日志**，不修改 CPA 核心、请求正文/头、上游选择、
-模型路由、重试或会话。最低 CPA **v8.0.30 / 插件 schema 6**，SDK 锁定 v8.0.53；
+模型路由、重试或会话。最低 CPA **v8.0.30 / 插件 schema 6**，SDK 锁定 v8.0.58；
 更高 v8 稳定版由 CI 验证，不承诺未验证版本或 v9 兼容。
 
 **当前使用 schema3 和 `observer_features=4`，保存客户端密钥明文。**
@@ -17,6 +17,7 @@ CLIProxyAPI（CPA）独立原生插件，稳定 ID `cliproxyapi-observer`。提�
 旧库只存哈希的密钥无法还原明文，重新生成后才可在列表查看；不会拿内部 ID 冒充。
 升级前请备份，安排停流维护；发布不会自动修改生产配置或删除旧数据库。
 当前能力、API、SDK 限制和安全升级/回退步骤见 [重构说明](docs/reconstruction.md)。
+UI 路由归一化冲突与配置热更新告警修复见 [v1.1.4 发布说明](docs/release-notes-v1.1.4.md)；
 Claude 思考用量细分与零费用修复、最新 SDK 适配见 [v1.1.1 发布说明](docs/release-notes-v1.1.1.md)；
 请求体条件定价、目录兼容与 SDK 升级见 [v1.1.0 发布说明](docs/release-notes-v1.1.0.md)；
 删除记账异常封锁与人工恢复机制见 [v1.0.4 发布说明](docs/release-notes-v1.0.4.md)；
@@ -277,7 +278,7 @@ make race                       # 全量 Go race
 make load                       # 1万/10万 gzip 元数据及接近内容预算负载验收
 CHROME_BIN=/usr/bin/google-chrome-stable make browser
 # 可指定 BROWSER_REPORT_DIR 保存 report.json / summary.txt / screenshots
-bash scripts/build-cpa-host.sh v8.0.53 /absolute/temp/cli-proxy-api
+bash scripts/build-cpa-host.sh v8.0.58 /absolute/temp/cli-proxy-api
 CPA_BINARY=/absolute/path/to/cli-proxy-api make integration
 # 原生宿主浏览器验收；官方 Management Center v1.26.5 shell 需从固定地址下载并核对
 # SHA-256 57558cd023475674634a114824b014d3e5ac161f6f3791e3d86b6adab962a700
@@ -301,7 +302,7 @@ python3 scripts/test_publish_release.py
 浏览器入口见 [现有说明](internal/web/browser/README.md)，使用本地假数据和实际 Chrome，
 CI 上传报告及截图。`make build` 验证本机 c-shared；发布矩阵仍构建三个平台。
 版本通过 `internal/plugin.Version` ldflags 注入，正式版本来自 tag，开发构建为
-`1.1.1-dev+<commit>`，不取 SDK 版本。
+`1.1.4-dev+<commit>`，不取 SDK 版本。
 
 现有依赖维护策略保留：仅白名单 Go/官方 Actions 纯版本升级可经完整 CI 后自动合并，
 普通功能合并不会触发自动发版；不可变发布器校验源码、三个平台归档与校验和，
