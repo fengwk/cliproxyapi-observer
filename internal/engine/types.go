@@ -52,6 +52,7 @@ type Key struct {
 type Admission struct {
 	RequestID, TraceID, KeyID, Model string
 	At                               time.Time
+	Websocket                        bool
 }
 type CaptureInput struct {
 	RequestID, TraceID, KeyID string
@@ -109,6 +110,7 @@ const (
 	captureReasonMissing      = "missing"
 	captureReasonRedacted     = "redacted"
 	captureReasonCorrelation  = "trace_collision"
+	captureReasonWebsocket    = "websocket"
 	captureHeaderLimit        = 16 << 10
 	captureEnvelopeVersion    = 1
 	supportedObserverFeature  = 4
@@ -183,6 +185,7 @@ type Record struct {
 	Failed              bool                  `json:"failed"`
 	StatusCode          int                   `json:"status_code"`
 	Stream              bool                  `json:"stream"`
+	Websocket           bool                  `json:"websocket,omitempty"`
 	LatencyMS           int64                 `json:"latency_ms"`
 	TTFTMS              int64                 `json:"ttft_ms"`
 	Tokens              pricing.Tokens        `json:"tokens"`

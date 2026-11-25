@@ -102,9 +102,12 @@ func (s *Store) RecordUsage(u pluginapi.UsageRecord) error {
 	// Quote with the original request start and the final upstream tier, never
 	// the ingestion time or a requested-tier preference. Request-body
 	// fingerprints come only from this Key+Trace admission.
+	s.pruneAdmissionFactsLocked()
+	fact := s.admissionFacts[admissionFactID(r.KeyID, r.TraceID)]
+	r.Websocket = fact.Websocket
 	q, e := s.pricer.QuoteWithFacts(r.Model, r.Provider, pricing.UsageFacts{
 		Tokens: r.Tokens, RequestedAt: r.Time, ServiceTier: r.ResponseServiceTier,
-		Conditions: s.admissionConditionsLocked(r.KeyID, r.TraceID, r.Time),
+		Conditions: fact.conditionsAt(r.Time),
 	})
 	if e != nil {
 		s.lastError = "usage pricing failed"

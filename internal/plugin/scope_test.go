@@ -45,8 +45,14 @@ func TestOperationWhitelist(t *testing.T) {
 			t.Fatalf("%s: %v", path, got)
 		}
 	}
+	// Only the exact Responses handshake is generation; the legacy backend GET stays unhandled.
+	if got := operationFor(http.MethodGet, "/v1/responses"); got != operationGeneration {
+		t.Fatalf("GET /v1/responses: %v", got)
+	}
 	for _, test := range []struct{ method, path string }{
 		{http.MethodGet, "/v1/chat/completions"},
+		{http.MethodGet, "/v1/responses/"},
+		{http.MethodGet, "/backend-api/codex/responses"},
 		{http.MethodPost, "/v1/models"},
 		{http.MethodGet, "/v1/models/"},
 		{http.MethodPost, "/v1/chat/completions/"},
@@ -93,6 +99,7 @@ func TestAuthenticationScopesByOperation(t *testing.T) {
 		{"POST", "/v1beta/models/model:streamGenerateContent", "observer:" + k.ID},
 		{"POST", "/v1/messages/count_tokens", "observer-count:" + k.ID},
 		{"POST", "/v1beta/models/model:countTokens", "observer-count:" + k.ID},
+		{"GET", "/v1/responses", "observer:" + k.ID},
 		{"GET", "/v1/models", "observer-directory:" + k.ID},
 		{"GET", "/v1/models/model", "observer-directory:" + k.ID},
 		{"GET", "/v1beta/models", "observer-directory:" + k.ID},
@@ -107,7 +114,6 @@ func TestAuthenticationScopesByOperation(t *testing.T) {
 		{"", ""},
 		{"POST", "/v1/chat/completions/"},
 		{"GET", "/v1/chat/completions"},
-		{"GET", "/v1/responses"},
 		{"GET", "/backend-api/codex/responses"},
 		{"POST", "/v1/realtime/client_secrets"},
 		{"POST", "/v1/alpha/search"},

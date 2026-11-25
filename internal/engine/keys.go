@@ -472,8 +472,10 @@ func (s *Store) admit(a Admission, body []byte) error {
 		if k.MaxConcurrent > 0 && s.decorate(k.Key).Active >= k.MaxConcurrent {
 			return ErrConcurrency
 		}
-		if e := correlate(tx, a.KeyID, a.TraceID, a.RequestID, s.now().UTC()); e != nil {
-			return e
+		if !a.Websocket {
+			if e := correlate(tx, a.KeyID, a.TraceID, a.RequestID, s.now().UTC()); e != nil {
+				return e
+			}
 		}
 		return put(b, k.ID, k)
 	})

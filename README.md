@@ -100,7 +100,10 @@ UI 的“禁用”可重新启用；`DELETE /keys` 仍是撤销，销毁哈希�
 不自动导入 Observer，也不进入 Observer 账本。Observer Key 仅用于明确支持的生成、
 计数和模型目录接口；自有生成保留精确模型授权、额度、并发和记账。
 目录/count 不占额度、并发槽或内容采集；自有 count 仍检查 Key 的模型授权。
-图片、音频、视频、Alpha Search、Live/Realtime 和 WebSocket 等未纳管入口
+Observer Key 也支持 Responses WebSocket（`GET /v1/responses` 握手）；每轮按现有生成准入检查
+模型权限、额度和并发并记账。WebSocket 轮次不采集请求内容，记录标记为 `websocket: true`；
+带 `requestBody` 条件的手工价格按每轮请求帧匹配，不同轮次分别计价。
+图片、音频、视频、Alpha Search、Live/Realtime、Responses compact、Interactions 等其他入口
 保留 CPA 原逻辑，但不会因此向 Observer Key 开放；“全部模型”也不等于“全部接口”。
 详见 [认证与模型权限](docs/model-policy.md)。
 **不要把同一明文同时设为 CPA 原生 Key 与 Observer Key**：原生认证先胜出时，
@@ -127,6 +130,9 @@ UI 以美元显示。输入 JSON 必须为非负安全整数，最大 9,000,000,
 使用检查溢出的整数运算，每次执行各计费桶相加后只向上取整一次，不做浮点账单。
 已准入的并发请求可能使额度超出；没有预扣或推测性预留。每个不同执行（包括重试）
 独立计费，重放不重复扣款；去重窗口 7 天，过旧且未知事件不入账，不影响后续请求。
+额度拒绝的 HTTP 响应仍为 429，错误 `type` 和 `code` 均为 `insufficient_quota`；其他拒绝语义不变。
+WebSocket 每轮额度检查相同；CPA v8.1.4 会先向客户端发送 429 error 帧再断开，v8.0.30
+可能直接断开，宿主版本间的帧表现不同。
 周期额度按**入库时间**计入，历史记录日期按请求时间归属。
 count-tokens 不占额度或并发槽，但仍检查启用、有效期与模型权限。
 
@@ -201,6 +207,8 @@ Token、Secret/Password/Credential/Private Key 及认证相关头外，其余头
 淘汰或已清空等状态。采集丢弃按原因分组，并声明本进程计数起点；
 诊断内容丢弃与用量入账相互独立，不能从诊断丢弃数量推断账单是否缺失。
 
+WebSocket 轮次不进入内容采集队列，即使采集模式开启也不保存请求头或正文；对应记录详情的
+采集、头、体状态均为 `unsupported`，原因是 `websocket`，不返回 headers/body。
 字段名脱敏不能识别普通 prompt/代码中的所有秘密，请保护整个数据目录、备份与磁盘。
 清理不等于安全擦除；物理压缩可回收文件空间，需要同目录临时副本和额外磁盘空间。
 过期清理只删已到期内容；清空全部内容需明确确认，二者均不改变费用/额度。

@@ -15,9 +15,20 @@ type admissionFact struct {
 	// delayed usage record from a previous admission reusing the same trace.
 	Conditions map[string]bool
 	Ambiguous  bool
+	Websocket  bool
+	Rounds     []admissionRound // oldest first; WebSocket rounds are admitted sequentially
 }
 
-const maxAdmissionFacts = maxCompleted
+type admissionRound struct {
+	RequestID  string
+	Started    time.Time
+	Conditions map[string]bool
+}
+
+const (
+	maxAdmissionFacts  = maxCompleted
+	maxWebsocketRounds = 64
+)
 
 func admissionFactID(key, trace string) string {
 	return hash(key + "\x00" + trace)
@@ -40,28 +51,36 @@ func (s *Store) recordAdmissionFactsLocked(a Admission, conditions map[string]bo
 	}
 	s.pruneAdmissionFactsLocked()
 	id := admissionFactID(a.KeyID, a.TraceID)
-	if old, ok := s.admissionFacts[id]; ok {
-		if old.RequestID != a.RequestID {
-			// Two distinct admissions sharing trace correlation cannot be
-			// distinguished at usage time. Never guess between them.
-			old.RequestID = ""
-			old.Conditions = nil
-			old.Ambiguous = true
-			old.At = s.now().UTC()
-			s.admissionFacts[id] = old
-		}
-		return
-	}
+	now := s.now().UTC()
 	started := a.At.UTC()
 	if started.IsZero() {
-		started = s.now().UTC()
+		started = now
 	}
-	s.admissionFacts[id] = admissionFact{
-		RequestID:  a.RequestID,
-		Started:    started,
-		At:         s.now().UTC(),
-		Conditions: cloneConditions(conditions),
+	fact, exists := s.admissionFacts[id]
+	switch {
+	case a.Websocket && (!exists || fact.Websocket && !fact.Ambiguous):
+		for _, round := range fact.Rounds {
+			if round.RequestID == a.RequestID {
+				return
+			}
+		}
+		if len(fact.Rounds) == maxWebsocketRounds {
+			copy(fact.Rounds, fact.Rounds[1:])
+			fact.Rounds = fact.Rounds[:maxWebsocketRounds-1]
+		}
+		fact.Websocket = true
+		fact.Rounds = append(fact.Rounds, admissionRound{a.RequestID, started, cloneConditions(conditions)})
+	case !exists:
+		fact = admissionFact{RequestID: a.RequestID, Started: started, Conditions: cloneConditions(conditions)}
+	case fact.Websocket != a.Websocket || fact.RequestID != a.RequestID:
+		// Distinct HTTP admissions or mixed transports sharing a trace
+		// cannot be distinguished. Keep the WebSocket marker but never guess.
+		fact = admissionFact{Ambiguous: true, Websocket: fact.Websocket || a.Websocket}
+	default:
+		return
 	}
+	fact.At = now
+	s.admissionFacts[id] = fact
 	s.pruneAdmissionFactsLocked()
 }
 
@@ -70,7 +89,7 @@ func (s *Store) completeAdmissionFactsLocked(a Admission) {
 		return
 	}
 	id := admissionFactID(a.KeyID, a.TraceID)
-	if fact, ok := s.admissionFacts[id]; ok && fact.RequestID == a.RequestID && !fact.Ambiguous {
+	if fact, ok := s.admissionFacts[id]; ok && (fact.Websocket && a.Websocket || !fact.Ambiguous && fact.RequestID == a.RequestID) {
 		fact.At = s.now().UTC()
 		s.admissionFacts[id] = fact
 	}
@@ -82,20 +101,28 @@ func (s *Store) touchAdmissionFactsLocked(key, trace string) {
 		return
 	}
 	id := admissionFactID(key, trace)
-	if fact, ok := s.admissionFacts[id]; ok && !fact.Ambiguous {
+	if fact, ok := s.admissionFacts[id]; ok && (fact.Websocket || !fact.Ambiguous) {
 		fact.At = s.now().UTC()
 		s.admissionFacts[id] = fact
 	}
 	s.pruneAdmissionFactsLocked()
 }
 
-func (s *Store) admissionConditionsLocked(key, trace string, requestedAt time.Time) map[string]bool {
-	if trace == "" {
+func (fact admissionFact) conditionsAt(requestedAt time.Time) map[string]bool {
+	if fact.Ambiguous {
 		return nil
 	}
-	s.pruneAdmissionFactsLocked()
-	fact, ok := s.admissionFacts[admissionFactID(key, trace)]
-	if !ok || fact.Ambiguous || fact.RequestID == "" {
+	if fact.Websocket {
+		// The host starts each usage reporter after admitting its round.
+		// Use that start time, not the order in which usage arrives.
+		for i := len(fact.Rounds) - 1; i >= 0; i-- {
+			if !requestedAt.Before(fact.Rounds[i].Started) {
+				return fact.Rounds[i].Conditions
+			}
+		}
+		return nil
+	}
+	if fact.RequestID == "" {
 		return nil
 	}
 	// An evicted slot can be reused by the same Key+Trace. A delayed usage

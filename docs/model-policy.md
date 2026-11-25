@@ -4,8 +4,8 @@
 
 使用 CPA 已有的非独占 `FrontendAuthProvider`，不改 CPA 核心、不另造令牌系统。
 CPA 原生凭据保留原生行为；Observer 只管理自己认证且明确支持的调用。
-本轮删除候选中的“所有模型执行必须使用 Observer Key”守卫及其拒绝码、路径分类表、
-专属 WebSocket 测试框架，不将其替换成新的全路由拦截层。
+不使用“所有模型执行必须使用 Observer Key”守卫或全路由拦截层；仅对明确支持的
+Observer 调用进行认证与准入，Responses WebSocket 也只限精确路径 `GET /v1/responses`。
 
 ## 凭据与接口范围
 
@@ -14,15 +14,23 @@ CPA 原生凭据保留原生行为；Observer 只管理自己认证且明确支�
 | CPA 原生 Key | 宿主原生认证、权限和执行；不自动导入 Observer、不纳入 Observer 账本 |
 | CPA 签发的 Realtime `ek_…` | CPA 负责签发、有效期、模型/会话绑定、签发者身份与通话归属；Observer 不复制或读取其令牌存储 |
 | Observer Key：POST Chat / Completions / Messages / Responses / Codex Responses | 检查 Key 状态、精确请求模型、额度和并发；支持的执行按 Observer 规则记账 |
+| Observer Key：Responses WebSocket（精确路径 `GET /v1/responses`） | 握手按生成操作认证；每轮按现有模型授权、额度和并发准入并记账 |
 | Observer Key：Gemini generateContent / streamGenerateContent | 认证时保留真实动作，在通配执行边界按自有操作进行授权、准入和记账 |
 | Observer Key：Claude / Gemini countTokens | 检查 Key 状态及精确请求模型，不计费、不占并发、不采集 |
 | Observer Key：支持的 GET 模型目录 / 详情 | 只读，不准入、不计账 |
-| Observer Key：图片、音频、视频、Responses compact、Interactions、Alpha Search、Live/Realtime、WebSocket 等其他入口 | 不在认证白名单，不因“全部模型”或有效 Key 而通用放行 |
+| Observer Key：图片、音频、视频、Responses compact、Interactions、Alpha Search、Live/Realtime 等其他入口 | 不在认证白名单，不因“全部模型”或有效 Key 而通用放行 |
 | Observer 目录能力 | 管理认证后签发的单次、30 秒令牌；仅 Bearer `GET /v1/models`，不能推理、计数或管理 |
 | CPA 管理密钥 | 管理认证；不是 Observer 客户端 Key，Observer 不将客户端 Key 升格为管理凭据 |
 
 没有原生凭据兜底时，不支持的 Observer 请求由宿主拒绝认证；在配置原生客户端 Key 的
 真实宿主中验证为 401，而不是放行后漏记账。CPA 对这些接口自身的支持状况不由插件决定。
+
+WebSocket 只支持 Responses 的 `GET /v1/responses` 握手，不扩大到其他 GET 路由或其他
+WebSocket 入口。每个轮次沿用生成准入；同一连接各轮使用相同 Trace，但有各自的请求记录。
+包含 `requestBody` 条件的手工价格按轮次请求帧的事实匹配，因此各轮分别定价；HTTP 同 Trace
+的歧义语义保持不变。WebSocket 轮次跳过内容采集，不入采集队列；记录带 `websocket: true`，
+详情的 capture、headers、body 状态均为 `unsupported`，原因是 `websocket`，不返回请求头或正文，
+且与采集模式无关。
 
 ## 认证、模型授权、准入与记账不是同一件事
 
@@ -43,11 +51,13 @@ CPA 原生凭据保留原生行为；Observer 只管理自己认证且明确支�
 
 ## 宿主边界与验证
 
-SDK 锁定 `CLIProxyAPI/v8 v8.0.47`，最低宿主仍为 CPA v8.0.30 / 插件 schema 6。
+SDK 锁定 `CLIProxyAPI/v8 v8.1.4`，最低宿主仍为 CPA v8.0.30 / 插件 schema 6。
 保留 schema 6 注册和现有能力，不启用新版正文省略或正文修改能力。
 Alpha Search、Live/Realtime 等直接转发链没有完整的 Observer 执行授权和会话用量钩子；
 本次不为 Observer Key 开放这些接口，也不宣称其具有 Observer 实时计费或额度控制。
-CPA 原生请求保持原有语义，不需要为认证共存改造宿主。
+CPA 原生请求保持原有语义，不需要为认证共存改造宿主。Observer 的 HTTP 额度拒绝仍为 429，
+错误 `type` 和 `code` 均为 `insufficient_quota`；其他 HTTP 拒绝语义不变。WebSocket 额度仍按轮检查：
+CPA v8.1.4 会先发 status 429 的 error 帧再断开，v8.0.30 则直接断开；客户端帧表现依宿主版本而异。
 
 `native_scope_test.go` 对比启用 / 停用插件的原生生成、计数、目录与管理行为，
 核对发往假上游的正文和请求头一致，且没有 Observer 账目。

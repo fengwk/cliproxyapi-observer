@@ -403,6 +403,27 @@ func (m *Manager) authenticate(raw []byte) ([]byte, error) {
 func denied(status int) pluginapi.RequestInterceptResponse {
 	return pluginapi.RequestInterceptResponse{Terminate: true, StatusCode: status, ResponseBody: []byte(`{"error":{"code":"admission_denied","message":"request not admitted"}}`)}
 }
+
+func deniedFor(e error) pluginapi.RequestInterceptResponse {
+	if errors.Is(e, engine.ErrQuota) {
+		return pluginapi.RequestInterceptResponse{Terminate: true, StatusCode: 429, ResponseBody: []byte(`{"error":{"message":"Observer key quota exceeded","type":"insufficient_quota","code":"insufficient_quota"}}`)}
+	}
+	return denied(denialStatus(e))
+}
+
+func websocketUpgrade(headers http.Header) bool {
+	containsToken := func(name, want string) bool {
+		for _, value := range headers.Values(name) {
+			for _, token := range strings.Split(value, ",") {
+				if strings.EqualFold(strings.TrimSpace(token), want) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return containsToken("Upgrade", "websocket") && containsToken("Connection", "upgrade")
+}
 func (m *Manager) before(raw []byte) (out []byte, err error) {
 	// Fail closed only after ownership is proven. A panic while classifying
 	// unknown/native traffic must not reject that traffic globally.
@@ -472,26 +493,29 @@ func (m *Manager) before(raw []byte) (out []byte, err error) {
 	e := m.store.Authorize(id, model)
 	if operation == operationCount {
 		if e != nil {
-			return okEnvelope(denied(denialStatus(e)))
+			return okEnvelope(deniedFor(e))
 		}
 		return okEnvelope(pluginapi.RequestInterceptResponse{})
 	}
 	// The exact supported operation, not a generic Generate flag, owns
 	// admission. Count helpers were returned above. A misleading false flag on
 	// a real generation route must never bypass quotas or concurrency.
+	websocket := websocketUpgrade(r.Headers)
 	if e == nil {
 		if r.RequestID == "" {
 			return okEnvelope(denied(400))
 		}
-		e = m.store.AdmitWithBody(engine.Admission{RequestID: r.RequestID, TraceID: r.TraceID, KeyID: id, Model: model, At: m.now()}, r.Body)
+		e = m.store.AdmitWithBody(engine.Admission{RequestID: r.RequestID, TraceID: r.TraceID, KeyID: id, Model: model, At: m.now(), Websocket: websocket}, r.Body)
 		if e == nil {
 			m.admitted.Store(r.RequestID, id)
 		}
 	}
 	if e != nil {
-		return okEnvelope(denied(denialStatus(e)))
+		return okEnvelope(deniedFor(e))
 	}
-	m.store.Capture(engine.CaptureInput{RequestID: r.RequestID, TraceID: r.TraceID, KeyID: id, Headers: r.Headers, Body: r.Body, At: m.now()})
+	if !websocket {
+		m.store.Capture(engine.CaptureInput{RequestID: r.RequestID, TraceID: r.TraceID, KeyID: id, Headers: r.Headers, Body: r.Body, At: m.now()})
+	}
 	return okEnvelope(pluginapi.RequestInterceptResponse{})
 }
 

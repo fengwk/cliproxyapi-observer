@@ -57,6 +57,7 @@ type recordView struct {
 	CostMicroUSD        int64      `json:"cost_micro_usd"`
 	Failed              bool       `json:"failed"`
 	Stream              bool       `json:"stream"`
+	Websocket           bool       `json:"websocket"`
 	Tokens              tokensView `json:"tokens"`
 }
 type requestPage struct {

@@ -40,6 +40,9 @@ func operationFor(method, path string) requestOperation {
 			return operationCount
 		}
 	case http.MethodGet:
+		if path == "/v1/responses" {
+			return operationGeneration
+		}
 		if directoryPath(path) {
 			return operationDirectory
 		}

@@ -36,6 +36,7 @@ func TestAdmissionConditionAssociationAndKeyIsolation(t *testing.T) {
 	}
 }
 
+// Two HTTP admissions sharing a trace must stay ambiguous rather than borrowing either body.
 func TestAdmissionConditionCollisionIsUnknown(t *testing.T) {
 	s, now, p := fixture(t)
 	p.snapshot = map[string]bool{"fingerprint": true}
@@ -53,6 +54,67 @@ func TestAdmissionConditionCollisionIsUnknown(t *testing.T) {
 	must(t, s.RecordUsage(u))
 	if p.facts != nil {
 		t.Fatalf("ambiguous correlation guessed facts: %v", p.facts)
+	}
+}
+
+// Distinct snapshots on one trace and reverse delivery order distinguish round-time matching from last-write wins.
+func TestWebsocketAdmissionConditionsByRound(t *testing.T) {
+	s, now, p := fixture(t)
+	k, _ := key(t, s, KeySpec{Enabled: true})
+	first := *now
+	second := first.Add(time.Second)
+	a := Admission{RequestID: "round-1", TraceID: "trace", KeyID: k.ID, Model: "gpt-exact", At: first, Websocket: true}
+	p.snapshot = map[string]bool{"speed": true}
+	must(t, s.AdmitWithBody(a, nil))
+	must(t, s.Complete(a.RequestID, *now))
+
+	*now = second
+	a.RequestID, a.At = "round-2", second
+	p.snapshot = map[string]bool{"speed": false}
+	must(t, s.AdmitWithBody(a, nil))
+	must(t, s.Complete(a.RequestID, *now))
+	for _, round := range []struct {
+		id   string
+		at   time.Time
+		want bool
+	}{
+		{"usage-2", second, false},
+		{"usage-1", first.Add(time.Millisecond), true},
+	} {
+		must(t, s.RecordUsage(event(k, round.id, round.at)))
+		if got, ok := p.facts["speed"]; !ok || got != round.want {
+			t.Fatalf("%s got facts %v, want speed=%v", round.id, p.facts, round.want)
+		}
+		d, err := s.Detail(round.id)
+		must(t, err)
+		if !d.Record.Websocket {
+			t.Fatalf("%s not marked as websocket", round.id)
+		}
+	}
+	must(t, s.RecordUsage(event(k, "before-first", first.Add(-time.Millisecond))))
+	if p.facts != nil {
+		t.Fatalf("usage predating the trace borrowed round facts: %v", p.facts)
+	}
+}
+
+// Mixing transports in either order must discard pricing facts without losing the WebSocket marker.
+func TestWebsocketMixedAdmissionIsAmbiguous(t *testing.T) {
+	for _, wsFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("websocket_first=%t", wsFirst), func(t *testing.T) {
+			s, now, p := fixture(t)
+			k, _ := key(t, s, KeySpec{Enabled: true})
+			p.snapshot = map[string]bool{"speed": true}
+			a := Admission{RequestID: "first", TraceID: "trace", KeyID: k.ID, Model: "gpt-exact", At: *now, Websocket: wsFirst}
+			must(t, s.AdmitWithBody(a, nil))
+			a.RequestID, a.Websocket = "second", !wsFirst
+			must(t, s.AdmitWithBody(a, nil))
+			must(t, s.RecordUsage(event(k, "usage", *now)))
+			d, err := s.Detail("usage")
+			must(t, err)
+			if p.facts != nil || !d.Record.Websocket {
+				t.Fatalf("mixed trace has facts %v, websocket=%v", p.facts, d.Record.Websocket)
+			}
+		})
 	}
 }
 

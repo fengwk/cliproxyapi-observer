@@ -980,6 +980,10 @@ func (s *Store) Detail(id string) (Detail, error) {
 		if d.Record.Time.Before(cut) {
 			return ErrNotFound
 		}
+		if d.Record.Websocket {
+			d.CaptureStatus, d.HeadersStatus, d.BodyStatus, d.CaptureReason = captureStatusUnsupported, captureStatusUnsupported, captureStatusUnsupported, captureReasonWebsocket
+			return nil
+		}
 		recordMode := stored.CaptureMode
 		if recordMode == "" {
 			if stored.CaptureEnabled {

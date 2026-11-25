@@ -198,8 +198,21 @@ func TestQuotaWindowsResetAndModelAuthorization(t *testing.T) {
 				return len(keys) == 1 && keys[0].Used == (limitsView{15, 15, 15, 15})
 			})
 			calls := h.mock.callCount()
-			if status, _ := h.infer(t, created.Secret, false); status != 429 {
+			status, body := h.infer(t, created.Secret, false)
+			if status != http.StatusTooManyRequests {
 				t.Fatalf("quota status %d want 429", status)
+			}
+			var quotaError struct {
+				Error struct {
+					Type string `json:"type"`
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(body, &quotaError); err != nil {
+				t.Fatalf("quota error JSON: %v (%s)", err, truncate(body, 300))
+			}
+			if quotaError.Error.Type != "insufficient_quota" || quotaError.Error.Code != "insufficient_quota" {
+				t.Fatalf("quota error type/code = %q/%q, want insufficient_quota", quotaError.Error.Type, quotaError.Error.Code)
 			}
 			if h.mock.callCount() != calls {
 				t.Fatal("exhausted quota reached upstream")
