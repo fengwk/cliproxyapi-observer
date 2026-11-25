@@ -5,7 +5,7 @@
 
 CLIProxyAPI（CPA）独立原生插件，稳定 ID `cliproxyapi-observer`。提供**专属客户端 Key
 认证、美元额度、可解释用量成本记账与请求日志**，不修改 CPA 核心、请求正文/头、上游选择、
-模型路由、重试或会话。最低 CPA **v8.0.30 / 插件 schema 6**，SDK 锁定 v8.0.58；
+模型路由、重试或会话。最低 CPA **v8.0.30 / 插件 schema 6**，SDK 锁定 v8.1.4；
 更高 v8 稳定版由 CI 验证，不承诺未验证版本或 v9 兼容。
 
 **当前使用 schema3 和 `observer_features=4`，保存客户端密钥明文。**
@@ -278,7 +278,7 @@ make race                       # 全量 Go race
 make load                       # 1万/10万 gzip 元数据及接近内容预算负载验收
 CHROME_BIN=/usr/bin/google-chrome-stable make browser
 # 可指定 BROWSER_REPORT_DIR 保存 report.json / summary.txt / screenshots
-bash scripts/build-cpa-host.sh v8.0.58 /absolute/temp/cli-proxy-api
+bash scripts/build-cpa-host.sh v8.1.4 /absolute/temp/cli-proxy-api
 CPA_BINARY=/absolute/path/to/cli-proxy-api make integration
 # 原生宿主浏览器验收；官方 Management Center v1.26.5 shell 需从固定地址下载并核对
 # SHA-256 57558cd023475674634a114824b014d3e5ac161f6f3791e3d86b6adab962a700

@@ -88,6 +88,8 @@ func TestAccountNamesNativeMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(h.Stop)
+	// CPA v8.1+ starts serving before auth files finish registering models.
+	h.waitForLog(t, "full client load complete", 20*time.Second)
 
 	status, _, body, err := h.rawRequestWithHeaders(http.MethodGet, "/v0/management/auth-files", nil,
 		map[string]string{"Authorization": "Bearer " + mgmtKey})
