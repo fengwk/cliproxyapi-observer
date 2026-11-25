@@ -384,14 +384,18 @@ export function RequestsDetailModal({
                 ) : (
                   <EmptyState
                     title={
-                      rawHeadersStatus === 'disabled'
+                      detail.capture_reason === 'websocket'
+                        ? 'WebSocket 请求不支持采集'
+                        : rawHeadersStatus === 'disabled'
                         ? '采集未开启 (默认)'
                         : rawHeadersStatus === 'expired'
                         ? '请求头已过期已清理'
                         : '无可用请求头'
                     }
                     description={
-                      rawHeadersStatus === 'disabled'
+                      detail.capture_reason === 'websocket'
+                        ? 'WebSocket 连接的请求头和正文都不会采集；用量和费用照常记录。'
+                        : rawHeadersStatus === 'disabled'
                         ? '插件默认不保存请求内容以保护隐私。可在“设置”中配置采集模式为“安全请求头”或“安全请求头与 JSON 正文”。'
                         : `状态: ${headersStatusInfo.label}`
                     }
@@ -455,7 +459,9 @@ export function RequestsDetailModal({
                 ) : (
                   <EmptyState
                     title={
-                      rawBodyStatus === 'disabled'
+                      detail.capture_reason === 'websocket'
+                        ? 'WebSocket 请求不支持采集'
+                        : rawBodyStatus === 'disabled'
                         ? '无可用正文'
                         : rawBodyStatus === 'too_large' || rawBodyStatus === 'truncated'
                         ? '正文过大未保存'
@@ -466,7 +472,9 @@ export function RequestsDetailModal({
                         : '无可用正文'
                     }
                     description={
-                      rawBodyStatus === 'disabled'
+                      detail.capture_reason === 'websocket'
+                        ? 'WebSocket 连接的请求头和正文都不会采集；用量和费用照常记录。'
+                        : rawBodyStatus === 'disabled'
                         ? '采集未开启 (默认)。插件默认不保存请求正文以保护隐私。可在“设置”中配置采集模式为“安全请求头与 JSON 正文”。'
                         : rawBodyStatus === 'too_large' || rawBodyStatus === 'truncated'
                         ? '请求正文大小超过单条正文大小上限，已整份跳过以防止截断泄密。'

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { accountDisplay, resolveKeyDisplay, captureReasonLabel, accountingQualityLabel, formatPriceSource } from './RequestsHelpers';
+import { accountDisplay, resolveKeyDisplay, captureReasonLabel, accountingQualityLabel, formatPriceSource, CAPTURE_STATUS_MAP, CAPTURE_STATUS_LABELS } from './RequestsHelpers';
 import { RequestsDetailModal } from './RequestsDetailModal';
 import { RequestsTable } from './RequestsTable';
 import type { Detail, Key, RequestRecord } from '../lib/types';
@@ -26,11 +26,15 @@ describe('friendly identities', () => {
   });
 
   // Unknown machine codes must not be passed through as user-facing labels.
+  // Also verifies websocket capture reason and generic unsupported status copy.
   it('translates status codes with explicit unknown fallbacks', () => {
     expect(accountingQualityLabel('complete')).toBe('完整');
     expect(accountingQualityLabel('future-code')).toBe('未知记账质量');
     expect(captureReasonLabel('trace_collision')).toBe('追踪关联冲突');
+    expect(captureReasonLabel('websocket')).toBe('WebSocket 请求不支持采集');
     expect(captureReasonLabel('future-code')).toBe('未知采集原因');
+    expect(CAPTURE_STATUS_MAP.unsupported).toEqual({ label: '不支持采集', tone: 'warning' });
+    expect(CAPTURE_STATUS_LABELS.unsupported).toBe('不支持采集');
     expect(formatPriceSource('future-code').label).toBe('未知定价来源');
   });
 

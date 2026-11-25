@@ -985,6 +985,105 @@ describe('RequestsPage and RequestsHelpers', () => {
 
   /**
    * Why covered:
+   * Verifies that WebSocket records render generic '不支持采集' status and
+   * WebSocket-specific reason/empty-state copy in both Headers and Body tabs,
+   * while non-WebSocket unsupported_body records still show the JSON format notice.
+   */
+  it('capture states: renders WebSocket unsupported copy separately from unsupported_body', async () => {
+    const baseRecord = {
+      trace_id: 'trace-ws',
+      key_id: 'key-abc',
+      time: '2026-10-20T00:00:00Z',
+      model: 'gpt-5-codex',
+      provider: 'openai',
+      auth_index: 'default',
+      failed: false,
+      status_code: 200,
+      stream: true,
+      latency_ms: 120,
+      ttft_ms: 45,
+      tokens: { input: 100, output: 50, cache_read: 0, cache_write: 0, reasoning: 0, total: 150 },
+      cost_micro_usd: 5000,
+      price_source: 'auto',
+      accounting_quality: 'complete',
+    };
+
+    const api = createMockApiClient({
+      request: vi.fn().mockImplementation(async (path: string) => {
+        if (path.startsWith('/requests/detail?id=req-ws')) {
+          return {
+            record: { ...baseRecord, id: 'req-ws' },
+            headers: {},
+            body: null,
+            capture_status: 'unsupported',
+            headers_status: 'unsupported',
+            body_status: 'unsupported',
+            capture_reason: 'websocket',
+          } satisfies Detail;
+        }
+        if (path.startsWith('/requests/detail?id=req-nonjson')) {
+          return {
+            record: { ...baseRecord, id: 'req-nonjson', stream: false },
+            headers: { 'content-type': ['text/plain'] },
+            body: null,
+            capture_status: 'unsupported',
+            headers_status: 'available',
+            body_status: 'unsupported',
+            capture_reason: 'unsupported_body',
+          } satisfies Detail;
+        }
+        if (path.startsWith('/requests/view')) {
+          const sample = createSampleRequestView();
+          sample.records = [
+            { ...baseRecord, id: 'req-ws' },
+            { ...baseRecord, id: 'req-nonjson', stream: false },
+          ];
+          return sample;
+        }
+        if (path.startsWith('/requests/facets')) return { items: [] };
+        if (path.startsWith('/keys')) return { items: [] };
+        return {};
+      }),
+    });
+
+    render(<RequestsPage api={api} refreshInterval={0} onDirtyChange={vi.fn()} />);
+
+    // 1. Open WebSocket request detail
+    fireEvent.click(within(await screen.findByTestId('record-row-req-ws')).getByRole('button', { name: '查看请求详情' }));
+    await screen.findByRole('heading', { name: '请求详情' });
+
+    // Headers tab shows unsupported badge and WebSocket reason/empty state
+    fireEvent.click(screen.getByRole('tab', { name: '请求头' }));
+    const headersPane = screen.getByTestId('detail-tab-headers');
+    expect(within(headersPane).getByText('不支持采集')).toBeInTheDocument();
+    expect(within(headersPane).getAllByText('WebSocket 请求不支持采集')).toHaveLength(2);
+    expect(within(headersPane).getByText('WebSocket 连接的请求头和正文都不会采集；用量和费用照常记录。')).toBeInTheDocument();
+    expect(within(headersPane).queryByText('格式不支持未保存')).not.toBeInTheDocument();
+
+    // Body tab shows unsupported badge and WebSocket reason/empty state (not JSON format error)
+    fireEvent.click(screen.getByRole('tab', { name: '请求体 (JSON)' }));
+    const bodyPane = screen.getByTestId('detail-tab-body');
+    expect(within(bodyPane).getByText('不支持采集')).toBeInTheDocument();
+    expect(within(bodyPane).getAllByText('WebSocket 请求不支持采集')).toHaveLength(2);
+    expect(within(bodyPane).getByText('WebSocket 连接的请求头和正文都不会采集；用量和费用照常记录。')).toBeInTheDocument();
+    expect(within(bodyPane).queryByText('格式不支持未保存')).not.toBeInTheDocument();
+    expect(within(bodyPane).queryByText('当前仅支持有效的 JSON 格式入站正文。')).not.toBeInTheDocument();
+
+    // Close modal and open non-JSON HTTP request detail
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+    fireEvent.click(within(screen.getByTestId('record-row-req-nonjson')).getByRole('button', { name: '查看请求详情' }));
+    await screen.findByRole('heading', { name: '请求详情' });
+
+    fireEvent.click(screen.getByRole('tab', { name: '请求体 (JSON)' }));
+    const nonJsonBodyPane = screen.getByTestId('detail-tab-body');
+    expect(within(nonJsonBodyPane).getByText('不支持采集')).toBeInTheDocument();
+    expect(within(nonJsonBodyPane).getByText('请求体格式不支持')).toBeInTheDocument();
+    expect(within(nonJsonBodyPane).getByText('格式不支持未保存')).toBeInTheDocument();
+    expect(within(nonJsonBodyPane).getByText('当前仅支持有效的 JSON 格式入站正文。')).toBeInTheDocument();
+  });
+
+  /**
+   * Why covered:
    * Proves 5 views tabs switching: switching from '请求明细' to '模型分组'
    * queries GET /requests/view?view=model and displays aggregated group columns.
    */
