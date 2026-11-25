@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -49,7 +50,9 @@ func websocketSupported(t *testing.T, h *harness) bool {
 
 func assertWebsocketHandshakeUnauthorized(t *testing.T, h *harness, secret string) {
 	t.Helper()
-	request, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/responses", h.baseURL), nil)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, h.baseURL+"/v1/responses", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,8 +78,9 @@ func websocketDial(t *testing.T, h *harness, path, secret string) (*websocket.Co
 		t.Fatal(err)
 	}
 	cfg.Header = http.Header{"Authorization": {"Bearer " + secret}}
-	cfg.Dialer = &net.Dialer{Timeout: 5 * time.Second}
-	return websocket.DialConfig(cfg)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	return cfg.DialContext(ctx)
 }
 
 func websocketCreatePayload() string {
@@ -287,7 +291,7 @@ func TestObserverResponsesWebsocketQuotaAndUnsupportedRoute(t *testing.T) {
 		return len(keys) == 1 && keys[0].Used.Total >= 15 && keys[0].Active == 0 && len(h.page(t, "page_size=100").Items) == 1
 	})
 	calls := h.mock.callCount()
-	if err := websocket.Message.Send(conn, `{"type":"response.create","model":"observer-mock-model","input":[{"role":"user","content":[{"type":"input_text","text":"hello-observer"}]}]}`); err != nil {
+	if err := websocket.Message.Send(conn, websocketCreatePayload()); err != nil {
 		t.Fatalf("send quota-rejected turn: %v", err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))

@@ -369,7 +369,7 @@ func (m *Manager) authenticate(raw []byte) ([]byte, error) {
 	}
 	// The Responses GET route is exclusively a supported host WebSocket
 	// handshake. Ordinary GETs and handshakes from older hosts remain native.
-	handshake := r.Method == http.MethodGet && r.Path == "/v1/responses"
+	handshake := r.Method == http.MethodGet && r.Path == responsesPath
 	if handshake && !websocketUpgrade(r.Headers) {
 		return okEnvelope(pluginapi.FrontendAuthResponse{})
 	}
@@ -420,6 +420,8 @@ func deniedFor(e error) pluginapi.RequestInterceptResponse {
 	return denied(denialStatus(e))
 }
 
+// CPA v8.0.44 was the first schema 7 release. Schema 6 cannot distinguish
+// hosts with per-turn reauthentication from older handshake-only hosts.
 const responsesWebsocketSchemaVersion uint32 = 7
 
 func websocketUpgrade(headers http.Header) bool {
@@ -512,12 +514,12 @@ func (m *Manager) before(raw []byte) (out []byte, err error) {
 	// belongs to a WebSocket execution. Client-supplied Upgrade headers alone
 	// must not suppress ordinary HTTP capture.
 	executionSession, _ := r.Metadata[coreexecutor.ExecutionSessionMetadataKey].(string)
-	websocket := path == "/v1/responses" && strings.TrimSpace(executionSession) != ""
+	websocket := path == responsesPath && strings.TrimSpace(executionSession) != ""
 	if websocket && m.hostSchemaVersion < responsesWebsocketSchemaVersion {
 		return okEnvelope(denied(400))
 	}
-	// CPA reuses the handshake lifecycle ID for Codex response.create/append/
-	// steer follow-ups. They cannot receive independent Observer admission.
+	// Codex steering follow-ups have a selected credential and share the
+	// initial execution's lifecycle ID. They cannot be admitted independently.
 	if _, selected := r.Metadata[coreexecutor.SelectedAuthMetadataKey]; websocket && selected {
 		return okEnvelope(pluginapi.RequestInterceptResponse{Terminate: true, StatusCode: http.StatusBadRequest, ResponseBody: []byte(`{"error":{"code":"unsupported_websocket_followup","message":"Codex response steering is not supported; use sequential Responses requests and disable response steering in the host when needed"}}`)})
 	}

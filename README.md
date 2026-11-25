@@ -101,14 +101,10 @@ UI 的“禁用”可重新启用；`DELETE /keys` 仍是撤销，销毁哈希�
 不自动导入 Observer，也不进入 Observer 账本。Observer Key 仅用于明确支持的生成、
 计数和模型目录接口；自有生成保留精确模型授权、额度、并发和记账。
 目录/count 不占额度、并发槽或内容采集；自有 count 仍检查 Key 的模型授权。
-Observer Key 也支持 Responses WebSocket（仅精确 `GET /v1/responses` 握手），前提是 CPA
-宿主报告 schema version ≥7（v8.0.44+）；较旧宿主仍可使用 HTTP，但不支持此 WebSocket 功能。
-每轮按现有生成准入检查模型权限、额度和并发并记账。WebSocket 轮次不采集请求内容，记录标记为
-`websocket: true`；带 `requestBody` 条件的手工价格按轮次事实匹配。相关条件事实仅有界保存在内存，
-缺失（如重启、裁剪或过期）时按既有 `missing_facts` 规则处理，不猜测价格。
-首版不支持在同一执行中通过上游 Codex response-steering 的后续 `response.create`、`append` 或
-`steer` 帧追加或改写业务输入；此类 Observer 请求明确返回 HTTP 400，提示使用顺序 Responses 请求，
-并在需要时于宿主关闭 response-steering。
+Observer Key 支持 `GET /v1/responses` 的 WebSocket 握手。每轮沿用现有模型权限、额度、并发与记账规则。
+带 `requestBody` 条件的手工价格按轮匹配；只在内存中保留条件结果，缺失时按既有 `missing_facts` 规则处理。
+若上游是 Codex WebSocket，请保持 CPA `upstream.codex.response-steering` 关闭（默认）。Observer 不支持
+在同一次执行中用后续帧追加或改写输入；这类帧会收到 `status: 400` 的 WebSocket 错误帧。
 图片、音频、视频、Alpha Search、Live/Realtime、Responses compact、Interactions 等其他入口
 保留 CPA 原逻辑，但不会因此向 Observer Key 开放；“全部模型”也不等于“全部接口”。
 详见 [认证与模型权限](docs/model-policy.md)。
@@ -136,9 +132,9 @@ UI 以美元显示。输入 JSON 必须为非负安全整数，最大 9,000,000,
 使用检查溢出的整数运算，每次执行各计费桶相加后只向上取整一次，不做浮点账单。
 已准入的并发请求可能使额度超出；没有预扣或推测性预留。每个不同执行（包括重试）
 独立计费，重放不重复扣款；去重窗口 7 天，过旧且未知事件不入账，不影响后续请求。
-额度拒绝的 HTTP 响应仍为 429，错误 `type` 和 `code` 均为 `insufficient_quota`；其他 HTTP
-拒绝语义不变。支持 WebSocket 的宿主按轮检查额度；CPA v8.1.4 会先向客户端发送 status
-429 的 error 帧再断开。较旧宿主不支持 Observer WebSocket 握手。
+Observer Key 额度耗尽时，HTTP 返回 429，错误 `type` 和 `code` 均为 `insufficient_quota`。
+在 CPA v8.1.4 上，WebSocket 返回 `status: 429` 的错误帧后断开。被拒的轮次不会转发给上游。
+上游账号的额度、冷却、重试和换号仍由 CPA 处理。
 周期额度按**入库时间**计入，历史记录日期按请求时间归属。
 count-tokens 不占额度或并发槽，但仍检查启用、有效期与模型权限。
 
@@ -213,9 +209,8 @@ Token、Secret/Password/Credential/Private Key 及认证相关头外，其余头
 淘汰或已清空等状态。采集丢弃按原因分组，并声明本进程计数起点；
 诊断内容丢弃与用量入账相互独立，不能从诊断丢弃数量推断账单是否缺失。
 
-WebSocket 轮次不进入内容采集队列，即使采集模式开启也不保存请求头或正文；对应记录详情的
-采集、头、体状态均为 `unsupported`，原因是 `websocket`。JSON 详情仍包含空值标记：
-`headers: {}`、`body: null`，表示没有捕获内容，并非省略这些字段。
+即使开启采集，Observer 也不保存 WebSocket 请求头或正文。请求详情显示「WebSocket 请求不支持采集」，
+用量和费用照常记录。
 字段名脱敏不能识别普通 prompt/代码中的所有秘密，请保护整个数据目录、备份与磁盘。
 清理不等于安全擦除；物理压缩可回收文件空间，需要同目录临时副本和额外磁盘空间。
 过期清理只删已到期内容；清空全部内容需明确确认，二者均不改变费用/额度。

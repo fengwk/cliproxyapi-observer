@@ -9,6 +9,7 @@ import (
 // exact action (generateContent vs countTokens) is not recoverable there. The
 // authenticated operation is authoritative for this template.
 const geminiActionPathTemplate = "/v1beta/models/*action"
+const responsesPath = "/v1/responses"
 
 // requestOperation is derived from the host's original HTTP method and path,
 // never from body fields or the Generate usage flag (count_tokens also sets it).
@@ -21,14 +22,14 @@ const (
 	operationDirectory
 )
 
-// operationFor recognizes only the v8.0.30 routes whose model execution and
-// accounting semantics Observer actually implements. Everything else stays
-// unhandled so the host's own auth and routing remain authoritative.
+// operationFor recognizes only routes with Observer authorization and accounting
+// semantics. Responses upgrades additionally require a supported host and a valid
+// handshake at the authentication boundary.
 func operationFor(method, path string) requestOperation {
 	switch method {
 	case http.MethodPost:
 		switch path {
-		case "/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/responses", "/backend-api/codex/responses":
+		case "/v1/chat/completions", "/v1/completions", "/v1/messages", responsesPath, "/backend-api/codex/responses":
 			return operationGeneration
 		case "/v1/messages/count_tokens":
 			return operationCount
@@ -40,7 +41,7 @@ func operationFor(method, path string) requestOperation {
 			return operationCount
 		}
 	case http.MethodGet:
-		if path == "/v1/responses" {
+		if path == responsesPath {
 			return operationGeneration
 		}
 		if directoryPath(path) {
