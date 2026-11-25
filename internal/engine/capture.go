@@ -38,6 +38,7 @@ type capture struct {
 type correlation struct {
 	RequestID string
 	At        time.Time
+	Websocket bool `json:",omitempty"`
 }
 
 // captureState survives content eviction/purge without retaining headers or
@@ -157,24 +158,35 @@ func migrateCaptureIndex(tx *bolt.Tx, retention int) error {
 // Collisions remain fenced for a complete retention interval after last use.
 // A different admission sharing the trace immediately invalidates the earlier
 // payload so content can never leak across requests.
-func correlate(tx *bolt.Tx, key, trace, request string, at time.Time) error {
-	if trace == "" || request == "" {
+func correlate(tx *bolt.Tx, key, trace string, c correlation) error {
+	if trace == "" || c.RequestID == "" {
 		return nil
 	}
 	b := tx.Bucket([]byte("correlations"))
 	id := captureID(key, trace)
-	c := correlation{RequestID: request, At: at}
-	if old := b.Get([]byte(id)); old != nil {
-		var prior correlation
+	old := b.Get([]byte(id))
+	var prior correlation
+	if old != nil {
 		if e := decode(old, &prior); e != nil {
 			return e
 		}
-		if prior.RequestID != request {
-			if e := removeCaptureContent(tx, id, captureStatusMissing, captureReasonCorrelation); e != nil {
-				return e
-			}
-			c.RequestID = ""
+		if prior.Websocket {
+			prior.At = c.At
+			return put(b, id, prior)
 		}
+	}
+	if c.Websocket {
+		// A WebSocket trace cannot hold capture content, even if it was
+		// previously associated with an HTTP request.
+		if e := removeCaptureContent(tx, id, captureStatusUnsupported, captureReasonWebsocket); e != nil {
+			return e
+		}
+		c.RequestID = ""
+	} else if old != nil && prior.RequestID != c.RequestID {
+		if e := removeCaptureContent(tx, id, captureStatusMissing, captureReasonCorrelation); e != nil {
+			return e
+		}
+		c.RequestID = ""
 	}
 	return put(b, id, c)
 }
@@ -483,14 +495,14 @@ func (s *Store) writeCapture(v CaptureInput, c capture) {
 		if e := get(tx.Bucket([]byte("keys")), v.KeyID, &key); e != nil {
 			return e
 		}
-		if e := correlate(tx, v.KeyID, v.TraceID, v.RequestID, now); e != nil {
+		if e := correlate(tx, v.KeyID, v.TraceID, correlation{RequestID: v.RequestID, At: now}); e != nil {
 			return e
 		}
 		var correlation correlation
 		if e := get(tx.Bucket([]byte("correlations")), id, &correlation); e != nil {
 			return e
 		}
-		if correlation.RequestID == "" || correlation.RequestID != v.RequestID {
+		if correlation.Websocket || correlation.RequestID == "" || correlation.RequestID != v.RequestID {
 			return nil
 		}
 		b := tx.Bucket([]byte("captures"))

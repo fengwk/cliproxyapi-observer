@@ -445,17 +445,19 @@ func (m *Manager) serveHealth() pluginapi.ManagementResponse {
 	return m.withStore(func(store *engine.Store) pluginapi.ManagementResponse {
 		health := store.Health()
 		return jsonResponse(http.StatusOK, healthResponse{
-			Health:        health,
-			Version:       Version,
-			SchemaVersion: managementSchemaVersion,
+			Health:             health,
+			Version:            Version,
+			SchemaVersion:      managementSchemaVersion,
+			ResponsesWebsocket: m.hostSchemaVersion >= responsesWebsocketSchemaVersion,
 		})
 	})
 }
 
 type healthResponse struct {
 	engine.Health
-	Version       string `json:"version"`
-	SchemaVersion int    `json:"schema_version"`
+	Version            string `json:"version"`
+	SchemaVersion      int    `json:"schema_version"`
+	ResponsesWebsocket bool   `json:"responses_websocket"`
 }
 
 func (m *Manager) serveKeys(includeDeleted bool) pluginapi.ManagementResponse {

@@ -104,7 +104,6 @@ func (s *Store) RecordUsage(u pluginapi.UsageRecord) error {
 	// fingerprints come only from this Key+Trace admission.
 	s.pruneAdmissionFactsLocked()
 	fact := s.admissionFacts[admissionFactID(r.KeyID, r.TraceID)]
-	r.Websocket = fact.Websocket
 	q, e := s.pricer.QuoteWithFacts(r.Model, r.Provider, pricing.UsageFacts{
 		Tokens: r.Tokens, RequestedAt: r.Time, ServiceTier: r.ResponseServiceTier,
 		Conditions: fact.conditionsAt(r.Time),
@@ -200,12 +199,6 @@ func (s *Store) persistLocked(p usageTransaction) error {
 		if e := applyRollup(tx, "minutes", r, r.Time.UTC().Truncate(time.Minute)); e != nil {
 			return e
 		}
-		if e := put(tx.Bucket([]byte("records")), r.ID, recordData{Record: r, Quote: p.Quote, CaptureEnabled: p.CaptureEnabled, CaptureMode: p.CaptureMode, StatsVersion: statsVersion}); e != nil {
-			return e
-		}
-		if e := tx.Bucket([]byte("timeline")).Put([]byte(timeID(r)), []byte(r.ID)); e != nil {
-			return e
-		}
 		cb := tx.Bucket([]byte("correlations"))
 		cid := captureID(r.KeyID, r.TraceID)
 		if value := cb.Get([]byte(cid)); value != nil {
@@ -213,12 +206,19 @@ func (s *Store) persistLocked(p usageTransaction) error {
 			if e := decode(value, &c); e != nil {
 				return e
 			}
+			r.Websocket = c.Websocket
 			if p.At.After(c.At) {
 				c.At = p.At
 			}
 			if e := put(cb, cid, c); e != nil {
 				return e
 			}
+		}
+		if e := put(tx.Bucket([]byte("records")), r.ID, recordData{Record: r, Quote: p.Quote, CaptureEnabled: p.CaptureEnabled, CaptureMode: p.CaptureMode, StatsVersion: statsVersion}); e != nil {
+			return e
+		}
+		if e := tx.Bucket([]byte("timeline")).Put([]byte(timeID(r)), []byte(r.ID)); e != nil {
+			return e
 		}
 		return put(tx.Bucket([]byte("dedup")), r.ID, dedupEntry{Time: r.Time, KeyID: r.KeyID})
 	})

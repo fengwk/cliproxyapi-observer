@@ -85,6 +85,7 @@ type Manager struct {
 	assets             AssetFunc
 	now                func() time.Time
 	cfg                Config
+	hostSchemaVersion  uint32
 	configured, closed bool
 	cancel             context.CancelFunc
 	workers            sync.WaitGroup
@@ -158,6 +159,7 @@ func (m *Manager) HandleCall(method string, raw []byte) (out []byte, err error) 
 			return fail("immutable_database", 409)
 		}
 		if m.configured && c == m.cfg && (m.store != nil || !c.Enabled) {
+			m.hostSchemaVersion = r.SchemaVersion
 			return okEnvelope(registrationResponse())
 		}
 		if m.store != nil {
@@ -182,6 +184,7 @@ func (m *Manager) HandleCall(method string, raw []byte) (out []byte, err error) 
 			return fail("storage_unavailable", 503)
 		}
 		m.cfg = c
+		m.hostSchemaVersion = r.SchemaVersion
 		m.configured = true
 		return okEnvelope(registrationResponse())
 	case pluginabi.MethodPluginQuiesce, pluginabi.MethodPluginShutdown:
@@ -364,6 +367,12 @@ func (m *Manager) authenticate(raw []byte) ([]byte, error) {
 	if json.Unmarshal(raw, &r) != nil {
 		return okEnvelope(pluginapi.FrontendAuthResponse{})
 	}
+	// The Responses GET route is exclusively a supported host WebSocket
+	// handshake. Ordinary GETs and handshakes from older hosts remain native.
+	handshake := r.Method == http.MethodGet && r.Path == "/v1/responses"
+	if handshake && !websocketUpgrade(r.Headers) {
+		return okEnvelope(pluginapi.FrontendAuthResponse{})
+	}
 	// Unsupported operations are not handled at all, so native CPA Keys keep
 	// their existing authentication path. Never report global success.
 	operation := operationFor(r.Method, r.Path)
@@ -376,7 +385,7 @@ func (m *Manager) authenticate(raw []byte) ([]byte, error) {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if m.store == nil {
+	if m.store == nil || handshake && m.hostSchemaVersion < responsesWebsocketSchemaVersion {
 		return okEnvelope(pluginapi.FrontendAuthResponse{})
 	}
 	if m.consumeCatalog(r, secret) {
@@ -410,6 +419,8 @@ func deniedFor(e error) pluginapi.RequestInterceptResponse {
 	}
 	return denied(denialStatus(e))
 }
+
+const responsesWebsocketSchemaVersion uint32 = 7
 
 func websocketUpgrade(headers http.Header) bool {
 	containsToken := func(name, want string) bool {
@@ -497,10 +508,22 @@ func (m *Manager) before(raw []byte) (out []byte, err error) {
 		}
 		return okEnvelope(pluginapi.RequestInterceptResponse{})
 	}
+	// Only the host's execution-session metadata proves that this request
+	// belongs to a WebSocket execution. Client-supplied Upgrade headers alone
+	// must not suppress ordinary HTTP capture.
+	executionSession, _ := r.Metadata[coreexecutor.ExecutionSessionMetadataKey].(string)
+	websocket := path == "/v1/responses" && strings.TrimSpace(executionSession) != ""
+	if websocket && m.hostSchemaVersion < responsesWebsocketSchemaVersion {
+		return okEnvelope(denied(400))
+	}
+	// CPA reuses the handshake lifecycle ID for Codex response.create/append/
+	// steer follow-ups. They cannot receive independent Observer admission.
+	if _, selected := r.Metadata[coreexecutor.SelectedAuthMetadataKey]; websocket && selected {
+		return okEnvelope(pluginapi.RequestInterceptResponse{Terminate: true, StatusCode: http.StatusBadRequest, ResponseBody: []byte(`{"error":{"code":"unsupported_websocket_followup","message":"Codex response steering is not supported; use sequential Responses requests and disable response steering in the host when needed"}}`)})
+	}
 	// The exact supported operation, not a generic Generate flag, owns
 	// admission. Count helpers were returned above. A misleading false flag on
 	// a real generation route must never bypass quotas or concurrency.
-	websocket := websocketUpgrade(r.Headers)
 	if e == nil {
 		if r.RequestID == "" {
 			return okEnvelope(denied(400))

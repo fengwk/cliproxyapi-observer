@@ -137,6 +137,50 @@ func TestAdmissionConditionRetentionAndMissingNeverGates(t *testing.T) {
 	}
 }
 
+// Exhaust the shared budget with a multi-round trace plus HTTP facts; the
+// oldest whole trace must be evicted even when the entry count fits.
+func TestWebsocketRoundsCountTowardAdmissionFactCapacity(t *testing.T) {
+	s, now, _ := fixture(t)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.admissionFacts["ws"] = admissionFact{Websocket: true, At: now.Add(-time.Second), Rounds: make([]admissionRound, 2)}
+	for i := 0; i < maxAdmissionFacts-1; i++ {
+		s.admissionFacts[fmt.Sprintf("http-%d", i)] = admissionFact{RequestID: "a", At: *now}
+	}
+	s.pruneAdmissionFactsLocked()
+	if _, ok := s.admissionFacts["ws"]; ok || len(s.admissionFacts) != maxAdmissionFacts-1 {
+		t.Fatalf("global capacity did not count WS rounds: ws retained=%v entries=%d", ok, len(s.admissionFacts))
+	}
+}
+
+// Drop only in-memory pricing facts and run a pending capture write on the
+// same trace: usage must remain marked WebSocket without capturing or guessing conditions.
+func TestWebsocketMarkerSurvivesMissingAdmissionFacts(t *testing.T) {
+	s, now, p := fixture(t)
+	settings, err := s.Settings()
+	must(t, err)
+	settings.CaptureEnabled, settings.CaptureMode = true, CaptureModeHeadersAndBody
+	_, err = s.UpdateSettings(settings)
+	must(t, err)
+	k, _ := key(t, s, KeySpec{Enabled: true})
+	a := Admission{RequestID: "ws", TraceID: "trace", KeyID: k.ID, Model: "gpt-exact", At: *now, Websocket: true}
+	p.snapshot = map[string]bool{"speed": true}
+	must(t, s.AdmitWithBody(a, nil))
+	must(t, s.Complete(a.RequestID, *now))
+	s.mu.Lock()
+	delete(s.admissionFacts, admissionFactID(k.ID, a.TraceID))
+	v := CaptureInput{RequestID: "queued-http", TraceID: a.TraceID, KeyID: k.ID, Body: []byte(`{"input":"local fixture"}`), At: *now, mode: CaptureModeHeadersAndBody, generation: s.captureGeneration}
+	s.mu.Unlock()
+	c, _ := buildCapture(v)
+	s.writeCapture(v, c)
+	must(t, s.RecordUsage(event(k, "delayed-usage", *now)))
+	d, err := s.Detail("delayed-usage")
+	must(t, err)
+	if p.facts != nil || !d.Record.Websocket || d.CaptureStatus != captureStatusUnsupported || d.CaptureReason != captureReasonWebsocket || s.Health().CaptureBytes != 0 {
+		t.Fatalf("delayed usage had facts %v or invalid WS detail: %+v", p.facts, d)
+	}
+}
+
 func TestAdmissionFactCapacityIsBounded(t *testing.T) {
 	s, now, _ := fixture(t)
 	s.mu.Lock()

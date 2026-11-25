@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"testing"
 	"time"
 
@@ -21,6 +22,52 @@ func websocketHarness(t *testing.T) *harness {
 	return h
 }
 
+type websocketHealth struct {
+	ResponsesWebsocket bool `json:"responses_websocket"`
+}
+
+func websocketSupported(t *testing.T, h *harness) bool {
+	t.Helper()
+	var health websocketHealth
+	h.api(t, http.MethodGet, "/health", nil, http.StatusOK, &health)
+	if raw, configured := os.LookupEnv("CPA_EXPECT_RESPONSES_WEBSOCKET"); configured {
+		var want bool
+		switch raw {
+		case "true":
+			want = true
+		case "false":
+			want = false
+		default:
+			t.Fatalf("CPA_EXPECT_RESPONSES_WEBSOCKET must be exactly true or false, got %q", raw)
+		}
+		if health.ResponsesWebsocket != want {
+			t.Fatalf("CPA responses_websocket = %t, want %t (CPA_EXPECT_RESPONSES_WEBSOCKET=%s)", health.ResponsesWebsocket, want, raw)
+		}
+	}
+	return health.ResponsesWebsocket
+}
+
+func assertWebsocketHandshakeUnauthorized(t *testing.T, h *harness, secret string) {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/responses", h.baseURL), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+secret)
+	request.Header.Set("Connection", "Upgrade")
+	request.Header.Set("Upgrade", "websocket")
+	request.Header.Set("Sec-WebSocket-Version", "13")
+	request.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("unsupported-host websocket handshake request: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unsupported-host websocket handshake status = %d, want HTTP 401", response.StatusCode)
+	}
+}
+
 func websocketDial(t *testing.T, h *harness, path, secret string) (*websocket.Conn, error) {
 	t.Helper()
 	cfg, err := websocket.NewConfig(fmt.Sprintf("ws://127.0.0.1:%d%s", h.port, path), h.baseURL)
@@ -32,11 +79,14 @@ func websocketDial(t *testing.T, h *harness, path, secret string) (*websocket.Co
 	return websocket.DialConfig(cfg)
 }
 
+func websocketCreatePayload() string {
+	return fmt.Sprintf(`{"type":"response.create","model":%q,"speed":"fast","input":[{"role":"user","content":[{"type":"input_text","text":%q}]}]}`, modelName, upstreamPrompt)
+}
+
 func websocketTurn(t *testing.T, conn *websocket.Conn) {
 	t.Helper()
 	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	payload := fmt.Sprintf(`{"type":"response.create","model":%q,"speed":"fast","input":[{"role":"user","content":[{"type":"input_text","text":%q}]}]}`, modelName, upstreamPrompt)
-	if err := websocket.Message.Send(conn, payload); err != nil {
+	if err := websocket.Message.Send(conn, websocketCreatePayload()); err != nil {
 		t.Fatalf("send response.create: %v", err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -60,6 +110,70 @@ func websocketTurn(t *testing.T, conn *websocket.Conn) {
 	}
 }
 
+func TestObserverResponsesWebsocketReauthenticatesRotatedKey(t *testing.T) {
+	h := websocketHarness(t)
+	if !websocketSupported(t, h) {
+		t.Skip("host reports Responses WebSocket unsupported; legacy-host handshake denial is verified by the main websocket integration case")
+	}
+	key := h.createKey(t, validSpec())
+	conn, err := websocketDial(t, h, "/v1/responses", key.Secret)
+	if err != nil {
+		t.Fatalf("Observer Key websocket handshake: %v", err)
+	}
+	defer conn.Close()
+	websocketTurn(t, conn)
+	h.await(t, "first websocket usage is accounted before key rotation", func() bool {
+		keys, records := h.keys(t), h.page(t, "page_size=100&key_id="+url.QueryEscape(key.Key.ID)).Items
+		return len(keys) == 1 && keys[0].Active == 0 && len(records) == 1
+	})
+
+	callsBefore := h.mock.callCount()
+	var rotated keyMaterialCreated
+	nextSecret := "fake-rotated-responses-key-123456!"
+	h.api(t, http.MethodPost, "/keys/rotate?id="+url.QueryEscape(key.Key.ID), map[string]any{"secret": nextSecret}, http.StatusOK, &rotated)
+	if rotated.Secret != nextSecret || rotated.Key.Secret != nextSecret {
+		t.Fatalf("key rotation response does not contain the requested synthetic replacement")
+	}
+	if err := websocket.Message.Send(conn, websocketCreatePayload()); err != nil {
+		t.Fatalf("send turn with revoked websocket credential: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	gotUnauthorized := false
+	for {
+		var frame string
+		if err := websocket.Message.Receive(conn, &frame); err != nil {
+			break
+		}
+		var event struct {
+			Type   string `json:"type"`
+			Status int    `json:"status"`
+			Error  struct {
+				Status int `json:"status"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(frame), &event); err != nil {
+			t.Fatalf("decode reauthentication response %q: %v", frame, err)
+		}
+		if event.Type == "error" && (event.Status == http.StatusUnauthorized || event.Error.Status == http.StatusUnauthorized) {
+			gotUnauthorized = true
+			break
+		}
+		if event.Type == "response.completed" {
+			t.Fatalf("revoked websocket credential completed a response: %s", frame)
+		}
+	}
+	if !gotUnauthorized {
+		t.Fatal("next websocket turn after key rotation did not receive an error frame with HTTP status 401")
+	}
+	if got := h.mock.callCount(); got != callsBefore {
+		t.Errorf("reauthentication failure reached upstream: calls %d -> %d", callsBefore, got)
+	}
+	h.await(t, "revoked-key websocket turn adds no usage and releases admission", func() bool {
+		keys := h.keys(t)
+		return len(keys) == 1 && keys[0].Active == 0 && len(h.page(t, "page_size=100&key_id="+url.QueryEscape(key.Key.ID)).Items) == 1
+	})
+}
+
 func TestObserverResponsesWebsocketRounds(t *testing.T) {
 	for _, capture := range []bool{false, true} {
 		name := "capture_off"
@@ -68,6 +182,15 @@ func TestObserverResponsesWebsocketRounds(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			h := websocketHarness(t)
+			if !websocketSupported(t, h) {
+				key := h.createKey(t, validSpec())
+				before := h.mock.callCount()
+				assertWebsocketHandshakeUnauthorized(t, h, key.Secret)
+				if got := h.mock.callCount(); got != before {
+					t.Fatalf("unsupported-host handshake reached upstream: calls %d -> %d", before, got)
+				}
+				return
+			}
 			settings := acceptanceGetSettings(t, h)
 			if capture {
 				settings["capture_enabled"], settings["capture_mode"] = true, "headers_and_body"
@@ -137,6 +260,15 @@ func TestObserverResponsesWebsocketRounds(t *testing.T) {
 
 func TestObserverResponsesWebsocketQuotaAndUnsupportedRoute(t *testing.T) {
 	h := websocketHarness(t)
+	if !websocketSupported(t, h) {
+		key := h.createKey(t, validSpec())
+		before := h.mock.callCount()
+		assertWebsocketHandshakeUnauthorized(t, h, key.Secret)
+		if got := h.mock.callCount(); got != before {
+			t.Fatalf("unsupported-host handshake reached upstream: calls %d -> %d", before, got)
+		}
+		return
+	}
 	h.api(t, http.MethodPut, "/settings", func() map[string]any {
 		settings := acceptanceGetSettings(t, h)
 		settings["pricing"] = acceptancePricing{Prices: []acceptancePrice{acceptanceManual(upstreamModel, acceptanceProvider, 1_000_000)}}

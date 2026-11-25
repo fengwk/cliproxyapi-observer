@@ -136,12 +136,15 @@ func (fact admissionFact) conditionsAt(requestedAt time.Time) map[string]bool {
 
 func (s *Store) pruneAdmissionFactsLocked() {
 	cutoff := s.now().UTC().Add(-completedTTL)
+	total := 0
 	for id, fact := range s.admissionFacts {
 		if fact.At.Before(cutoff) {
 			delete(s.admissionFacts, id)
+			continue
 		}
+		total += max(1, len(fact.Rounds))
 	}
-	for len(s.admissionFacts) > maxAdmissionFacts {
+	for total > maxAdmissionFacts {
 		var oldest string
 		var at time.Time
 		for id, fact := range s.admissionFacts {
@@ -150,6 +153,7 @@ func (s *Store) pruneAdmissionFactsLocked() {
 				at = fact.At
 			}
 		}
+		total -= max(1, len(s.admissionFacts[oldest].Rounds))
 		delete(s.admissionFacts, oldest)
 	}
 }

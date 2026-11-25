@@ -25,12 +25,30 @@ Observer 调用进行认证与准入，Responses WebSocket 也只限精确路径
 没有原生凭据兜底时，不支持的 Observer 请求由宿主拒绝认证；在配置原生客户端 Key 的
 真实宿主中验证为 401，而不是放行后漏记账。CPA 对这些接口自身的支持状况不由插件决定。
 
-WebSocket 只支持 Responses 的 `GET /v1/responses` 握手，不扩大到其他 GET 路由或其他
-WebSocket 入口。每个轮次沿用生成准入；同一连接各轮使用相同 Trace，但有各自的请求记录。
-包含 `requestBody` 条件的手工价格按轮次请求帧的事实匹配，因此各轮分别定价；HTTP 同 Trace
-的歧义语义保持不变。WebSocket 轮次跳过内容采集，不入采集队列；记录带 `websocket: true`，
-详情的 capture、headers、body 状态均为 `unsupported`，原因是 `websocket`，不返回请求头或正文，
-且与采集模式无关。
+Responses WebSocket 仅支持精确 `GET /v1/responses` 握手，不扩大到其他 GET 路由或其他
+WebSocket 入口。能力门槛取自宿主 lifecycle 传入的 `schema_version`，不是插件注册声明：
+插件仍注册 schema 6，只有宿主 schema version ≥7 才启用 WebSocket（首个支持版本 CPA
+v8.0.44）。v8.0.30–v8.0.43 虽然同样报告 schema 6，仍只支持 HTTP；在这些旧宿主上，
+Observer WebSocket 握手不被认领，拒绝升级，不回退成放行。握手还必须是精确路径，并符合
+WebSocket Upgrade/Connection 头条件；执行阶段依据宿主可信的执行 session metadata 判断实际
+WebSocket 轮次，而不以客户端伪造的 Upgrade 头绕过 HTTP 采集。运维健康信息提供
+`responses_websocket` 布尔能力标记。
+
+每个独立轮次沿用原有模型授权、额度、并发和计费；同一连接各轮使用相同 Trace，但有各自的
+请求记录。包含 `requestBody` 条件的手工价格按轮次请求帧事实匹配，因此各轮分别定价；条件
+facts 仅有界保存在内存，重启、裁剪、过期或事实缺失时按既有 `missing_facts` 语义处理，不猜价；
+HTTP 同 Trace 的歧义语义保持不变。用量记录另依据持久化的 WebSocket 传输标记识别连接轮次，
+因此事实快照丢失不影响 WebSocket 记录的传输标记。WebSocket 轮次跳过内容采集，不入采集队列；
+记录带 `websocket: true`，详情的 capture、headers、body 状态均为 `unsupported`，原因是
+`websocket`，且与采集模式无关。详情 JSON 的空内容表示为 `headers: {}`、`body: null`，字段
+不会省略，也不包含采集内容。
+
+首版不支持上游 Codex response-steering 在同一执行中通过后续 `response.create`、`append` 或
+`steer` 帧加入/改写业务输入。宿主对这些 follow-up 使用原生命周期请求 ID 回调，无法形成独立准入；
+对已确定属于 Observer 的 steering follow-up 明确返回 HTTP 400，不重跑同一请求 ID 冒充新轮次，
+不会新增准入或采集。请改用顺序 Responses 请求，并在需要时于 CPA 宿主关闭 response-steering；
+这不要求上游改用 SSE。正常 CPA 自动重试、HTTP 语义及原生 Key 行为保持宿主原有处理。HTTP 请求单独
+附带伪造 Upgrade 头仍按 HTTP 处理，不会被误判为 WebSocket 轮次。
 
 ## 认证、模型授权、准入与记账不是同一件事
 
@@ -51,13 +69,19 @@ WebSocket 入口。每个轮次沿用生成准入；同一连接各轮使用相�
 
 ## 宿主边界与验证
 
-SDK 锁定 `CLIProxyAPI/v8 v8.1.4`，最低宿主仍为 CPA v8.0.30 / 插件 schema 6。
-保留 schema 6 注册和现有能力，不启用新版正文省略或正文修改能力。
-Alpha Search、Live/Realtime 等直接转发链没有完整的 Observer 执行授权和会话用量钩子；
-本次不为 Observer Key 开放这些接口，也不宣称其具有 Observer 实时计费或额度控制。
-CPA 原生请求保持原有语义，不需要为认证共存改造宿主。Observer 的 HTTP 额度拒绝仍为 429，
-错误 `type` 和 `code` 均为 `insufficient_quota`；其他 HTTP 拒绝语义不变。WebSocket 额度仍按轮检查：
-CPA v8.1.4 会先发 status 429 的 error 帧再断开，v8.0.30 则直接断开；客户端帧表现依宿主版本而异。
+SDK 锁定 `CLIProxyAPI/v8 v8.1.4`。HTTP 功能最低宿主仍为 CPA v8.0.30 / 插件 schema 6；
+Responses WebSocket 仅在宿主生命周期传入 `schema_version >= 7` 时启用，首个符合条件的版本是
+CPA v8.0.44。不能仅凭 v8.0.39 起始的逐轮认证能力判断支持，因为 v8.0.30–v8.0.43
+仍报告 schema 6。插件注册保持 schema 6 和现有能力，不启用新版正文省略或正文修改能力。
+管理健康信息的 `responses_websocket` 字段可用于宿主能力分支。
+
+Observer 自有生成继续使用已有模型授权、额度、并发和用量记账；额度拒绝 HTTP 响应保持 429，
+错误 `type` 与 `code` 均为 `insufficient_quota`，其他 HTTP 拒绝行为不变。支持的 CPA v8.1.4
+WebSocket 每轮额度拒绝会先向客户端发送 status 429 的 error 帧再断开；v8.0.30 及其他 schema 6
+旧宿主不支持 Observer WebSocket 握手。手工价格的轮次条件事实有界保存在内存；重启或保留上限
+裁剪后缺失时沿用 `missing_facts`，费用不猜测、不借用其他请求事实。Alpha Search、Live/Realtime
+等直接转发链没有完整的 Observer 执行授权和会话用量钩子；本次不为 Observer Key 开放这些接口，
+也不宣称其具有 Observer 实时计费或额度控制。CPA 原生请求保持原有语义，不需要为认证共存改造宿主。
 
 `native_scope_test.go` 对比启用 / 停用插件的原生生成、计数、目录与管理行为，
 核对发往假上游的正文和请求头一致，且没有 Observer 账目。
