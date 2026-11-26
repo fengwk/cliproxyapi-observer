@@ -1,4 +1,4 @@
-# Observer v1.1.4
+# Observer v1.2.0
 
 认证采用最小侵入的非独占共存：CPA 凭据保留原生行为，Observer 仅管理自己支持的
 调用，不是全路由安全网关。范围见 [认证与模型权限](docs/model-policy.md)。
@@ -18,6 +18,7 @@ Responses WebSocket 另要求宿主报告的 schema version **≥7**（首个支
 旧库只存哈希的密钥无法还原明文，重新生成后才可在列表查看；不会拿内部 ID 冒充。
 升级前请备份，安排停流维护；发布不会自动修改生产配置或删除旧数据库。
 当前能力、API、SDK 限制和安全升级/回退步骤见 [重构说明](docs/reconstruction.md)。
+Responses WebSocket、额度错误码和 SDK 升级见 [v1.2.0 发布说明](docs/release-notes-v1.2.0.md)；
 UI 路由归一化冲突与配置热更新告警修复见 [v1.1.4 发布说明](docs/release-notes-v1.1.4.md)；
 Claude 思考用量细分与零费用修复、最新 SDK 适配见 [v1.1.1 发布说明](docs/release-notes-v1.1.1.md)；
 请求体条件定价、目录兼容与 SDK 升级见 [v1.1.0 发布说明](docs/release-notes-v1.1.0.md)；
@@ -312,7 +313,7 @@ python3 scripts/test_publish_release.py
 浏览器入口见 [现有说明](internal/web/browser/README.md)，使用本地假数据和实际 Chrome，
 CI 上传报告及截图。`make build` 验证本机 c-shared；发布矩阵仍构建三个平台。
 版本通过 `internal/plugin.Version` ldflags 注入，正式版本来自 tag，开发构建为
-`1.1.4-dev+<commit>`，不取 SDK 版本。
+`1.2.0-dev+<commit>`，不取 SDK 版本。
 
 现有依赖维护策略保留：仅白名单 Go/官方 Actions 纯版本升级可经完整 CI 后自动合并，
 普通功能合并不会触发自动发版；不可变发布器校验源码、三个平台归档与校验和，

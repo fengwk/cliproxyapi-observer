@@ -1,6 +1,6 @@
 # Observer 当前开发实现说明
 
-本文件描述 v1.1.1 当前实现；`REFACTOR-next.md` 是历史需求设计，
+本文件描述 v1.2.0 当前实现；`REFACTOR-next.md` 是历史需求设计，
 v0.6/v0.7/v0.8 发布说明保留各版本历史行为。当前采用最小非独占认证共存，
 详见 [认证与模型权限](model-policy.md)，不接管 CPA 的原生凭据或实时令牌。
 
@@ -19,6 +19,7 @@ v0.6/v0.7/v0.8 发布说明保留各版本历史行为。当前采用最小非�
 | R09 可解释计费 | 共用解析器、完整身份、候选和显式映射、历史报价固定 | `internal/pricing/*test.go`、`upgrade_test.go`、设置页草稿隔离测试 |
 | R10 内容生命周期 | 三模式、独立 TTL、单 gzip、索引 FIFO/到期、清理/清空/整理 | `capture*_test.go`、`rebuild_test.go`、`acceptance_test.go`、设置页测试 |
 | R11 认证共存 | 原生凭据保留 CPA 行为；Observer 只限制、记账自己支持的调用 | `native_scope_test.go`、`native_extensions_test.go`、`gemini_test.go` |
+| R12 Responses WebSocket | 限定握手路径；逐轮授权与计费；不采集头或正文 | 真实宿主 `websocket_test.go`、`internal/engine/request_body_test.go` |
 
 测试文件位于 `internal/engine`、`internal/plugin`、`internal/pricing`、
 `web/src` 和 `tests/integration`。测试覆盖能力不等于任意部署保证；
@@ -27,7 +28,7 @@ v0.6/v0.7/v0.8 发布说明保留各版本历史行为。当前采用最小非�
 
 ## 认证范围与 SDK 限制
 
-- SDK 锁定 `CLIProxyAPI/v8 v8.0.53`，最低宿主仍为 CPA v8.0.30 / 插件 schema 6。
+- SDK 锁定 `CLIProxyAPI/v8 v8.1.4`，HTTP 最低宿主仍为 CPA v8.0.30 / 插件 schema 6。
   不启用新版正文省略/修改能力，不修改 CPA 核心。
 - 原生 Claude 的输出计数已包含思考；插件桥没有标准化细分时，只有非负原始计数、
   明确缓存桶与正的显式 total 严格守恒才恢复该子集语义。完整独立计数及其他
@@ -35,6 +36,8 @@ v0.6/v0.7/v0.8 发布说明保留各版本历史行为。当前采用最小非�
 - 识别的生成操作：POST `/v1/chat/completions`、`/v1/completions`、`/v1/messages`、
   `/v1/responses`、`/backend-api/codex/responses`，以及 Gemini
   `/v1beta/models/{model}:generateContent|streamGenerateContent`。
+- Responses WebSocket 只认领 `GET /v1/responses` 的 Upgrade 握手，最低宿主为 CPA v8.0.44
+  （宿主 schema ≥7）。每轮重新认证并单独准入和记账，不支持同一执行内的 Codex response-steering。
 - 目录读取：GET `/v1/models`、`/v1beta/models` 及合法模型详情。
   count：POST `/v1/messages/count_tokens`、Gemini `:countTokens`。
   目录/count 不准入、不预留、不采集、不记账；count 仍校验自有 Key 的模型权限。
@@ -47,7 +50,7 @@ v0.6/v0.7/v0.8 发布说明保留各版本历史行为。当前采用最小非�
   不能把无关流量一起拒绝，也不能一律返回认证成功。
 - 记账失败、漏记和异常退出不会封锁 Key。漏掉的执行不补造费用；成功入账仍保持
   原子性和去重。旧 schema3 的封锁字段和中断文件不再参与准入，不需要人工恢复。
-- 图片/音频/视频、Alpha Search、Live/Realtime、Responses WebSocket 等接口
+- 图片/音频/视频、Alpha Search、Live/Realtime 和其他 WebSocket 路径等接口
   不在 Observer Key 的认证白名单；即使 Key 配置全部模型也不通用放行。
   CPA 原生凭据继续按宿主行为访问这些接口，执行不纳入 Observer 账本。
   CPA 原生临时令牌保留签发、有效期、模型/会话绑定和通话归属；Observer 不复制
@@ -147,9 +150,10 @@ field 为 `model|key_id|provider|auth_index`，返回
 - detail 增加 `headers_status/body_status/capture_reason`、
   `captured_at/expires_at/original_bytes/compressed_bytes/price_quote`。
   保存的到期时间只会收紧，排队时亦固定上界；过期、清空或淘汰后不恢复。
-  off 限制全部历史内容读取；headers 模式从不返回旧正文。
+  off 限制全部历史内容读取；headers 模式从不返回旧正文。WebSocket 详情始终显示不支持采集。
 - `/health` 增加内容预算/压缩字节数、可回收空间、按原因丢弃、计数起点、
-  最近维护结果和维护错误。诊断丢弃不等于账单丢失。
+  最近维护结果和维护错误；`responses_websocket` 表明宿主是否允许 Observer Key 完成握手。
+  诊断丢弃不等于账单丢失。
   `/compact` 无活跃请求且采集队列空闲时执行；维护中新受管生成可重试 503。
   物理文件回收不等于磁盘安全擦除，不承诺替换后同步失败可以自动回滚。
 
@@ -177,7 +181,7 @@ preview、Snapshot、Quote 使用同一个 resolver；完整定义、原因/候�
 2. 备份**整个数据目录**与匹配旧插件二进制，并核实可读取。
    不要在线普通复制正在写入的 bbolt 文件。
 3. 确认采用认证共存策略，且 CPA/Observer 使用不同凭据。
-4. v1.1.0 使用 **schema3 / `observer_features=4`**。从 v1.0.0–v1.0.4 升级无需重建库，
+4. v1.2.0 继续使用 **schema3 / `observer_features=4`**。从 v1.0.0–v1.0.4 升级无需重建库，
    但新版打开后旧版会拒绝该库。schema2 及更早数据库仍被明确拒绝，不迁移、不双读、
    不就地补价；仅从这些旧版升级时需安排新数据库路径并重新创建 Key 与价格配置。
    发布过程不自动删除、覆盖或修改生产数据库。
@@ -201,7 +205,7 @@ make frontend
 CPA_MANAGEMENT_HTML=/absolute/temp/management.html make browser
 OBSERVER_BROWSER=1 CPA_BINARY=/absolute/temp/cpa-v8.0.30 \
   CPA_TEST_ARTIFACTS=/absolute/temp/report-30 make integration
-# 换成 cpa-v8.0.47 与独立 report-47 再执行；不沿用旧发布证据。
+# 换成 cpa-v8.1.4 与独立 report-814 再执行；不沿用旧发布证据。
 ```
 
 `load` 使用 1 万/10 万真实 gzip 元数据、36500 个日维度、并发准入，
